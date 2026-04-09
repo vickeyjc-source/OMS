@@ -1,0 +1,861 @@
+[2026-03-29T16:55:13.474Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: x.filter is not a function
+  Stack:   TypeError: x.filter is not a function
+    at YS (http://localhost:8080/assets/index-CNxpU6Yx.js:267:59721)
+    at Ad (http://localhost:8080/assets/index-CNxpU6Yx.js:38:16998)
+    at cc (http://localhost:8080/assets/index-CNxpU6Yx.js:40:3139)
+    at Mf (http://localhost:8080/assets/index-CNxpU6Yx.js:40:44804)
+    at zf (http://localhost:8080/assets/index-CNxpU6Yx.js:40:39766)
+    at uy (http://localhost:8080/assets/index-CNxpU6Yx.js:40:39694)
+    at ul (http://localhost:8080/assets/index-CNxpU6Yx.js:40:39547)
+    at jc (http://localhost:8080/assets/index-CNxpU6Yx.js:40:35914)
+    at gh (http://localhost:8080/assets/index-CNxpU6Yx.js:40:36717)
+    at pr (http://localhost:8080/assets/index-CNxpU6Yx.js:38:3274)
+  Component:
+    at YS (http://localhost:8080/assets/index-CNxpU6Yx.js:267:58719)
+    at qj (http://localhost:8080/assets/index-CNxpU6Yx.js:58:3959)
+    at Xj (http://localhost:8080/assets/index-CNxpU6Yx.js:58:7262)
+    at main
+    at div
+    at div
+    at L1 (http://localhost:8080/assets/index-CNxpU6Yx.js:248:8150)
+    at Ci (http://localhost:8080/assets/index-CNxpU6Yx.js:267:76814)
+    at qj (http://localhost:8080/assets/index-CNxpU6Yx.js:58:3959)
+    at e0 (http://localhost:8080/assets/index-CNxpU6Yx.js:58:7937)
+    at nN (http://localhost:8080/assets/index-CNxpU6Yx.js:267:77029)
+    at Zj (http://localhost:8080/assets/index-CNxpU6Yx.js:58:7321)
+    at o0 (http://localhost:8080/assets/index-CNxpU6Yx.js:67:874)
+    at D1 (http://localhost:8080/assets/index-CNxpU6Yx.js:248:5682)
+    at rN
+    at Kc (http://localhost:8080/assets/index-CNxpU6Yx.js:248:79396)
+    at Jy (http://localhost:8080/assets/index-CNxpU6Yx.js:40:95801)
+────────────────────────────────────────────────────────────────────────────────
+[2026-03-30T14:35:04.400Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: isBlocked is not defined
+  Stack:   ReferenceError: isBlocked is not defined
+    at iN (http://localhost:8080/assets/index-CEbR1eq1.js:267:57667)
+    at Od (http://localhost:8080/assets/index-CEbR1eq1.js:38:16998)
+    at Uf (http://localhost:8080/assets/index-CEbR1eq1.js:40:44030)
+    at Lf (http://localhost:8080/assets/index-CEbR1eq1.js:40:39766)
+    at vy (http://localhost:8080/assets/index-CEbR1eq1.js:40:39694)
+    at hl (http://localhost:8080/assets/index-CEbR1eq1.js:40:39547)
+    at _c (http://localhost:8080/assets/index-CEbR1eq1.js:40:35914)
+    at bh (http://localhost:8080/assets/index-CEbR1eq1.js:40:36717)
+    at vr (http://localhost:8080/assets/index-CEbR1eq1.js:38:3274)
+    at http://localhost:8080/assets/index-CEbR1eq1.js:40:34246
+  Component:
+    at iN (http://localhost:8080/assets/index-CEbR1eq1.js:267:55346)
+    at div
+    at lN (http://localhost:8080/assets/index-CEbR1eq1.js:267:71420)
+    at Gj (http://localhost:8080/assets/index-CEbR1eq1.js:58:3959)
+    at s0 (http://localhost:8080/assets/index-CEbR1eq1.js:58:7262)
+    at main
+    at div
+    at div
+    at Q1 (http://localhost:8080/assets/index-CEbR1eq1.js:248:8150)
+    at wi (http://localhost:8080/assets/index-CEbR1eq1.js:267:91534)
+    at Gj (http://localhost:8080/assets/index-CEbR1eq1.js:58:3959)
+    at i0 (http://localhost:8080/assets/index-CEbR1eq1.js:58:7937)
+    at hN (http://localhost:8080/assets/index-CEbR1eq1.js:267:91749)
+    at a0 (http://localhost:8080/assets/index-CEbR1eq1.js:58:7321)
+    at m0 (http://localhost:8080/assets/index-CEbR1eq1.js:67:874)
+    at W1 (http://localhost:8080/assets/index-CEbR1eq1.js:248:5682)
+    at pN
+    at Xc (http://localhost:8080/assets/index-CEbR1eq1.js:248:80152)
+    at nj (http://localhost:8080/assets/index-CEbR1eq1.js:40:95801)
+────────────────────────────────────────────────────────────────────────────────
+[2026-03-30T14:44:03.990Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: isBlocked is not defined
+  Stack:   ReferenceError: isBlocked is not defined
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:50212)
+    at Od (http://localhost:8080/assets/index-DfJEHtXt.js:38:16998)
+    at Wf (http://localhost:8080/assets/index-DfJEHtXt.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-DfJEHtXt.js:40:39766)
+    at gy (http://localhost:8080/assets/index-DfJEHtXt.js:40:39694)
+    at hl (http://localhost:8080/assets/index-DfJEHtXt.js:40:39547)
+    at Nc (http://localhost:8080/assets/index-DfJEHtXt.js:40:35914)
+    at jh (http://localhost:8080/assets/index-DfJEHtXt.js:40:36717)
+    at vr (http://localhost:8080/assets/index-DfJEHtXt.js:38:3274)
+    at http://localhost:8080/assets/index-DfJEHtXt.js:40:34246
+  Component:
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:47891)
+    at div
+    at sN (http://localhost:8080/assets/index-DfJEHtXt.js:267:63566)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at r0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7262)
+    at main
+    at div
+    at div
+    at $1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:8150)
+    at wi (http://localhost:8080/assets/index-DfJEHtXt.js:267:82800)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at a0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7937)
+    at cN (http://localhost:8080/assets/index-DfJEHtXt.js:267:83015)
+    at s0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7321)
+    at p0 (http://localhost:8080/assets/index-DfJEHtXt.js:67:874)
+    at F1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:5682)
+    at dN
+    at Yc (http://localhost:8080/assets/index-DfJEHtXt.js:248:79782)
+    at tj (http://localhost:8080/assets/index-DfJEHtXt.js:40:95801)
+────────────────────────────────────────────────────────────────────────────────
+[2026-03-30T14:46:43.833Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: isBlocked is not defined
+  Stack:   ReferenceError: isBlocked is not defined
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:50212)
+    at Od (http://localhost:8080/assets/index-DfJEHtXt.js:38:16998)
+    at Wf (http://localhost:8080/assets/index-DfJEHtXt.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-DfJEHtXt.js:40:39766)
+    at gy (http://localhost:8080/assets/index-DfJEHtXt.js:40:39694)
+    at hl (http://localhost:8080/assets/index-DfJEHtXt.js:40:39547)
+    at Nc (http://localhost:8080/assets/index-DfJEHtXt.js:40:35914)
+    at jh (http://localhost:8080/assets/index-DfJEHtXt.js:40:36717)
+    at vr (http://localhost:8080/assets/index-DfJEHtXt.js:38:3274)
+    at http://localhost:8080/assets/index-DfJEHtXt.js:40:34246
+  Component:
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:47891)
+    at div
+    at sN (http://localhost:8080/assets/index-DfJEHtXt.js:267:63566)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at r0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7262)
+    at main
+    at div
+    at div
+    at $1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:8150)
+    at wi (http://localhost:8080/assets/index-DfJEHtXt.js:267:82800)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at a0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7937)
+    at cN (http://localhost:8080/assets/index-DfJEHtXt.js:267:83015)
+    at s0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7321)
+    at p0 (http://localhost:8080/assets/index-DfJEHtXt.js:67:874)
+    at F1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:5682)
+    at dN
+    at Yc (http://localhost:8080/assets/index-DfJEHtXt.js:248:79782)
+    at tj (http://localhost:8080/assets/index-DfJEHtXt.js:40:95801)
+────────────────────────────────────────────────────────────────────────────────
+[2026-03-30T14:46:55.596Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: isBlocked is not defined
+  Stack:   ReferenceError: isBlocked is not defined
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:50212)
+    at Od (http://localhost:8080/assets/index-DfJEHtXt.js:38:16998)
+    at Wf (http://localhost:8080/assets/index-DfJEHtXt.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-DfJEHtXt.js:40:39766)
+    at gy (http://localhost:8080/assets/index-DfJEHtXt.js:40:39694)
+    at hl (http://localhost:8080/assets/index-DfJEHtXt.js:40:39547)
+    at Nc (http://localhost:8080/assets/index-DfJEHtXt.js:40:35914)
+    at jh (http://localhost:8080/assets/index-DfJEHtXt.js:40:36717)
+    at vr (http://localhost:8080/assets/index-DfJEHtXt.js:38:3274)
+    at http://localhost:8080/assets/index-DfJEHtXt.js:40:34246
+  Component:
+    at rN (http://localhost:8080/assets/index-DfJEHtXt.js:267:47891)
+    at div
+    at sN (http://localhost:8080/assets/index-DfJEHtXt.js:267:63566)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at r0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7262)
+    at main
+    at div
+    at div
+    at $1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:8150)
+    at wi (http://localhost:8080/assets/index-DfJEHtXt.js:267:82800)
+    at Kj (http://localhost:8080/assets/index-DfJEHtXt.js:58:3959)
+    at a0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7937)
+    at cN (http://localhost:8080/assets/index-DfJEHtXt.js:267:83015)
+    at s0 (http://localhost:8080/assets/index-DfJEHtXt.js:58:7321)
+    at p0 (http://localhost:8080/assets/index-DfJEHtXt.js:67:874)
+    at F1 (http://localhost:8080/assets/index-DfJEHtXt.js:248:5682)
+    at dN
+    at Yc (http://localhost:8080/assets/index-DfJEHtXt.js:248:79782)
+    at tj (http://localhost:8080/assets/index-DfJEHtXt.js:40:95801)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T05:49:16.423Z] CLIENT ERROR
+  URL:     http://localhost:8080/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:28801)
+    at Dd (http://localhost:8080/assets/index-D5jV3Pw4.js:38:16998)
+    at Ff (http://localhost:8080/assets/index-D5jV3Pw4.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39766)
+    at my (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39694)
+    at dl (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39547)
+    at bc (http://localhost:8080/assets/index-D5jV3Pw4.js:40:35914)
+    at xh (http://localhost:8080/assets/index-D5jV3Pw4.js:40:36717)
+    at gr (http://localhost:8080/assets/index-D5jV3Pw4.js:38:3274)
+    at http://localhost:8080/assets/index-D5jV3Pw4.js:40:34246
+  Component:
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:24647)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at tj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7262)
+    at main
+    at div
+    at div
+    at U1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:8150)
+    at Ci (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39377)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at rj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7937)
+    at cN (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39592)
+    at nj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7321)
+    at uj (http://localhost:8080/assets/index-D5jV3Pw4.js:67:874)
+    at O1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:5682)
+    at dN
+    at Jc (http://localhost:8080/assets/index-D5jV3Pw4.js:251:14280)
+    at Zy (http://localhost:8080/assets/index-D5jV3Pw4.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T05:49:18.401Z] CLIENT ERROR
+  URL:     http://localhost:8080/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:28801)
+    at Dd (http://localhost:8080/assets/index-D5jV3Pw4.js:38:16998)
+    at Ff (http://localhost:8080/assets/index-D5jV3Pw4.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39766)
+    at my (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39694)
+    at dl (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39547)
+    at bc (http://localhost:8080/assets/index-D5jV3Pw4.js:40:35914)
+    at If (http://localhost:8080/assets/index-D5jV3Pw4.js:40:34865)
+    at R (http://localhost:8080/assets/index-D5jV3Pw4.js:25:1552)
+    at MessagePort.Y (http://localhost:8080/assets/index-D5jV3Pw4.js:25:1914)
+  Component:
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:24647)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at tj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7262)
+    at main
+    at div
+    at div
+    at U1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:8150)
+    at Ci (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39377)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at rj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7937)
+    at cN (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39592)
+    at nj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7321)
+    at uj (http://localhost:8080/assets/index-D5jV3Pw4.js:67:874)
+    at O1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:5682)
+    at dN
+    at Jc (http://localhost:8080/assets/index-D5jV3Pw4.js:251:14280)
+    at Zy (http://localhost:8080/assets/index-D5jV3Pw4.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T05:49:19.210Z] CLIENT ERROR
+  URL:     http://localhost:8080/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:28801)
+    at Dd (http://localhost:8080/assets/index-D5jV3Pw4.js:38:16998)
+    at Ff (http://localhost:8080/assets/index-D5jV3Pw4.js:40:44030)
+    at Bf (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39766)
+    at my (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39694)
+    at dl (http://localhost:8080/assets/index-D5jV3Pw4.js:40:39547)
+    at bc (http://localhost:8080/assets/index-D5jV3Pw4.js:40:35914)
+    at If (http://localhost:8080/assets/index-D5jV3Pw4.js:40:34865)
+    at R (http://localhost:8080/assets/index-D5jV3Pw4.js:25:1552)
+    at MessagePort.Y (http://localhost:8080/assets/index-D5jV3Pw4.js:25:1914)
+  Component:
+    at xS (http://localhost:8080/assets/index-D5jV3Pw4.js:264:24647)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at tj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7262)
+    at main
+    at div
+    at div
+    at U1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:8150)
+    at Ci (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39377)
+    at H0 (http://localhost:8080/assets/index-D5jV3Pw4.js:58:3959)
+    at rj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7937)
+    at cN (http://localhost:8080/assets/index-D5jV3Pw4.js:272:39592)
+    at nj (http://localhost:8080/assets/index-D5jV3Pw4.js:58:7321)
+    at uj (http://localhost:8080/assets/index-D5jV3Pw4.js:67:874)
+    at O1 (http://localhost:8080/assets/index-D5jV3Pw4.js:248:5682)
+    at dN
+    at Jc (http://localhost:8080/assets/index-D5jV3Pw4.js:251:14280)
+    at Zy (http://localhost:8080/assets/index-D5jV3Pw4.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:19:37.201Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: Cannot read properties of null (reading 'size')
+  Stack:   TypeError: Cannot read properties of null (reading 'size')
+    at xS (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:264:28871)
+    at Dd (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:38:16998)
+    at Ff (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:44030)
+    at Bf (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39766)
+    at my (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39694)
+    at dl (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39547)
+    at bc (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:35914)
+    at If (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:34865)
+    at R (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:25:1552)
+    at MessagePort.Y (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:25:1914)
+  Component:
+    at xS (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:264:24647)
+    at H0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:3959)
+    at tj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7262)
+    at main
+    at div
+    at div
+    at U1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:248:8150)
+    at Ci (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:272:39377)
+    at H0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:3959)
+    at rj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7937)
+    at cN (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:272:39592)
+    at nj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7321)
+    at uj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:67:874)
+    at O1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:248:5682)
+    at dN
+    at Jc (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:251:14280)
+    at Zy (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:25:49.865Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: Cannot read properties of null (reading 'size')
+  Stack:   TypeError: Cannot read properties of null (reading 'size')
+    at xS (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:264:28871)
+    at Dd (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:38:16998)
+    at Ff (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:44030)
+    at Bf (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39766)
+    at my (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39694)
+    at dl (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:39547)
+    at bc (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:35914)
+    at xh (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:36717)
+    at gr (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:38:3274)
+    at https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:34246
+  Component:
+    at xS (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:264:24647)
+    at H0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:3959)
+    at tj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7262)
+    at main
+    at div
+    at div
+    at U1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:248:8150)
+    at Ci (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:272:39377)
+    at H0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:3959)
+    at rj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7937)
+    at cN (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:272:39592)
+    at nj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:58:7321)
+    at uj (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:67:874)
+    at O1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:248:5682)
+    at dN
+    at Jc (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:251:14280)
+    at Zy (https://feof-computation-either-providers.trycloudflare.com/assets/index-9hceZLpa.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:29.891Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at jh (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:36717)
+    at yr (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:3274)
+    at https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34246
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:31.282Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at Of (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34865)
+    at A (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1547)
+    at MessagePort.ee (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1907)
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:32.106Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at Of (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34865)
+    at A (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1547)
+    at MessagePort.ee (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1907)
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:32.706Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at Of (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34865)
+    at A (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1547)
+    at MessagePort.ee (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1907)
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:33.039Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at Of (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34865)
+    at A (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1547)
+    at MessagePort.ee (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1907)
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:37:33.334Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at Of (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34865)
+    at A (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1547)
+    at MessagePort.ee (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:25:1907)
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:38:16.673Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/orders
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:29120)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:17000)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:44030)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39766)
+    at vy (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39694)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:39547)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:35914)
+    at jh (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:36717)
+    at yr (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:38:3274)
+    at https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:34246
+  Component:
+    at CS (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:253:24976)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7262)
+    at main
+    at div
+    at div
+    at H1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39384)
+    at G0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:3959)
+    at ij (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:39599)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:58:7321)
+    at pj (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:67:874)
+    at W1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:261:41084)
+    at n0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-NPCM5oQD.js:40:95880)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-03T06:59:45.760Z] CLIENT ERROR
+  URL:     https://feof-computation-either-providers.trycloudflare.com/quotes
+  Message: isAdmin is not defined
+  Stack:   ReferenceError: isAdmin is not defined
+    at fS (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:252:29126)
+    at Bd (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:38:17020)
+    at $f (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:44058)
+    at Wf (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:39790)
+    at gy (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:39718)
+    at fl (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:39570)
+    at wc (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:35934)
+    at jh (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:36738)
+    at yr (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:38:3279)
+    at https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:34263
+  Component:
+    at fS (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:252:24980)
+    at K0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:58:3959)
+    at rj (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:58:7262)
+    at main
+    at div
+    at div
+    at $1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:248:8150)
+    at Ei (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:261:39382)
+    at K0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:58:3959)
+    at aj (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:58:7937)
+    at fN (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:261:39597)
+    at sj (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:58:7321)
+    at mj (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:67:874)
+    at F1 (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:248:5682)
+    at gN
+    at vN (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:261:41082)
+    at t0 (https://feof-computation-either-providers.trycloudflare.com/assets/index-Cv67puG8.js:40:95929)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T17:31:51.771Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-CL1MFM5-.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-CL1MFM5-.js:38:16998)
+    at $f (http://localhost:8080/assets/index-CL1MFM5-.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-CL1MFM5-.js:40:39766)
+    at yy (http://localhost:8080/assets/index-CL1MFM5-.js:40:39694)
+    at fl (http://localhost:8080/assets/index-CL1MFM5-.js:40:39547)
+    at wc (http://localhost:8080/assets/index-CL1MFM5-.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-CL1MFM5-.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-CL1MFM5-.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-CL1MFM5-.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at ij (http://localhost:8080/assets/index-CL1MFM5-.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-CL1MFM5-.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at oj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7937)
+    at yN (http://localhost:8080/assets/index-CL1MFM5-.js:291:98780)
+    at lj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7321)
+    at gj (http://localhost:8080/assets/index-CL1MFM5-.js:67:874)
+    at q1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-CL1MFM5-.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-CL1MFM5-.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T17:36:32.797Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-CL1MFM5-.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-CL1MFM5-.js:38:16998)
+    at $f (http://localhost:8080/assets/index-CL1MFM5-.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-CL1MFM5-.js:40:39766)
+    at yy (http://localhost:8080/assets/index-CL1MFM5-.js:40:39694)
+    at fl (http://localhost:8080/assets/index-CL1MFM5-.js:40:39547)
+    at wc (http://localhost:8080/assets/index-CL1MFM5-.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-CL1MFM5-.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-CL1MFM5-.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-CL1MFM5-.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at ij (http://localhost:8080/assets/index-CL1MFM5-.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-CL1MFM5-.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at oj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7937)
+    at yN (http://localhost:8080/assets/index-CL1MFM5-.js:291:98780)
+    at lj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7321)
+    at gj (http://localhost:8080/assets/index-CL1MFM5-.js:67:874)
+    at q1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-CL1MFM5-.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-CL1MFM5-.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T17:40:14.751Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-CL1MFM5-.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-CL1MFM5-.js:38:16998)
+    at $f (http://localhost:8080/assets/index-CL1MFM5-.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-CL1MFM5-.js:40:39766)
+    at yy (http://localhost:8080/assets/index-CL1MFM5-.js:40:39694)
+    at fl (http://localhost:8080/assets/index-CL1MFM5-.js:40:39547)
+    at wc (http://localhost:8080/assets/index-CL1MFM5-.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-CL1MFM5-.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-CL1MFM5-.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-CL1MFM5-.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at ij (http://localhost:8080/assets/index-CL1MFM5-.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-CL1MFM5-.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at oj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7937)
+    at yN (http://localhost:8080/assets/index-CL1MFM5-.js:291:98780)
+    at lj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7321)
+    at gj (http://localhost:8080/assets/index-CL1MFM5-.js:67:874)
+    at q1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-CL1MFM5-.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-CL1MFM5-.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T17:41:48.631Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-CL1MFM5-.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-CL1MFM5-.js:38:16998)
+    at $f (http://localhost:8080/assets/index-CL1MFM5-.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-CL1MFM5-.js:40:39766)
+    at yy (http://localhost:8080/assets/index-CL1MFM5-.js:40:39694)
+    at fl (http://localhost:8080/assets/index-CL1MFM5-.js:40:39547)
+    at wc (http://localhost:8080/assets/index-CL1MFM5-.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-CL1MFM5-.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-CL1MFM5-.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-CL1MFM5-.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-CL1MFM5-.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at ij (http://localhost:8080/assets/index-CL1MFM5-.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-CL1MFM5-.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-CL1MFM5-.js:58:3959)
+    at oj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7937)
+    at yN (http://localhost:8080/assets/index-CL1MFM5-.js:291:98780)
+    at lj (http://localhost:8080/assets/index-CL1MFM5-.js:58:7321)
+    at gj (http://localhost:8080/assets/index-CL1MFM5-.js:67:874)
+    at q1 (http://localhost:8080/assets/index-CL1MFM5-.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-CL1MFM5-.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-CL1MFM5-.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T17:59:05.609Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-B5yPuWIF.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-B5yPuWIF.js:38:16998)
+    at $f (http://localhost:8080/assets/index-B5yPuWIF.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-B5yPuWIF.js:40:39766)
+    at yy (http://localhost:8080/assets/index-B5yPuWIF.js:40:39694)
+    at fl (http://localhost:8080/assets/index-B5yPuWIF.js:40:39547)
+    at wc (http://localhost:8080/assets/index-B5yPuWIF.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-B5yPuWIF.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-B5yPuWIF.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-B5yPuWIF.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at ij (http://localhost:8080/assets/index-B5yPuWIF.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-B5yPuWIF.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at oj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7937)
+    at yN (http://localhost:8080/assets/index-B5yPuWIF.js:291:98780)
+    at lj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7321)
+    at gj (http://localhost:8080/assets/index-B5yPuWIF.js:67:874)
+    at q1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-B5yPuWIF.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-B5yPuWIF.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T18:16:08.587Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-B5yPuWIF.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-B5yPuWIF.js:38:16998)
+    at $f (http://localhost:8080/assets/index-B5yPuWIF.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-B5yPuWIF.js:40:39766)
+    at yy (http://localhost:8080/assets/index-B5yPuWIF.js:40:39694)
+    at fl (http://localhost:8080/assets/index-B5yPuWIF.js:40:39547)
+    at wc (http://localhost:8080/assets/index-B5yPuWIF.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-B5yPuWIF.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-B5yPuWIF.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-B5yPuWIF.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at ij (http://localhost:8080/assets/index-B5yPuWIF.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-B5yPuWIF.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at oj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7937)
+    at yN (http://localhost:8080/assets/index-B5yPuWIF.js:291:98780)
+    at lj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7321)
+    at gj (http://localhost:8080/assets/index-B5yPuWIF.js:67:874)
+    at q1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-B5yPuWIF.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-B5yPuWIF.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────
+[2026-04-08T18:16:15.717Z] CLIENT ERROR
+  URL:     http://localhost:8080/procurement-bin
+  Message: fmtAmt is not defined
+  Stack:   ReferenceError: fmtAmt is not defined
+    at http://localhost:8080/assets/index-B5yPuWIF.js:291:38336
+    at Array.map (<anonymous>)
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:37210)
+    at Bd (http://localhost:8080/assets/index-B5yPuWIF.js:38:16998)
+    at $f (http://localhost:8080/assets/index-B5yPuWIF.js:40:44030)
+    at Wf (http://localhost:8080/assets/index-B5yPuWIF.js:40:39766)
+    at yy (http://localhost:8080/assets/index-B5yPuWIF.js:40:39694)
+    at fl (http://localhost:8080/assets/index-B5yPuWIF.js:40:39547)
+    at wc (http://localhost:8080/assets/index-B5yPuWIF.js:40:35914)
+    at Nh (http://localhost:8080/assets/index-B5yPuWIF.js:40:36717)
+  Component:
+    at uN (http://localhost:8080/assets/index-B5yPuWIF.js:291:32270)
+    at div
+    at pN (http://localhost:8080/assets/index-B5yPuWIF.js:291:63314)
+    at div
+    at mN (http://localhost:8080/assets/index-B5yPuWIF.js:291:75940)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at ij (http://localhost:8080/assets/index-B5yPuWIF.js:58:7262)
+    at main
+    at div
+    at div
+    at K1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:8150)
+    at Pi (http://localhost:8080/assets/index-B5yPuWIF.js:291:98565)
+    at Y0 (http://localhost:8080/assets/index-B5yPuWIF.js:58:3959)
+    at oj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7937)
+    at yN (http://localhost:8080/assets/index-B5yPuWIF.js:291:98780)
+    at lj (http://localhost:8080/assets/index-B5yPuWIF.js:58:7321)
+    at gj (http://localhost:8080/assets/index-B5yPuWIF.js:67:874)
+    at q1 (http://localhost:8080/assets/index-B5yPuWIF.js:248:5682)
+    at jN
+    at bN (http://localhost:8080/assets/index-B5yPuWIF.js:291:100265)
+    at s0 (http://localhost:8080/assets/index-B5yPuWIF.js:40:95875)
+────────────────────────────────────────────────────────────────────────────────

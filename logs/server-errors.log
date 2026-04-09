@@ -1,0 +1,138 @@
+[2026-03-29T14:37:34.138Z] POST /api/quotes/7c7d67e8-cbdb-4337-855a-9a37cf15e0be/revise
+  error: duplicate key value violates unique constraint "quotes_quote_no_key"
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:460:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:52:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-03-29T14:37:34.143Z] [ERROR] POST /api/quotes/7c7d67e8-cbdb-4337-855a-9a37cf15e0be/revise duplicate key value violates unique constraint "quotes_quote_no_key"
+[2026-03-29T14:37:42.392Z] POST /api/quotes/7c7d67e8-cbdb-4337-855a-9a37cf15e0be/revise
+  error: duplicate key value violates unique constraint "quotes_quote_no_key"
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:460:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:52:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-03-29T14:37:42.393Z] [ERROR] POST /api/quotes/7c7d67e8-cbdb-4337-855a-9a37cf15e0be/revise duplicate key value violates unique constraint "quotes_quote_no_key"
+[2026-03-29T16:55:13.473Z] [CLIENT ERROR] x.filter is not a function
+[2026-03-30T09:26:32.063Z] PUT /api/orders/CFOR0001
+  error: bind message supplies 8 parameters, but prepared statement "" requires 9
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:729:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:52:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-03-30T09:26:32.065Z] [ERROR] PUT /api/orders/CFOR0001 bind message supplies 8 parameters, but prepared statement "" requires 9
+[2026-03-30T13:14:03.971Z] POST /api/finance-queue/repair
+  error: operator does not exist: integer = boolean
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:1207:19
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:60:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-03-30T13:14:03.974Z] [ERROR] POST /api/finance-queue/repair operator does not exist: integer = boolean
+[2026-03-30T13:54:16.029Z] [db] Finance queue backfill error: operator does not exist: integer = boolean
+[2026-03-30T14:35:04.404Z] [CLIENT ERROR] isBlocked is not defined
+[2026-03-30T14:44:03.992Z] [CLIENT ERROR] isBlocked is not defined
+[2026-03-30T14:46:43.837Z] [CLIENT ERROR] isBlocked is not defined
+[2026-03-30T14:46:55.599Z] [CLIENT ERROR] isBlocked is not defined
+[2026-04-03T05:26:21.071Z] POST /api/quotes/07b5adab-a531-413f-bd5e-3777d606a583/revise
+  error: column "updated_at" of relation "quotes" does not exist
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:540:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:60:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-04-03T05:26:21.074Z] [ERROR] POST /api/quotes/07b5adab-a531-413f-bd5e-3777d606a583/revise column "updated_at" of relation "quotes" does not exist
+[2026-04-03T05:26:29.130Z] POST /api/quotes/07b5adab-a531-413f-bd5e-3777d606a583/revise
+  error: column "updated_at" of relation "quotes" does not exist
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:540:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:60:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-04-03T05:26:29.131Z] [ERROR] POST /api/quotes/07b5adab-a531-413f-bd5e-3777d606a583/revise column "updated_at" of relation "quotes" does not exist
+[2026-04-03T05:49:16.431Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T05:49:18.404Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T05:49:19.213Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:19:35.885Z] [CLIENT ERROR] Cannot read properties of null (reading 'size')
+[2026-04-03T06:25:48.574Z] [CLIENT ERROR] Cannot read properties of null (reading 'size')
+[2026-04-03T06:37:28.597Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:37:29.983Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:37:30.761Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:37:31.366Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:37:31.743Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:37:32.036Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:38:15.343Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-03T06:59:44.487Z] [CLIENT ERROR] isAdmin is not defined
+[2026-04-04T13:31:53.503Z] PUT /api/supplier-orders/918fafc0
+  error: invalid input syntax for type numeric: ""
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:1045:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:60:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-04-04T13:31:53.505Z] [ERROR] PUT /api/supplier-orders/918fafc0 invalid input syntax for type numeric: ""
+[2026-04-04T13:32:02.288Z] PUT /api/supplier-orders/918fafc0
+  error: invalid input syntax for type numeric: ""
+    at C:\ciflux-oms\node_modules\pg-pool\index.js:45:11
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at process.runNextTicks [as _tickCallback] (node:internal/process/task_queues:68:3)
+    at module.exports.loopWhile (C:\ciflux-oms\node_modules\deasync\index.js:70:11)
+    at C:\ciflux-oms\server\db.js:77:13
+    at C:\ciflux-oms\server\index.js:1045:3
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+    at next (C:\ciflux-oms\node_modules\express\lib\router\route.js:149:13)
+    at auth (C:\ciflux-oms\server\index.js:60:33)
+    at Layer.handle [as handle_request] (C:\ciflux-oms\node_modules\express\lib\router\layer.js:95:5)
+
+[2026-04-04T13:32:02.288Z] [ERROR] PUT /api/supplier-orders/918fafc0 invalid input syntax for type numeric: ""
+[2026-04-08T17:31:51.777Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T17:36:32.801Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T17:40:14.755Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T17:41:48.634Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T17:59:05.613Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T18:16:08.591Z] [CLIENT ERROR] fmtAmt is not defined
+[2026-04-08T18:16:15.720Z] [CLIENT ERROR] fmtAmt is not defined
