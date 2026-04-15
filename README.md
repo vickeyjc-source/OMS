@@ -1,5 +1,5 @@
 # ⚡ Ciflux OMS — Order Management System
-### Electronic Component Trading · React + Node.js + SQLite
+### Electronic Component Trading · React + Node.js + PostgreSQL
 
 ---
 
@@ -9,12 +9,12 @@ A full-stack, multi-user Order Management System built for electronic component 
 Runs entirely on your **local LAN** — no internet required after setup.
 
 **Tech Stack:**
-| Layer    | Technology                        |
-|----------|-----------------------------------|
+| Layer    | Technology                             |
+|----------|----------------------------------------|
 | Frontend | React 18, React Router, TanStack Query |
-| Backend  | Node.js + Express                 |
-| Database | SQLite (via `better-sqlite3`)     |
-| Auth     | Express Sessions + bcrypt         |
+| Backend  | Node.js + Express                      |
+| Database | PostgreSQL                             |
+| Auth     | Express Sessions + JWT + bcrypt        |
 
 ---
 
@@ -37,153 +37,135 @@ Runs entirely on your **local LAN** — no internet required after setup.
 
 ---
 
-## Prerequisites
+## Developer Setup (After Cloning)
 
-You need **Node.js** installed on the server PC. Nothing else.
+### Prerequisites
 
-1. Go to **https://nodejs.org**
-2. Download the **LTS** version (e.g. v20.x)
-3. Install it — tick **"Add to PATH"** during installation
-4. Verify: open Command Prompt → type `node --version`
+| Tool | Mac | Windows |
+|------|-----|---------|
+| Node.js v18+ | https://nodejs.org | https://nodejs.org (tick "Add to PATH") |
+| PostgreSQL v14+ | `brew install postgresql@14` | https://postgresql.org |
 
 ---
 
-## Installation & First Run
+### Mac
+
+```bash
+# 1. Start PostgreSQL
+brew services start postgresql@14
+
+# 2. Create DB (run once)
+psql postgres -c "CREATE USER ciflux WITH PASSWORD 'ciflux_pass';"
+psql postgres -c "CREATE DATABASE ciflux_oms OWNER ciflux;"
+psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE ciflux_oms TO ciflux;"
+
+# 3. Create .env file in project root
+echo "PORT=8080
+PG_HOST=localhost
+PG_PORT=5432
+PG_DB=ciflux_oms
+PG_USER=ciflux
+PG_PASSWORD=ciflux_pass" > .env
+
+# 4. Install dependencies
+npm install && cd client && npm install && cd ..
+
+# 5. Build frontend
+cd client && npm run build && cd ..
+
+# 6. Start
+npm run dev
+```
+
+Open → **http://localhost:8080**
+
+---
 
 ### Windows
 
-```
-1. Copy the entire "ciflux-oms" folder to your PC
-   e.g. C:\CifluxOMS\
+Open **Command Prompt** (or PowerShell) and run:
 
-2. Double-click:  START_SERVER.bat
-
-   First run will:
-   - Install Node.js packages (~1 min)
-   - Build the React app (~2 min)
-   - Start the server
-
-3. Open browser → http://localhost:8080
+```bat
+REM 1. Create DB (run once, PostgreSQL must be running)
+psql -U postgres -c "CREATE USER ciflux WITH PASSWORD 'ciflux_pass';"
+psql -U postgres -c "CREATE DATABASE ciflux_oms OWNER ciflux;"
+psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE ciflux_oms TO ciflux;"
 ```
 
-### Linux / Mac
-
-```bash
-cd ciflux-oms
-chmod +x start.sh
-./start.sh
+Create a file `.env` in the project root:
+```
+PORT=8080
+PG_HOST=localhost
+PG_PORT=5432
+PG_DB=ciflux_oms
+PG_USER=ciflux
+PG_PASSWORD=ciflux_pass
 ```
 
-### Manual (any OS)
-
-```bash
-# Step 1 — Install all packages
+Then:
+```bat
 npm install
 cd client && npm install && cd ..
-
-# Step 2 — Build React frontend
 cd client && npm run build && cd ..
-
-# Step 3 — Start the server
-node server/index.js
+npm run dev
 ```
+
+Open → **http://localhost:8080**
 
 ---
 
-## LAN Access (Multi-User)
+## Commands
 
-Once the server is running on one PC, **all other computers on the same network** can use it.
-
-### Find your server PC's IP address
-
-**Windows:**
-```
-Press Win+R → type cmd → press Enter
-Type: ipconfig
-Look for: IPv4 Address . . . . . : 192.168.x.x
-```
-
-**Linux/Mac:**
 ```bash
-hostname -I
-# or
-ip addr show
-```
-
-### Share with your team
-
-Tell everyone to open their browser and go to:
-```
-http://192.168.1.10:8080
-```
-(replace with your actual IP)
-
-| Device | Works? |
-|--------|--------|
-| Windows PC | ✅ Chrome, Edge, Firefox |
-| Mac | ✅ Chrome, Safari, Firefox |
-| Android phone | ✅ Chrome |
-| iPhone | ✅ Safari, Chrome |
-| Linux | ✅ Any browser |
-
-### Windows Firewall
-
-The first time you run the server, Windows will ask:
-> *"Do you want to allow Node.js through the firewall?"*
-
-Click **"Allow Access"** — this lets other LAN users connect.
-
-If you missed it:
-```
-Control Panel → Windows Defender Firewall
-→ Allow an app through firewall
-→ Add: node.exe (usually C:\Program Files\nodejs\node.exe)
-→ Check both Private and Public
+npm run dev        # ▶  Start backend + frontend together
+npm run stop       # ■  Stop everything
+npm run backend    # ▶  Backend only  → http://localhost:8080
+npm run ui         # ▶  Frontend only → http://localhost:3000  (hot reload)
 ```
 
 ---
 
 ## Default Login Accounts
 
-| Username | Password  | Role        | Access |
-|----------|-----------|-------------|--------|
-| admin    | admin123  | Admin       | Full access + user management |
-| manager  | pass123   | Manager     | All orders, create/edit |
-| sales    | pass123   | Sales       | Own orders only, create/edit |
-| ops      | pass123   | Operations  | Own orders, update shipping |
+> Created automatically on first run. **Change passwords after first login.**
 
-> ⚠️ **Change passwords after first login** via User Management → Edit User
-
----
-
-## Auto-Start on Boot (Windows)
-
-To have the server start automatically when the PC turns on:
-
-1. Press `Win + R` → type `shell:startup` → press Enter
-2. Right-click in the folder → **New → Shortcut**
-3. Location: `C:\CifluxOMS\START_SERVER.bat`
-4. Name it: `Ciflux OMS`
-5. Click Finish
-
-Now it starts automatically every time Windows boots.
+| Username | Password | Role | Department |
+|----------|----------|------|------------|
+| `admin` | `admin123` | Admin | Management |
+| `manager` | `pass123` | Manager | Management |
+| `sales1` | `pass123` | User | Sales |
+| `sourcing1` | `pass123` | User | Sourcing |
+| `procure1` | `pass123` | User | Procurement |
+| `accounts1` | `pass123` | User | Accounts |
+| `approver1` | `pass123` | User | Approvers |
 
 ---
 
-## Database
+## Reset Database (Clean Slate)
 
-The database is a single file: `ciflux_oms.db` in the project root.
+```bash
+npm run stop
 
-**It is created automatically on first run.**
+psql postgres -c "DROP DATABASE IF EXISTS ciflux_oms;"
+psql postgres -c "DROP USER IF EXISTS ciflux;"
+psql postgres -c "CREATE USER ciflux WITH PASSWORD 'ciflux_pass';"
+psql postgres -c "CREATE DATABASE ciflux_oms OWNER ciflux;"
+psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE ciflux_oms TO ciflux;"
 
-| Action | How |
-|--------|-----|
-| **Backup** | Copy `ciflux_oms.db` to a USB / Google Drive |
-| **Restore** | Replace `ciflux_oms.db` with your backup copy |
-| **Reset/Fresh start** | Delete `ciflux_oms.db` — it will be recreated with demo data |
-| **View raw data** | Use [DB Browser for SQLite](https://sqlitebrowser.org) (free) |
+npm run dev   # schema + demo data seeded automatically
+```
 
-**Recommended: Back up `ciflux_oms.db` daily.**
+---
+
+## LAN Access (Multi-User)
+
+Once the server is running, all PCs on the same network can use it.
+
+**Find your IP:**
+- Mac/Linux: `ipconfig getifaddr en0`
+- Windows: `ipconfig` → look for IPv4 Address
+
+Tell teammates to open: `http://YOUR-IP:8080`
 
 ---
 
@@ -191,37 +173,22 @@ The database is a single file: `ciflux_oms.db` in the project root.
 
 ```
 ciflux-oms/
-│
 ├── server/
-│   ├── index.js          ← Express API server (all routes)
-│   └── db.js             ← SQLite schema, seed data, helpers
+│   ├── index.js        ← Express API (all routes)
+│   └── db.js           ← PostgreSQL schema, seed data, helpers
 │
 ├── client/
-│   ├── public/
-│   │   └── index.html
 │   └── src/
-│       ├── pages/
-│       │   ├── DashboardPage.js
-│       │   ├── OrdersPage.js      ← Order list + full detail modal
-│       │   ├── NewOrderPage.js    ← Create order wizard
-│       │   ├── CustomersPage.js
-│       │   ├── SuppliersPage.js   ← With line card assignment
-│       │   ├── LineCardsPage.js
-│       │   ├── UsersPage.js
-│       │   ├── ReportsPage.js
-│       │   └── LoginPage.js
-│       ├── components/
-│       │   └── Layout.js          ← Sidebar + navigation
-│       ├── context/
-│       │   └── AuthContext.js     ← Login state management
+│       ├── pages/      ← All page components
+│       ├── components/ ← Layout, ErrorBoundary
+│       ├── context/    ← AuthContext
 │       └── utils/
-│           ├── api.js             ← Axios API client
-│           └── helpers.js         ← Formatters, badges, constants
+│           ├── api.js      ← Axios client
+│           └── helpers.js  ← Formatters, constants
 │
-├── ciflux_oms.db          ← SQLite database (auto-created)
-├── package.json           ← Server dependencies
-├── START_SERVER.bat        ← Windows one-click launcher
-└── start.sh               ← Linux/Mac launcher
+├── .env                ← Create this manually (not in git)
+├── package.json        ← Server deps + npm scripts
+└── client/package.json ← Frontend deps
 ```
 
 ---
@@ -259,36 +226,27 @@ All endpoints require login (session cookie).
 
 | Problem | Solution |
 |---------|----------|
-| `node` not found | Install Node.js from nodejs.org, restart CMD |
-| Port 8080 in use | Edit `server/index.js` line `const PORT = 8080` → change to 3000 or 9090 |
-| LAN users can't connect | Check Windows Firewall — allow Node.js |
-| White screen / blank page | Run `cd client && npm run build` again |
-| "Cannot find module" | Run `npm install` in project root and in `client/` |
-| DB errors | Delete `ciflux_oms.db` and restart — fresh DB will be created |
-| Slow first load | Normal — React build loads once, then cached |
+| `pg_isready` fails | `brew services start postgresql@14` (Mac) |
+| `ECONNREFUSED` on start | PostgreSQL not running — start it first |
+| `invalid credentials` on login | DB not seeded — see Reset section above |
+| Port 8080 in use | `npm run stop` then retry |
+| `deasync` error | `npm rebuild deasync` from project root |
+| White screen | `cd client && npm run build && cd ..` |
+| `Cannot find module` | `npm install` in root and `cd client && npm install` |
+| Port changed | Edit `.env` → `PORT=9090` |
 
 ---
 
-## Changing the Port
+## Customisation
 
-Edit `server/index.js`:
-```js
-const PORT = process.env.PORT || 8080;  // change 8080 to any free port
-```
-
----
-
-## Support & Customisation
-
-The code is fully open and modifiable:
-- Add new fields to any form → edit the relevant page in `client/src/pages/`
-- Add new API routes → edit `server/index.js`
-- Change the database schema → edit `server/db.js`
-- Reskin the UI → edit `client/src/index.css`
+| What | Where |
+|------|-------|
+| Add/edit a page | `client/src/pages/` |
+| Add API routes | `server/index.js` |
+| Change DB schema | `server/db.js` → `createSchema()` |
+| Reskin UI | `client/src/index.css` |
+| Change port | `.env` → `PORT=9090` |
 
 ---
 
-*Built with React · Node.js · SQLite · Runs on any LAN*
-"# updatedOMS" 
-"# updatedOMS" 
-"# updatedOMS" 
+*Built with React · Node.js · PostgreSQL*
