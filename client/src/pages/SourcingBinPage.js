@@ -123,171 +123,121 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
     return { rows, totalSrcValue, totalQuoteValue, totalGrossMargin, grossMarginPct, addlCost, totalNetMargin, netMarginPct };
   }, [srcRows, quoteRows, charges, enq.items]);
-const handleSave = async (mode) => {
-  // Validate lead time mandatory when sending to Quote Bin
-  if (mode === 'quote' || mode === 'return_revision') {
-    for (let i = 0; i < srcRows.length; i++) {
-      const item = enq.items?.[i];
-      const lt = (srcRows[i].lead_time || '').toString().trim();
-      if (!lt || lt === '0' || lt === '0 Days' || lt === '0 Weeks' || lt === '0 Months') {
-        toast.error(`Lead Time is required for "${item?.component || 'item ' + (i+1)}"`);
-        return;
-      }
-    }
-  }
 
-  setSaving(true);
-  setSaveMode(mode);
-
-  try {
-    const rowsToSave = srcRows.map((r) => {
-      const qrow =
-        quoteRows.find(q => q.enquiry_item_id === r.enquiry_item_id) ||
-        quoteRows.find(q => !q.enquiry_item_id);
-
-      const qp = qrow?.quote_price;
-
-      return {
-        ...r,
-        id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()),
-        quote_price: (qp !== '' && qp != null) ? qp : null,
-        quote_currency: qrow?.quote_currency || 'INR',
-        tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null)
-          ? Number(qrow.tax_rate)
-          : null,
-        sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null,
-      };
-    });
-
-    const newStatus =
-      mode === 'quote'
-        ? 'quoted'
-        : 'sourcing';
-
-    const action =
-      mode === 'quote'
-        ? 'Sent to Quote Bin'
-        : mode === 'draft'
-        ? 'Saved as draft in Sourcing'
-        : 'Sourcing saved';
-
-    // 1. Save enquiry
-    await api.put(`/enquiries/${enq.id}`, {
-      sourcing: rowsToSave,
-      charges,
-      status: newStatus,
-      assigned_to: assignTo || null,
-      _action: action,
-    });
-
-    // 2. Quote / Revision Handling
+  const handleSave = async (mode) => {
+    // Validate lead time mandatory when sending to Quote Bin
     if (mode === 'quote' || mode === 'return_revision') {
-
-      const srcSummary = rowsToSave
-        .map((r, idx) => {
-          const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx];
-          if (!item) return null;
-
-          const qp = r.quote_price;
-          const qc = r.quote_currency || 'INR';
-
-          const srcNote = srcRevNotes[r.enquiry_item_id]
-            ? ` | Note: ${srcRevNotes[r.enquiry_item_id]}`
-            : '';
-
-          return `${item.component}: Quote ${qc} ${qp || '—'} | Src ${r.sourced_currency} ${r.sourced_price || '—'} | Qty ${item.quantity}${srcNote}`;
-        })
-        .filter(Boolean)
-        .join('\n');
-
-      const addlNote =
-        (Number(charges.customs) || 0) +
-        (Number(charges.handling) || 0) +
-        (Number(charges.freight) || 0) > 0
-          ? `\nAdditional charges: Customs ${charges.customs || 0}, Handling ${charges.handling || 0}, Freight ${charges.freight || 0}, Bank ${charges.bank || 0} ${charges.currency || 'INR'}`
-          : '';
-
-      const fullNotes = srcSummary + addlNote;
-
-      // ✅ REVISION FLOW
-      if (mode === 'return_revision') {
-        try {
-          await api.post('/quotes/' + pendingRevision.id + '/revise', {
-            sales_revision_notes: fullNotes
-          });
-
-          toast.success(
-            '✅ Prices updated — ' +
-            pendingRevision.quote_no +
-            ' returned to Quote Bin!'
-          );
-        } catch (e) {
-          toast.error(
-            'Failed to update revision quote: ' +
-            (e.response?.data?.error || e.message)
-          );
+      for (let i = 0; i < srcRows.length; i++) {
+        const item = enq.items?.[i];
+        const lt = (srcRows[i].lead_time || '').toString().trim();
+        if (!lt || lt === '0' || lt === '0 Days' || lt === '0 Weeks' || lt === '0 Months') {
+          toast.error(`Lead Time is required for "${item?.component || 'item ' + (i+1)}"`);
+          return;
         }
       }
-
-      // ✅ NEW QUOTE
-      else if (mode === 'quote') {
-
-  // 🚫 Prevent duplicate quote creation for same enquiry
-  const existingQuote = quotes.find(q => 
-    q.enquiry_id === enq.id && q.status !== 'superseded'
-  );
-
-  if (existingQuote) {
-    toast.success('Quote already exists — using existing flow');
-    return;
-  }
-
-  const quoteNo =
-    'QT-' +
-    enq.id.replace(/[^0-9]/g, '').padStart(3, '0') +
-    '-' +
-    Date.now().toString().slice(-4);
-
-  try {
-    await api.post('/quotes', {
-      enquiry_id: enq.id,
-      customer_id: enq.customer_id,
-      quote_no: quoteNo,
-      zoho_quote_no: '',
-      file_ref: '',
-      valid_until: '',
-      status: 'active',
-      notes: fullNotes,
-    });
-
-    toast.success('✅ Sent to Quote Bin! Quote ' + quoteNo + ' created.');
-
-  } catch (qErr) {
-    console.warn('Quote auto-create skipped:', qErr.response?.data?.error);
-    toast.success('Sourcing saved — check Quote Bin');
-  }
-}
     }
+    setSaving(true); setSaveMode(mode);
+    try {
+      const rowsToSave = srcRows.map((r) => {
+        // Match by enquiry_item_id — not by array index — to avoid mismatch
+        const qrow = quoteRows.find(q => q.enquiry_item_id === r.enquiry_item_id)
+                  || quoteRows.find(q => !q.enquiry_item_id); // fallback single-item
+        const qp = qrow?.quote_price;
+        return {
+          ...r,
+          id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()),
+          quote_price:             (qp !== '' && qp != null) ? qp : null,
+          quote_currency:          qrow?.quote_currency || 'INR',
+          tax_rate:                (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null,
+          sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null,
+        };
+      });
 
-    else if (mode === 'draft') {
-      toast.success('Saved as draft — stays in Sourcing Bin');
+      const newStatus = (mode === 'quote' || mode === 'return_revision') ? 'quoted' : mode === 'draft' ? 'sourcing' : 'sourcing';
+      const action    = mode === 'quote' ? 'Sent to Quote Bin' : mode === 'draft' ? 'Saved as draft in Sourcing' : 'Sourcing saved';
+
+      // 1. Save sourcing data back to the enquiry
+      await api.put(`/enquiries/${enq.id}`, {
+        sourcing:    rowsToSave,
+        charges,
+        status:      newStatus,
+        assigned_to: assignTo || null,
+        _action:     action,
+      });
+
+      // 2. When sending to Quote Bin
+      if (mode === 'quote' || mode === 'return_revision') {
+        // Build notes summary with sourcing details
+        const srcSummary = rowsToSave
+          .map((r, idx) => {
+            const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx];
+            if (!item) return null;
+            const qp = r.quote_price;
+            const qc = r.quote_currency || 'INR';
+            const srcNote = srcRevNotes[r.enquiry_item_id] ? ` | Note: ${srcRevNotes[r.enquiry_item_id]}` : '';
+            return `${item.component}: Quote ${qc} ${qp || '—'} | Src ${r.sourced_currency} ${r.sourced_price || '—'} | Qty ${item.quantity}${srcNote}`;
+          })
+          .filter(Boolean)
+          .join('\n');
+
+        const addlNote = (Number(charges.customs)||0) + (Number(charges.handling)||0) + (Number(charges.freight)||0) > 0
+          ? `\nAdditional charges: Customs ${charges.customs||0}, Handling ${charges.handling||0}, Freight ${charges.freight||0}, Bank ${charges.bank||0} ${charges.currency||'INR'}`
+          : '';
+
+        const fullNotes = srcSummary + addlNote;
+
+        if (mode === 'return_revision' && pendingRevision) {
+          // Revision workflow: update the existing revision quote with new pricing notes
+          try {
+            await api.put('/quotes/' + pendingRevision.id, {
+              quote_no:      pendingRevision.quote_no,
+              zoho_quote_no: pendingRevision.zoho_quote_no || '',
+              file_ref:      pendingRevision.file_ref || '',
+              valid_until:   pendingRevision.valid_until || '',
+              status:        'active',
+              notes:         fullNotes,
+            });
+            toast.success('✅ Prices updated — ' + pendingRevision.quote_no + ' returned to Quote Bin!');
+          } catch(e) {
+            toast.error('Failed to update revision quote: ' + (e.response?.data?.error || e.message));
+          }
+        } else {
+          // Standard workflow: create a new Quote record
+          // FIX: replaced timestamp suffix (collision-prone) with sequential counter per enquiry
+          // quotes prop is in scope — count existing quotes for this enquiry to get next seq
+          const existingForEnq = (quotes||[]).filter(q => q.enquiry_id === enq.id);
+          const nextSeq = existingForEnq.length + 1;
+          const enqNum  = enq.id.replace(/[^0-9]/g, '').padStart(3, '0');
+          const quoteNo = 'QT-' + enqNum + '-' + String(nextSeq).padStart(3, '0');
+          try {
+            await api.post('/quotes', {
+              enquiry_id:    enq.id,
+              customer_id:   enq.customer_id,
+              quote_no:      quoteNo,
+              zoho_quote_no: '',
+              file_ref:      '',
+              valid_until:   '',
+              status:        'active',
+              notes:         fullNotes,
+            });
+            toast.success('✅ Sent to Quote Bin! Quote ' + quoteNo + ' created.');
+          } catch (qErr) {
+            console.warn('Quote auto-create skipped:', qErr.response?.data?.error);
+            toast.success('Sourcing saved — check Quote Bin');
+          }
+        }
+      } else if (mode === 'draft') {
+        toast.success('Saved as draft — stays in Sourcing Bin');
+      } else {
+        toast.success('Sourcing saved');
+      }
+      onSaved();
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Save failed');
+    } finally {
+      setSaving(false); setSaveMode('');
     }
-
-    else {
-      toast.success('Sourcing saved');
-    }
-
-    onSaved();
-
-  } catch (e) {
-    toast.error(e.response?.data?.error || 'Save failed');
-  }
-
-  finally {
-    setSaving(false);
-    setSaveMode('');
-  }
-};
+  };
 
   const md = marginData;
 
@@ -795,11 +745,12 @@ const handleSave = async (mode) => {
 
 // ── Main Sourcing Bin Page ───────────────────────────────────
 export default function SourcingBinPage() {
-  const [tab, setTab] = useState('sourcing');
   const qc = useQueryClient();
   const [selected, setSelected]         = useState(null);
   const [search, setSearch]             = useState('');
   const [priorityFilter, setPriorityFilter] = useState('all');
+  // ADDED: status filter — All / New (sourcing) / Moved to Quote (quoted)
+  const [statusFilter, setStatusFilter]     = useState('all');
   const [markedForDelete, setMarkedForDelete] = useState(new Set());
   const [expandedCards, setExpandedCards] = useState(new Set());
   const { user } = useAuth();
@@ -818,29 +769,21 @@ export default function SourcingBinPage() {
   // An enquiry is "done" in sourcing if: status='sourcing' BUT a revision quote
   // (revision > 1) exists and is 'active' — sourcing has already sent it back.
   const hasRevisionReturned = (enq) => {
-  const rev = (quotes||[]).find(q =>
-    q.enquiry_id === enq.id && 
-    q.status === 'active' &&
-    q.revision_completed === true   // only hide if fully done
-  );
-  return !!rev;
-};
+    const rev = (quotes||[]).find(q =>
+      q.enquiry_id === enq.id && q.status === 'active'
+    );
+    return !!rev;
+  };
+  // CHANGED: binEnqs includes sourcing + quoted + returned_to_sourcing (revision needed)
   const binEnqs = enquiries.filter(e => {
-
-  if (tab === 'all') {
-    return true;
-  }
-
-  if (tab === 'sourcing') {
-    return e.status === 'sourcing' && !hasRevisionReturned(e);
-  }
-
-  if (tab === 'sent') {
-    return e.status === 'quoted';
-  }
-
-  return true;
-});
+    if (statusFilter === 'sourcing')             return e.status === 'sourcing' && !hasRevisionReturned(e);
+    if (statusFilter === 'quoted')               return e.status === 'quoted';
+    if (statusFilter === 'returned_to_sourcing') return e.status === 'returned_to_sourcing';
+    // 'all': sourcing + quoted + returned_to_sourcing
+    return (e.status === 'sourcing' && !hasRevisionReturned(e))
+        || e.status === 'quoted'
+        || e.status === 'returned_to_sourcing';
+  });
 
   const filtered = binEnqs.filter(e => {
     const q = search.toLowerCase();
@@ -848,11 +791,7 @@ export default function SourcingBinPage() {
     const matchPri = priorityFilter === 'all' || e.priority === priorityFilter;
     return matchSearch && matchPri;
   });
-  const allCount = enquiries.length;
-  const sourcingCount = enquiries.filter(e => 
-  e.status === 'sourcing' && !hasRevisionReturned(e)
-).length;
-  const sentCount = enquiries.filter(e => e.status === 'quoted').length;
+
   const total      = binEnqs.length;
   const urgent     = binEnqs.filter(e=>e.priority==='urgent').length;
   const high       = binEnqs.filter(e=>e.priority==='high').length;
@@ -875,36 +814,25 @@ export default function SourcingBinPage() {
           </div>
         ))}
       </div>
-{/* ── Tabs ── */}
-<div className="tabs-container">
 
-  <button
-    className={`tab ${tab === 'all' ? 'active' : ''}`}
-    onClick={() => setTab('all')}
-  >
-    All ({allCount})
-  </button>
-
-  <button
-    className={`tab ${tab === 'sourcing' ? 'active' : ''}`}
-    onClick={() => setTab('sourcing')}
-  >
-    In Sourcing ({sourcingCount})
-  </button>
-
-  <button
-    className={`tab ${tab === 'sent' ? 'active' : ''}`}
-    onClick={() => setTab('sent')}
-  >
-    Moved to Quote ({sentCount})
-  </button>
-
-</div>
       {/* Search + filter — NO New Enquiry button */}
       <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:14 }}>
         <div className="search-wrap">
           <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
           <input className="search-input" placeholder="Search sourcing bin…" value={search} onChange={e=>setSearch(e.target.value)}/>
+        </div>
+        {/* ADDED: status filter chips — All / New / Moved to Quote / Revision */}
+        <div className="filter-row" style={{ marginBottom:0 }}>
+          {[
+            { v:'all',                   l:`All (${enquiries.filter(e=>(e.status==='sourcing'&&!hasRevisionReturned(e))||e.status==='quoted'||e.status==='returned_to_sourcing').length})` },
+            { v:'sourcing',              l:`New (${enquiries.filter(e=>e.status==='sourcing'&&!hasRevisionReturned(e)).length})` },
+            { v:'quoted',                l:`Moved to Quote (${enquiries.filter(e=>e.status==='quoted').length})` },
+            { v:'returned_to_sourcing',  l:`Revision Needed (${enquiries.filter(e=>e.status==='returned_to_sourcing').length})` },
+          ].map(f => (
+            <span key={f.v} className={`fchip ${statusFilter===f.v?'active':''}`} onClick={()=>setStatusFilter(f.v)}>
+              {f.l}
+            </span>
+          ))}
         </div>
         <div className="filter-row" style={{ marginBottom:0 }}>
           {['all','urgent','high','normal'].map(p => (

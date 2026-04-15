@@ -1,551 +1,484 @@
 // client/src/pages/QuotesPage.js
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
-import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { fmt, fmtCur, StatusBadge } from '../utils/helpers';
+import { toast } from 'react-hot-toast';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—';
-const fmtM = (n,c='INR') => { const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'}; return (s[c]||c+' ')+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+const STATUS_FILTERS = ['all', 'active', 'superseded', 'order_created', 'returned_to_sourcing'];
 
-// ── Quote Detail Modal ────────────────────────────────────────────────────────
-function QuoteModal({ quote, customers, enquiries, onClose, onOrderCreated }) {
-  const qc       = useNavigate ? useNavigate() : null;
+function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
+  const qc = useQueryClient();
   const navigate = useNavigate();
-  const qClient  = useQueryClient();
-  const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState('items');
+  // Details tab — editable fields
+  const [zohoQuote,       setZohoQuote]       = useState(quote.zoho_quote_no || '');
+  const [validUntil,      setValidUntil]       = useState(quote.valid_until   || '');
+  const [sentToCustomer,  setSentToCustomer]   = useState(!!(quote.sent_to_customer));
+  // Response tab — tick state
+  const [respAccepted,    setRespAccepted]     = useState(quote.customer_response === 'accepted');
+  const [respRejected,    setRespRejected]     = useState(quote.customer_response === 'rejected');
+  const [respNegotiating, setRespNegotiating]  = useState(quote.customer_response === 'negotiating');
+  const [responseNotes,   setResponseNotes]    = useState(quote.customer_response_notes || '');
+  const [savedResponse,   setSavedResponse]    = useState(quote.customer_response || '');
 
-  const custName = id => customers.find(c=>c.id===id)?.name || id;
-  const enqNo    = id => enquiries.find(e=>e.id===id)?.id || id;
+  const custObj = customers.find(c => c.id === quote.customer_id);
 
-  const [tab, setTab]           = useState('items');
-  const [saving, setSaving]     = useState(false);
-  const [revNote, setRevNote]   = useState('');
-  const [zohoRef, setZohoRef]   = useState(quote.zoho_quote_no||'');
-  const [validUntil, setValid]  = useState(quote.valid_until||'');
-  const [custResp, setCustResp] = useState(quote.customer_response||'');
-  const [custRespNote, setCustRespNote] = useState(quote.customer_response_notes||'');
-  const [custRespDate, setCustRespDate] = useState(quote.customer_response_date||new Date().toISOString().slice(0,10));
-  const [savedResponse, setSavedResponse] = useState(quote.customer_response||'');
-
-  // Fetch line items
-  const { data: liData, isLoading: liLoading } = useQuery({
-    queryKey: ['quote-lineitems', quote.id],
-    queryFn:  () => api.get('/quotes/'+quote.id+'/lineitems').then(r=>r.data),
-    enabled:  !!quote.enquiry_id,
+  const { data: lineData } = useQuery({
+    queryKey: ['quote-lines', quote.id],
+    queryFn: () => api.get('/quotes/' + quote.id + '/lineitems').then(r => r.data),
   });
-  const lineItems = liData?.items || [];
 
-  const totalVal = lineItems.reduce((s,li)=>{
-    const base = (li.quantity||0)*(li.quote_price||0);
-    const tax  = base * ((li.tax_rate||0)/100);
-    return s + base + tax;
-  }, 0);
-
-  const mutation = useMutation({
-    mutationFn: d => api.put('/quotes/'+quote.id, d),
-    onSuccess: (_, vars) => {
-  qClient.invalidateQueries(['quotes']);
-  toast.success('Quote updated');
-  if (vars?.customer_response) setSavedResponse(vars.customer_response);
-},
-    onError:    e  => toast.error(e.response?.data?.error||'Update failed'),
+  const saveMutation = useMutation({
+    mutationFn: d => api.put('/quotes/' + quote.id, d).then(r => r.data),
+    onSuccess: () => { qc.invalidateQueries(['quotes']); onRefresh(); toast.success('Saved'); },
+    onError: e => toast.error(e.response?.data?.error || 'Save failed'),
   });
 
   const reviseMutation = useMutation({
-  mutationFn: d => api.post('/quotes/' + quote.id + '/revise', d),
-  onSuccess: (r) => {
-    qClient.invalidateQueries(['quotes']);
-    toast.success('Sent back to Sourcing for revision');
-    onClose();
-  },
-  onError: e => toast.error(e.response?.data?.error || 'Revise failed'),
-});
-
-const handleSaveDetails = () => {
-  mutation.mutate({
-    zoho_quote_no: zohoRef,
-    valid_until: validUntil
+    mutationFn: () => api.post('/quotes/' + quote.id + '/revise', {
+      sales_revision_notes: responseNotes || '',
+    }).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries(['quotes']);
+      toast.success('Sent to revision — Sourcing will re-price');
+      onRefresh();
+      onClose();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Revision failed'),
   });
-};
 
-const handleCustResponse = () => {
-  if (!custResp) {
-    toast.error('Select a response');
-    return;
-  }
-
-  if (custResp === 'accepted') {
-    if (!(zohoRef || quote.zoho_quote_no)) {
-      toast.error('Zoho Quote Reference is mandatory');
-      return;
-    }
-
-    if (!(validUntil || quote.valid_until)) {
-      toast.error('Valid Until date is mandatory');
-      return;
-    }
-  }
-
-  mutation.mutate({
-    customer_response: custResp,
-    customer_response_date: custRespDate,
-    customer_response_notes: custRespNote,
-    customer_response_by: user.name,
-  });
-};
-
-const handleRevise = () => {
-  if (!revNote.trim()) {
-    toast.error('Enter revision notes for Sourcing');
-    return;
-  }
-
-  reviseMutation.mutate({
-    sales_revision_notes: revNote
-  });
-};
-  
-    
-  const handleCreateOrder = () => {
-    navigate('/orders/new', { state: {
-      prefill: {
-        quote_id:      quote.id,
-        quote_no:      quote.quote_no,
-        zoho_quote_no: zohoRef || quote.zoho_quote_no,
-        customer_id:   quote.customer_id,
-        enquiry_id:    quote.enquiry_id,
-        enquiry_no:    quote.enquiry_id,
-        lineItems:     lineItems.map(li=>({
-          component:         li.component,
-          manufacturer:      li.manufacturer,
-          ipn:               li.ipn,
-          // FIX: renamed to match NewOrderPage useState initialiser field names
-          qty:               li.quantity,
-          unit_price:        li.quote_price,
-          quoted_price:      li.quote_price,
-          procurement_price: li.sourced_price,
-          tax_rate:          li.tax_rate||0,
-          target_price:      li.target_price,
-          currency:          li.quote_currency||'INR',
-          delivery_date:     li.preferred_delivery_date,
+  const createOrderMutation = useMutation({
+    mutationFn: async () => {
+      const res = await api.get('/quotes/' + quote.id + '/lineitems');
+      const { items } = res.data;
+      navigate('/orders/new', { state: { prefill: {
+        customer_id:  quote.customer_id,
+        enquiry_id:   quote.enquiry_id || '',
+        enquiry_no:   quote.enquiry_id || '',
+        quote_id:     quote.id,
+        quote_no:     quote.quote_no,
+        lineItems:    items.map((li, i) => ({
+          id:               'li' + i + Date.now(),
+          component:        li.component    || '',
+          manufacturer:     li.manufacturer || '',
+          ipn:              li.ipn          || '',
+          qty:              String(li.quantity || ''),
+          unit_price:       li.quote_price  != null ? String(li.quote_price) : '',
+          quoted_price:     li.quote_price  != null ? String(li.quote_price) : '',
+          target_price:     li.target_price != null ? String(li.target_price) : '',
+          procurement_price:li.sourced_price!= null ? String(li.sourced_price) : '',
+          currency:         li.quote_currency || li.target_currency || 'INR',
+          order_date:       new Date().toISOString().slice(0,10),
+          delivery_date:    li.preferred_delivery_date || '',
+          line_status:      'negotiating',
+          tax_rate:         Number(li.tax_rate) || 0,
         })),
-      }
-    }});
-    onClose();
-  };
+      }}});
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed'),
+  });
 
-  const isActive    = quote.status === 'active';
-  const isReturned  = quote.status === 'returned_to_sourcing';
-  const isOrdered   = quote.status === 'order_created';
-  const canRevise   = isActive;
-  // CHANGE: Create Order only allowed when customer has explicitly approved (saved in DB)
-  // quote.customer_response is the DB-saved value — not the unsaved local radio selection
- const customerApproved =
-  custResp === 'accepted' ||
-  savedResponse === 'accepted';
+  const items = lineData?.items || [];
 
-const hasZohoRef   = !!(zohoRef || quote.zoho_quote_no);
-const hasValidDate = !!(validUntil || quote.valid_until);
+  const tabs = [
+    { k: 'items',    l: '📦 Line Items' },
+    { k: 'details',  l: '📋 Details' },
+    { k: 'response', l: '💬 Customer Response' },
+  ];
 
-const canOrder =
-  isActive &&
-  lineItems.length > 0 &&
-  customerApproved &&
-  hasZohoRef &&
-  hasValidDate;
+  const responseValue  = respAccepted ? 'accepted' : respRejected ? 'rejected' : respNegotiating ? 'negotiating' : '';
+  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active';
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-xl">
-        <div className="modal-header">
-          <div>
-            <h2>📄 {quote.quote_no}
-              {quote.revision > 1 && <span style={{fontSize:12,color:'var(--text3)',marginLeft:8}}>Rev {quote.revision}</span>}
-            </h2>
-            <div style={{display:'flex',gap:12,alignItems:'center',marginTop:4,flexWrap:'wrap'}}>
-              <StatusBadge s={quote.status}/>
-              <span style={{fontSize:12,color:'var(--text3)'}}>{custName(quote.customer_id)}</span>
-              {quote.enquiry_id && <span style={{fontSize:12,color:'var(--text3)'}}>ENQ: <span className="mono">{quote.enquiry_id}</span></span>}
-              <span style={{fontSize:12,color:'var(--text3)'}}>Created: {fmtDate(quote.created_at)}</span>
-            </div>
+    <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{maxWidth:1110,width:'94vw'}}>
+        <div className="modal-header" style={{padding:'12px 18px',borderBottom:'1px solid var(--border)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+            <span style={{fontFamily:'monospace',fontWeight:700,fontSize:15,color:'var(--accent)'}}>{quote.quote_no}</span>
+            {quote.revision > 1 && <span style={{fontSize:11,padding:'1px 7px',borderRadius:99,background:'var(--accent-lt)',color:'var(--accent)',fontWeight:600}}>Rev {quote.revision}</span>}
+            <StatusBadge s={quote.status}/>
+            {sentToCustomer && <span style={{fontSize:11,padding:'1px 8px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:600}}>✓ Sent to customer</span>}
           </div>
-          <button className="close-x" onClick={onClose}>×</button>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:12,color:'var(--text2)'}}>{custObj?.name || quote.customer_id}</span>
+            <button className="close-x" onClick={onClose}>×</button>
+          </div>
         </div>
 
-        {/* Sales revision notes banner */}
-        {quote.sales_revision_notes && (
-          <div style={{padding:'10px 20px',background:'var(--amber-lt,#fffbeb)',borderBottom:'1px solid var(--amber,#d97706)33',fontSize:12}}>
-            <span style={{fontWeight:700,color:'var(--amber,#d97706)'}}>💬 Sales note to Sourcing: </span>
-            {quote.sales_revision_notes}
-          </div>
-        )}
-
         {/* Tabs */}
-        <div style={{display:'flex',borderBottom:'1px solid var(--border)',padding:'0 20px'}}>
-          {[['items','Line Items'],['details','Details'],['response','Customer Response'],['revise','Send to Revision']].map(([k,l])=>(
-            <div key={k} onClick={()=>setTab(k)} style={{padding:'10px 18px',fontSize:12,fontWeight:600,cursor:'pointer',
-              borderBottom:tab===k?'2px solid var(--accent)':'2px solid transparent',
-              color:tab===k?'var(--accent)':'var(--text3)'}}>
-              {l}
-            </div>
+        <div style={{display:'flex',gap:0,borderBottom:'1px solid var(--border)',padding:'0 20px'}}>
+          {tabs.map(t => (
+            <button key={t.k} onClick={() => setActiveTab(t.k)}
+              style={{padding:'10px 16px',border:'none',background:'transparent',cursor:'pointer',
+                fontSize:13,fontWeight:activeTab===t.k?700:400,
+                borderBottom:activeTab===t.k?'2px solid var(--accent)':'2px solid transparent',
+                color:activeTab===t.k?'var(--accent)':'var(--text2)'}}>
+              {t.l}
+            </button>
           ))}
         </div>
 
         <div className="modal-body">
 
-          {/* ── Tab: Line Items ── */}
-          {tab==='items' && (
+          {/* Tab: Line Items */}
+          {activeTab === 'items' && (
             <div>
-              {liLoading ? (
-                <div style={{color:'var(--text3)',fontSize:13,padding:20}}>Loading items…</div>
-              ) : lineItems.length === 0 ? (
-                <div style={{color:'var(--text3)',fontSize:13,padding:20}}>No line items — enquiry not linked or not yet priced in Sourcing.</div>
-              ) : (
-                <>
-                  <table className="li-table">
-                    <thead>
-                      <tr>
-                        <th>#</th><th>Component</th><th>Manufacturer</th><th>IPN</th>
+              {items.length === 0
+                ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>Loading items…</div>
+                : <div style={{overflowX:'auto'}}>
+                    <table className="table">
+                      <thead><tr>
+                        <th style={{fontSize:11}}>#</th>
+                        <th>Component</th>
+                        <th>Manufacturer</th>
+                        <th>IPN</th>
+                        <th style={{textAlign:'right',color:'var(--amber,#d97706)'}}>Target Price</th>
                         <th style={{textAlign:'right'}}>Qty</th>
                         <th style={{textAlign:'right'}}>Quote Price</th>
                         <th style={{textAlign:'right'}}>Tax %</th>
-                        <th style={{textAlign:'right'}}>Tax Amt</th>
-                        <th style={{textAlign:'right'}}>Line Total</th>
-                        <th>Delivery Date</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {lineItems.map((li,i)=>{
-                        const base = (li.quantity||0)*(li.quote_price||0);
-                        const tax  = base*((li.tax_rate||0)/100);
-                        return (
-                          <tr key={li.id}>
-                            <td>{i+1}</td>
-                            <td style={{fontWeight:600}}>{li.component}</td>
-                            <td>{li.manufacturer||'—'}</td>
-                            <td className="mono" style={{fontSize:11}}>{li.ipn||'—'}</td>
-                            <td style={{textAlign:'right',fontWeight:600}}>{fmt(li.quantity)}</td>
-                            <td style={{textAlign:'right',fontFamily:'monospace'}}>
-                              {li.quote_price ? fmtM(li.quote_price, li.quote_currency) : <span style={{color:'var(--text3)'}}>—</span>}
-                            </td>
-                            <td style={{textAlign:'right'}}>{li.tax_rate||0}%</td>
-                            <td style={{textAlign:'right',fontFamily:'monospace'}}>{li.quote_price ? fmtM(tax, li.quote_currency) : '—'}</td>
-                            <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>{li.quote_price ? fmtM(base+tax, li.quote_currency) : '—'}</td>
-                            <td style={{fontSize:11,color:'var(--text3)'}}>{li.preferred_delivery_date||'—'}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                    <tfoot>
-                      <tr style={{borderTop:'2px solid var(--border)',background:'var(--accent-lt)'}}>
-                        <td colSpan={8} style={{padding:'8px',fontWeight:700,textAlign:'right',color:'var(--accent)'}}>Grand Total (incl. tax)</td>
-                        <td style={{padding:'8px',textAlign:'right',fontWeight:800,color:'var(--accent)',fontFamily:'monospace',fontSize:14}}>
-                          {fmtM(totalVal)}
-                        </td>
-                        <td/>
-                      </tr>
-                    </tfoot>
-                  </table>
-
-                  {/* Customer response summary if recorded */}
-                  {quote.customer_response && (
-                    <div style={{marginTop:14,padding:'10px 14px',borderRadius:'var(--r)',
-                      background: quote.customer_response==='accepted' ? 'var(--green-lt)' : quote.customer_response==='rejected' ? 'var(--red-lt,#fef2f2)' : 'var(--amber-lt,#fffbeb)',
-                      border:`1px solid ${quote.customer_response==='accepted'?'var(--green)':quote.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}33`,
-                      fontSize:12}}>
-                      <span style={{fontWeight:700}}>Customer Response: </span>
-                      <span style={{textTransform:'capitalize',fontWeight:600}}>{quote.customer_response}</span>
-                      {quote.customer_response_date && <span style={{color:'var(--text3)',marginLeft:8}}>on {fmtDate(quote.customer_response_date)}</span>}
-                      {quote.customer_response_notes && <span style={{color:'var(--text2)',marginLeft:8}}>— {quote.customer_response_notes}</span>}
-                    </div>
-                  )}
-                </>
-              )}
+                        <th style={{textAlign:'right'}}>Base Value</th>
+                        <th style={{textAlign:'right',color:'var(--green)'}}>Total</th>
+                      </tr></thead>
+                      <tbody>
+                        {items.map((li, i) => {
+                          const base = (li.quantity||0) * (li.quote_price||0);
+                          const tax  = Number(li.tax_rate)||0;
+                          const tot  = base + base*tax/100;
+                          return (
+                            <tr key={li.id||i}>
+                              <td style={{color:'var(--text3)',fontSize:11,textAlign:'center'}}>{i+1}</td>
+                              <td style={{fontWeight:600}}>{li.component}</td>
+                              <td style={{fontSize:12,color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
+                              <td style={{fontFamily:'monospace',fontSize:11,color:'var(--text3)'}}>{li.ipn||'—'}</td>
+                              <td style={{textAlign:'right',color:'var(--amber,#d97706)',fontFamily:'monospace'}}>
+                                {li.target_price ? fmtCur(li.target_price, li.target_currency) : '—'}
+                              </td>
+                              <td style={{textAlign:'right',fontWeight:500}}>{fmt(li.quantity)}</td>
+                              <td style={{textAlign:'right',fontWeight:700,fontFamily:'monospace'}}>
+                                {li.quote_price ? fmtCur(li.quote_price, li.quote_currency) : '—'}
+                              </td>
+                              <td style={{textAlign:'right',color:tax>0?'var(--teal,#0d9488)':'var(--text3)',fontWeight:tax>0?600:400}}>{tax}%</td>
+                              <td style={{textAlign:'right',fontWeight:600,color:'var(--text)',fontFamily:'monospace'}}>
+                                {base ? fmtCur(base, li.quote_currency) : '—'}
+                              </td>
+                              <td style={{textAlign:'right',fontWeight:700,color:tax>0?'var(--green)':'var(--text)',fontFamily:'monospace'}}>
+                                {base ? fmtCur(tot, li.quote_currency) : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+              }
             </div>
           )}
 
-          {/* ── Tab: Details ── */}
-          {tab==='details' && (
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-              <div className="form-group" style={{marginBottom:0}}>
-                <label className="label">Zoho Quote Reference</label>
-                <input className="input" value={zohoRef} onChange={e=>setZohoRef(e.target.value)}
-                  placeholder="e.g. QT-2026-00123"/>
+          {/* Tab: Details */}
+          {activeTab === 'details' && (
+            <div>
+              {/* Read-only info strip */}
+              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16,padding:'10px 14px',
+                background:'var(--surface2)',borderRadius:8,fontSize:12}}>
+                {[
+                  {l:'Quote No.',  v:quote.quote_no,      mono:true},
+                  {l:'Status',     v:quote.status?.replace(/_/g,' ')},
+                  {l:'Revision',   v:quote.revision||1},
+                  {l:'Enquiry',    v:quote.enquiry_id||'—', mono:true},
+                  {l:'Created',    v:(quote.created_at||'').slice(0,10)},
+                ].map(f=>(
+                  <div key={f.l} style={{minWidth:100}}>
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:2}}>{f.l.toUpperCase()}</div>
+                    <div style={{fontWeight:600,fontFamily:f.mono?'monospace':'inherit',color:'var(--text)'}}>{f.v}</div>
+                  </div>
+                ))}
               </div>
-              <div className="form-group" style={{marginBottom:0}}>
-                <label className="label">Valid Until</label>
-                <input className="input" type="date" value={validUntil} onChange={e=>setValid(e.target.value)}/>
+              {/* Editable fields */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Zoho Quote No. <span className="req">*</span></label>
+                  <input className="input" value={zohoQuote}
+                    onChange={e => setZohoQuote(e.target.value)}
+                    placeholder="e.g. ZQ-2024-001"
+                    style={{fontFamily:'monospace'}}/>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Valid Until</label>
+                  <input className="input" type="date" value={validUntil}
+                    onChange={e => setValidUntil(e.target.value)}/>
+                </div>
               </div>
-              <div className="form-group" style={{gridColumn:'1/-1',marginBottom:0}}>
-                <label className="label">Notes / Pricing Summary</label>
-                <textarea className="input" rows={4} value={quote.notes||''} readOnly
-                  style={{resize:'none',color:'var(--text2)',fontSize:12}}/>
+              {/* Sent to customer tick */}
+              <div style={{marginBottom:16}}>
+                <label style={{display:'inline-flex',alignItems:'center',gap:10,cursor:'pointer',
+                  padding:'10px 16px',borderRadius:8,
+                  border:`1.5px solid ${sentToCustomer?'var(--green)':'var(--border)'}`,
+                  background:sentToCustomer?'var(--green-lt)':'var(--surface2)',
+                  transition:'all .15s'}}>
+                  <span style={{width:20,height:20,borderRadius:5,flexShrink:0,display:'flex',
+                    alignItems:'center',justifyContent:'center',
+                    border:`2px solid ${sentToCustomer?'var(--green)':'var(--border)'}`,
+                    background:sentToCustomer?'var(--green)':'transparent',transition:'all .15s'}}>
+                    {sentToCustomer && <svg width="11" height="9" viewBox="0 0 11 9" fill="none">
+                      <path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>}
+                  </span>
+                  <input type="checkbox" checked={sentToCustomer} onChange={e=>setSentToCustomer(e.target.checked)}
+                    style={{position:'absolute',opacity:0,width:0,height:0}}/>
+                  <span style={{fontSize:13,fontWeight:sentToCustomer?600:400,
+                    color:sentToCustomer?'var(--green)':'var(--text2)'}}>
+                    Sent to customer
+                  </span>
+                </label>
               </div>
-              <div style={{gridColumn:'1/-1'}}>
-                <button className="btn btn-primary btn-sm" disabled={saving} onClick={handleSaveDetails}>
+              {quote.notes && (
+                <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:12}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4}}>NOTES</div>
+                  <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
+                </div>
+              )}
+              <div style={{marginTop:14,display:'flex',gap:8}}>
+                {/* CHANGE: Save Details only active when quote is active + both fields filled */}
+                <button className="btn btn-primary"
+                  disabled={quote.status !== 'active' || !zohoQuote.trim() || !validUntil}
+                  style={{opacity:(quote.status !== 'active' || !zohoQuote.trim() || !validUntil)?0.45:1}}
+                  onClick={() => {
+                    if (quote.status !== 'active') { toast.error('Quote must be active to save details'); return; }
+                    if (!zohoQuote.trim()) { toast.error('Zoho Quote No. is required'); return; }
+                    if (!validUntil)       { toast.error('Valid Until date is required'); return; }
+                    saveMutation.mutate({
+                      zoho_quote_no:    zohoQuote.trim(),
+                      valid_until:      validUntil,
+                      sent_to_customer: sentToCustomer ? 1 : 0,
+                    }, { onSuccess: () => toast.success('Details saved') });
+                  }}>
                   Save Details
                 </button>
+                {quote.status !== 'active' && (
+                  <span style={{fontSize:11,color:'var(--text3)',alignSelf:'center'}}>
+                    Only active quotes can be updated
+                  </span>
+                )}
               </div>
             </div>
           )}
 
-          {/* ── Tab: Customer Response ── */}
-          {tab==='response' && (
-            <div style={{display:'grid',gap:14}}>
-              <div className="form-group" style={{marginBottom:0}}>
-                <label className="label">Customer Response</label>
-                <div style={{display:'flex',gap:16,marginTop:6,flexWrap:'wrap'}}>
-                  {['accepted','negotiating','rejected','no_response'].map(r=>(
-                    <label key={r} style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13,fontWeight:500}}>
-                      <input type="radio" name="cust_resp" checked={custResp===r} onChange={()=>setCustResp(r)}
-                        style={{accentColor: r==='accepted'?'var(--green)':r==='rejected'?'var(--red)':'var(--accent)'}}/>
-                      <span style={{textTransform:'capitalize'}}>{r.replace('_',' ')}</span>
+          {/* Tab: Customer Response */}
+          {activeTab === 'response' && (
+            <div>
+              {savedResponse && (
+                <div style={{marginBottom:16,padding:'10px 14px',borderRadius:8,fontSize:13,fontWeight:600,
+                  background:savedResponse==='accepted'?'var(--green-lt)':savedResponse==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
+                  color:savedResponse==='accepted'?'var(--green)':savedResponse==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
+                  {savedResponse==='accepted'?'✓ Customer accepted':savedResponse==='rejected'?'✗ Customer rejected':'Negotiating'}
+                </div>
+              )}
+              <div style={{marginBottom:14}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:10,letterSpacing:.5}}>CUSTOMER RESPONSE</div>
+                <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                  {[
+                    {val:'accepted',    label:'Accepted',    color:'var(--green)', state:respAccepted},
+                    {val:'rejected',    label:'Rejected',    color:'var(--red)',   state:respRejected},
+                    {val:'negotiating', label:'Negotiating', color:'var(--amber,#d97706)', state:respNegotiating},
+                  ].map(opt => (
+                    <label key={opt.val} style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',
+                      padding:'9px 16px',borderRadius:8,
+                      border:`1.5px solid ${opt.state?opt.color:'var(--border)'}`,
+                      background:opt.state?opt.color+'18':'var(--surface2)',
+                      transition:'all .15s'}}>
+                      <span style={{width:18,height:18,borderRadius:4,flexShrink:0,
+                        border:`2px solid ${opt.state?opt.color:'var(--border)'}`,
+                        background:opt.state?opt.color:'transparent',
+                        display:'flex',alignItems:'center',justifyContent:'center',transition:'all .15s'}}>
+                        {opt.state && <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                          <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>}
+                      </span>
+                      <input type="checkbox" checked={opt.state}
+                        onChange={() => {
+                          setRespAccepted(opt.val==='accepted'?!opt.state:false);
+                          setRespRejected(opt.val==='rejected'?!opt.state:false);
+                          setRespNegotiating(opt.val==='negotiating'?!opt.state:false);
+                        }}
+                        style={{position:'absolute',opacity:0,width:0,height:0}}/>
+                      <span style={{fontSize:13,fontWeight:opt.state?600:400,color:opt.state?opt.color:'var(--text2)'}}>
+                        {opt.label}
+                      </span>
                     </label>
                   ))}
                 </div>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Response Date</label>
-                  <input className="input" type="date" value={custRespDate} onChange={e=>setCustRespDate(e.target.value)}/>
-                </div>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Notes</label>
-                  <input className="input" value={custRespNote} onChange={e=>setCustRespNote(e.target.value)}
-                    placeholder="e.g. Customer wants ₹1,350/unit, delivery by May"/>
-                </div>
+              <div className="form-group">
+                <label className="label">Notes</label>
+                <textarea className="input" rows={3} value={responseNotes}
+                  onChange={e => setResponseNotes(e.target.value)}
+                  placeholder="Customer feedback, conditions, etc."/>
               </div>
-              <div>
-                <button className="btn btn-primary btn-sm" onClick={handleCustResponse} disabled={mutation.isPending}>
-                  Save Response
-                </button>
-              </div>
+              <button className="btn btn-primary" style={{marginTop:8}}
+                onClick={() => {
+                  saveMutation.mutate({ customer_response: responseValue, customer_response_notes: responseNotes },
+                    { onSuccess: () => { toast.success('Response saved'); setSavedResponse(responseValue); }});
+                }}>
+                Save Response
+              </button>
             </div>
           )}
 
-          {/* ── Tab: Send to Revision ── */}
-          {tab==='revise' && (
-            <div>
-              {!canRevise ? (
-                <div style={{color:'var(--text3)',fontSize:13}}>
-                  {isOrdered ? '✅ Order already created from this quote.' : 'This quote cannot be sent for revision in its current status.'}
-                </div>
-              ) : (
-                <div style={{display:'grid',gap:14}}>
-                  <div style={{padding:'12px 14px',borderRadius:'var(--r)',background:'var(--amber-lt,#fffbeb)',
-                    border:'1px solid var(--amber,#d97706)33',fontSize:12,color:'var(--amber,#d97706)',fontWeight:600}}>
-                    ⚠ This will send the quote back to Sourcing for re-pricing. The quote status will change to "Returned to Sourcing".
-                  </div>
-                  <div className="form-group" style={{marginBottom:0}}>
-                    <label className="label">Revision Notes for Sourcing <span style={{color:'var(--red)'}}>*</span></label>
-                    <textarea className="input" rows={3} value={revNote} onChange={e=>setRevNote(e.target.value)}
-                      placeholder="e.g. Customer wants better pricing on STM32. Target: ₹1,350/unit. Competitor quote attached."/>
-                  </div>
-                  <div>
-                    <button className="btn btn-sm" style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)'}}
-                      disabled={reviseMutation.isPending||!revNote.trim()} onClick={handleRevise}>
-                      {reviseMutation.isPending ? 'Sending…' : '↩ Send Back to Sourcing'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
-        <div className="modal-footer" style={{justifyContent:'space-between'}}>
+        <div className="modal-footer">
+          {canCreateOrder && (
+            <button className="btn btn-primary"
+              style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+              onClick={() => createOrderMutation.mutate()}>
+              ➕ Create Order from Quote
+            </button>
+          )}
+          {/* ADDED: Send to Revision — shown when active + customer rejected or negotiating */}
+          {quote.status === 'active' && (respRejected || respNegotiating) && (
+            <button className="btn"
+              style={{background:'var(--amber,#d97706)',color:'#fff',
+                borderColor:'var(--amber,#d97706)',fontWeight:600}}
+              disabled={reviseMutation.isPending}
+              onClick={() => {
+                if (!window.confirm('Send this quote back to Sourcing for re-pricing? The current quote will be superseded and a new revision created.')) return;
+                reviseMutation.mutate();
+              }}>
+              {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
+            </button>
+          )}
+          {!canCreateOrder && quote.status === 'active' && savedResponse !== 'accepted' && !respRejected && !respNegotiating && (
+            <span style={{fontSize:12,color:'var(--text3)'}}>Save customer acceptance to create order</span>
+          )}
           <button className="btn" onClick={onClose}>Close</button>
-          <div style={{display:'flex',gap:8}}>
-            {/* CHANGE: button always visible when quote is active — disabled until customer approves */}
-            {isActive && lineItems.length > 0 && (
-              <button className="btn btn-primary" onClick={handleCreateOrder}
-                disabled={!canOrder}
-                title={!canOrder ? 'Go to the Customer Response tab and save \'Accepted\' first' : ''}
-                style={{
-                  background: canOrder ? 'var(--green)' : 'var(--surface2)',
-                  borderColor: canOrder ? 'var(--green)' : 'var(--border)',
-                  color: canOrder ? '#fff' : 'var(--text3)',
-                  fontWeight:700,
-                  cursor: canOrder ? 'pointer' : 'not-allowed',
-                  opacity: canOrder ? 1 : 0.7,
-                }}>
-                {canOrder ? '✅ Create Order from Quote' : '🔒 Awaiting Customer Approval'}
-              </button>
-            )}
-          </div>
         </div>
       </div>
     </div>
   );
 }
 
-// ── Main QuotesPage ───────────────────────────────────────────────────────────
 export default function QuotesPage() {
-  const { user }   = useAuth();
-  const qc         = useQueryClient();
+  const [search, setSearch]   = useState('');
+  const [filter, setFilter]   = useState('all');
   const [selected, setSelected] = useState(null);
-  const [search,   setSearch]   = useState('');
-  const [filter,   setFilter]   = useState('all');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo,   setDateTo]   = useState('');
+  const qc = useQueryClient();
 
-  const { data: quotes=[], isLoading } = useQuery({ queryKey:['quotes'],    queryFn:()=>api.get('/quotes').then(r=>r.data),    refetchInterval:20000 });
+  const { data: quotes=[], refetch }   = useQuery({ queryKey:['quotes'],    queryFn:()=>api.get('/quotes').then(r=>r.data) });
   const { data: customers=[] }         = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
-  const { data: enquiries=[] }         = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>r.data).catch(()=>[]) });
 
-  const custName = id => customers.find(c=>c.id===id)?.name || id;
+  const custName = id => customers.find(c => c.id === id)?.name || id;
 
-  // Stats
-  const active   = quotes.filter(q=>q.status==='active').length;
-  const returned = quotes.filter(q=>q.status==='returned_to_sourcing').length;
-  const ordered  = quotes.filter(q=>q.status==='order_created').length;
-  const responded = quotes.filter(q=>q.customer_response && q.customer_response!=='no_response').length;
+  const filtered = quotes.filter(q => {
+    const matchFilter = filter === 'all' || q.status === filter;
+    const s = search.toLowerCase();
+    const matchSearch = !search
+      || q.quote_no.toLowerCase().includes(s)
+      || custName(q.customer_id).toLowerCase().includes(s)
+      || (q.enquiry_id||'').toLowerCase().includes(s);
+    return matchFilter && matchSearch;
+  });
 
-  const filtered = useMemo(() => {
-    let list = quotes;
-    if (filter !== 'all') list = list.filter(q => q.status === filter);
-    if (search) {
-      const q = search.toLowerCase();
-      list = list.filter(qt =>
-        qt.quote_no.toLowerCase().includes(q) ||
-        custName(qt.customer_id).toLowerCase().includes(q) ||
-        (qt.zoho_quote_no||'').toLowerCase().includes(q) ||
-        (qt.enquiry_id||'').toLowerCase().includes(q) ||
-        (qt.notes||'').toLowerCase().includes(q)
-      );
-    }
-    if (dateFrom) list = list.filter(q => q.created_at >= dateFrom);
-    if (dateTo)   list = list.filter(q => q.created_at <= dateTo + 'T23:59');
-    return list;
-  }, [quotes, filter, search, dateFrom, dateTo, customers]);
+  const counts = {
+    all:                   quotes.length,
+    active:                quotes.filter(q=>q.status==='active').length,
+    superseded:            quotes.filter(q=>q.status==='superseded').length,
+    order_created:         quotes.filter(q=>q.status==='order_created').length,
+    returned_to_sourcing:  quotes.filter(q=>q.status==='returned_to_sourcing').length,
+  };
 
-  const STATUS_FILTERS = [
-    { v:'all',                   l:`All (${quotes.length})` },
-    { v:'active',                l:`Active (${active})` },
-    { v:'returned_to_sourcing',  l:`Returned to Sourcing (${returned})` },
-    { v:'order_created',         l:`Order Created (${ordered})` },
-    { v:'superseded',            l:`Superseded (${quotes.filter(q=>q.status==='superseded').length})` },
-  ];
-
-  const RESP_COLOR = { accepted:'var(--green)', rejected:'var(--red)', negotiating:'var(--amber,#d97706)', no_response:'var(--text3)' };
+  const filterLabels = {
+    all:                  `All (${counts.all})`,
+    active:               `Active (${counts.active})`,
+    superseded:           `Superseded (${counts.superseded})`,
+    order_created:        `Order Created (${counts.order_created})`,
+    returned_to_sourcing: `Sent to Revision (${counts.returned_to_sourcing})`,
+  };
 
   return (
     <div>
-      {/* ── Stat cards ── */}
-      <div className="stats-grid" style={{marginBottom:20}}>
+      {/* Stats */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:13,marginBottom:18}}>
         {[
-          { label:'Active Quotes',      val:active,    color:'var(--accent)' },
-          { label:'Returned to Sourcing', val:returned, color:'var(--amber,#d97706)' },
-          { label:'Orders Created',     val:ordered,   color:'var(--green)' },
-          { label:'Customer Responded', val:responded, color:'var(--teal,#0d9488)' },
-        ].map(s=>(
+          {label:'Total Quotes',   val:counts.all,           color:'var(--accent)'},
+          {label:'Active',         val:counts.active,         color:'var(--green)'},
+          {label:'Order Created',  val:counts.order_created,  color:'var(--teal,#0d9488)'},
+          {label:'In Revision',    val:counts.returned_to_sourcing, color:'var(--amber,#d97706)'},
+        ].map(s => (
           <div key={s.label} className="stat-card" style={{borderLeft:`3px solid ${s.color}`}}>
             <div className="stat-label">{s.label}</div>
-            <div className="stat-val" style={{fontSize:24,color:s.color}}>{s.val}</div>
+            <div className="stat-val" style={{color:s.color}}>{s.val}</div>
           </div>
         ))}
       </div>
 
-      {/* ── Search + date filter ── */}
+      {/* Search + Filters */}
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}}>
         <div className="search-wrap">
           <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
-          <input className="search-input" placeholder="Search by quote no, customer, Zoho ref, ENQ…"
-            value={search} onChange={e=>setSearch(e.target.value)}/>
+          <input className="search-input" placeholder="Search quote no., customer, enquiry…"
+            value={search} onChange={e => setSearch(e.target.value)}/>
         </div>
-        <label style={{fontSize:12,color:'var(--text3)',display:'flex',alignItems:'center',gap:6}}>
-          From <input type="date" className="input" style={{width:140}} value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/>
-        </label>
-        <label style={{fontSize:12,color:'var(--text3)',display:'flex',alignItems:'center',gap:6}}>
-          To <input type="date" className="input" style={{width:140}} value={dateTo} onChange={e=>setDateTo(e.target.value)}/>
-        </label>
+        <div className="filter-row" style={{marginBottom:0}}>
+          {STATUS_FILTERS.map(f => (
+            <span key={f} className={`fchip ${filter===f?'active':''}`} onClick={() => setFilter(f)}>
+              {filterLabels[f]}
+            </span>
+          ))}
+        </div>
       </div>
 
-      {/* ── Tabs ── */}
-<div className="tabs-container">
-  {STATUS_FILTERS.map(f => (
-    <button
-      key={f.v}
-      className={`tab ${filter === f.v ? 'active' : ''}`}
-      onClick={() => setFilter(f.v)}
-    >
-      {f.l}
-    </button>
-  ))}
-</div>
+      {/* Table */}
+      {filtered.length === 0
+        ? <div className="empty-state"><div className="empty-icon">📋</div>
+            <div className="empty-state-text">{quotes.length===0?'No quotes yet — send an enquiry to sourcing first.':'No quotes match your filter.'}</div>
+          </div>
+        : <div className="table-wrap">
+            <table className="table">
+              <thead><tr>
+                <th>Quote No.</th><th>Customer</th><th>Enquiry</th>
+                <th>Status</th><th>Response</th><th>Revision</th>
+                <th>Valid Until</th><th>Created</th><th style={{textAlign:'right'}}>Actions</th>
+              </tr></thead>
+              <tbody>
+                {filtered.map(q => (
+                  <tr key={q.id} style={{cursor:'pointer'}} onClick={() => setSelected(q)}>
+                    <td className="mono bold" style={{color:'var(--accent)'}}>{q.quote_no}</td>
+                    <td style={{fontWeight:500}}>{custName(q.customer_id)}</td>
+                    <td className="mono" style={{fontSize:11,color:'var(--text3)'}}>{q.enquiry_id||'—'}</td>
+                    <td><StatusBadge s={q.status}/></td>
+                    <td>
+                      {q.customer_response
+                        ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
+                            background:q.customer_response==='accepted'?'var(--green-lt)':q.customer_response==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
+                            color:q.customer_response==='accepted'?'var(--green)':q.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
+                            {q.customer_response}
+                          </span>
+                        : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
+                    </td>
+                    <td style={{textAlign:'center'}}>{q.revision||1}</td>
+                    <td style={{fontSize:12,color:'var(--text2)'}}>{q.valid_until||'—'}</td>
+                    <td style={{fontSize:11,color:'var(--text3)'}}>{(q.created_at||'').slice(0,10)}</td>
+                    <td style={{textAlign:'right'}}>
+                      <button className="btn btn-xs btn-primary" onClick={e=>{e.stopPropagation();setSelected(q)}}>
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+      }
 
-      {/* ── Table ── */}
-      {isLoading ? (
-        <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>Loading quotes…</div>
-      ) : filtered.length === 0 ? (
-        <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
-          <div style={{fontSize:32,marginBottom:8}}>📋</div>
-          <div>No quotes found</div>
-        </div>
-      ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>QUOTE NO.</th>
-              <th>ENQ NO.</th>
-              <th>CUSTOMER</th>
-              <th>ZOHO REF</th>
-              <th>REVISION</th>
-              <th>CUSTOMER RESPONSE</th>
-              <th>VALID UNTIL</th>
-              <th>STATUS</th>
-              <th>CREATED</th>
-              <th style={{textAlign:'right'}}>ACTIONS</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(q => (
-              <tr key={q.id} onClick={()=>setSelected(q)} style={{cursor:'pointer'}}
-                className="hover-row">
-                <td>
-                  <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{q.quote_no}</span>
-                  {q.revision > 1 && <span style={{fontSize:10,color:'var(--text3)',marginLeft:4}}>v{q.revision}</span>}
-                </td>
-                <td><span className="mono" style={{fontSize:12}}>{q.enquiry_id||'—'}</span></td>
-                <td style={{fontWeight:500}}>{custName(q.customer_id)}</td>
-                <td style={{fontSize:12,color:'var(--text2)'}}>{q.zoho_quote_no||'—'}</td>
-                <td style={{textAlign:'center'}}>{q.revision > 1 ? <span style={{fontSize:11,padding:'1px 8px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700}}>Rev {q.revision}</span> : '—'}</td>
-                <td>
-                  {q.customer_response ? (
-                    <span style={{fontSize:11,padding:'2px 8px',borderRadius:999,fontWeight:600,
-                      color:RESP_COLOR[q.customer_response]||'var(--text3)',
-                      background: q.customer_response==='accepted'?'var(--green-lt)':q.customer_response==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)'}}>
-                      {q.customer_response.replace('_',' ')}
-                    </span>
-                  ) : <span style={{color:'var(--text3)',fontSize:12}}>—</span>}
-                </td>
-                <td style={{fontSize:12,color:q.valid_until&&new Date(q.valid_until)<new Date()?'var(--red)':'var(--text2)'}}>
-                  {q.valid_until ? fmtDate(q.valid_until) : '—'}
-                </td>
-                <td><StatusBadge s={q.status}/></td>
-                <td style={{fontSize:12,color:'var(--text3)'}}>{fmtDate(q.created_at)}</td>
-                <td style={{textAlign:'right'}}>
-                  <button className="btn btn-xs btn-primary" onClick={e=>{e.stopPropagation();setSelected(q);}}>
-                    Open
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {/* ── Modal ── */}
       {selected && (
-        <QuoteModal
+        <QuoteDetailModal
           quote={selected}
           customers={customers}
-          enquiries={enquiries}
-          onClose={()=>setSelected(null)}
-          onOrderCreated={()=>setSelected(null)}
+          onClose={() => setSelected(null)}
+          onRefresh={() => { refetch(); setSelected(q => quotes.find(x=>x.id===q?.id)||null); }}
         />
       )}
     </div>

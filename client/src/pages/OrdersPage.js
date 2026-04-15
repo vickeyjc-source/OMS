@@ -121,7 +121,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const needsEway = cust?.country==='India' && totalInr > 50000;
 
   // Compute base value and total value per currency across all line items
-  const fmtCur = (n, cur) => {
+  const fmtAmt = (n, cur) => {
     const sym = {INR:'₹',USD:'$',EUR:'€',GBP:'£',SGD:'S$',AED:'د.إ'};
     return (sym[cur]||cur+' ') + (Math.round(n*100)/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
   };
@@ -186,14 +186,14 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
             {Object.keys(liBaseByCur).map(cur=>(
               <div key={cur} style={{textAlign:'right'}}>
                 <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',letterSpacing:.5,marginBottom:3}}>BASE VALUE</div>
-                <div style={{fontSize:22,fontWeight:800,color:'var(--accent)',letterSpacing:'-.03em',lineHeight:1}}>{fmtCur(liBaseByCur[cur],cur)}</div>
+                <div style={{fontSize:22,fontWeight:800,color:'var(--accent)',letterSpacing:'-.03em',lineHeight:1}}>{fmtAmt(liBaseByCur[cur],cur)}</div>
               </div>
             ))}
             {/* Total Value — show only if different from base (tax applies) */}
             {hasTax && Object.keys(liTotalByCur).map(cur=>(
               <div key={cur+'t'} style={{textAlign:'right'}}>
                 <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',letterSpacing:.5,marginBottom:3}}>TOTAL VALUE</div>
-                <div style={{fontSize:22,fontWeight:800,color:'var(--green)',letterSpacing:'-.03em',lineHeight:1}}>{fmtCur(liTotalByCur[cur],cur)}</div>
+                <div style={{fontSize:22,fontWeight:800,color:'var(--green)',letterSpacing:'-.03em',lineHeight:1}}>{fmtAmt(liTotalByCur[cur],cur)}</div>
                 <div style={{fontSize:10,color:'var(--green)',fontWeight:600,marginTop:2}}>incl. tax</div>
               </div>
             ))}
@@ -266,219 +266,51 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                 )}
               </div>
 
-              {/* Full Advance panel — with auto-fill from order total */}
-              {isFullAdvance(effectiveTerms)&&(()=>{
-                const total  = orderTotal(order);
-                const fmtCur = n => '₹'+(Math.round(n*100)/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-                const recvd  = parseFloat(payment.advance_amount)||0;
-                const balance= total > 0 ? Math.max(0, parseFloat((total-recvd).toFixed(2))) : 0;
-                const isFullyPaid = total > 0 && recvd >= total;
-                return (
-                  <div style={{background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',borderRadius:'var(--r)',padding:'16px 18px',marginTop:4}}>
-                    <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)',marginBottom:12}}>💳 Advance Payment Required — confirm payment received</div>
-
-                    {/* Order total reference + auto-fill button */}
-                    {total > 0 && (
-                      <div style={{marginBottom:12,display:'flex',alignItems:'center',gap:12,padding:'8px 12px',background:'#fff',borderRadius:'var(--r-sm)',border:'1px solid var(--amber,#d97706)44'}}>
-                        <span style={{fontSize:12,color:'var(--text2)',fontWeight:600}}>Order Total:</span>
-                        <span style={{fontSize:15,fontWeight:800,color:'var(--amber,#d97706)'}}>{fmtCur(total)}</span>
-                        {!payment.advance_amount && (
-                          <button className="btn btn-xs" style={{marginLeft:'auto',background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontSize:11}}
-                            onClick={()=>setP('advance_amount',String(total))}>
-                            Auto-fill full amount
-                          </button>
-                        )}
-                      </div>
-                    )}
-
-                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:10,marginBottom:10}}>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Payment Method <span className="req">*</span></label>
-                        <select className="input" value={payment.method||''} onChange={e=>setP('method',e.target.value)}
-                          style={{borderColor:!payment.method?'var(--amber,#d97706)':undefined}}>
-                          <option value="">— Select —</option>
-                          {PAYMENT_METHODS.map(o=><option key={o}>{o}</option>)}
-                        </select>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Payment Ref / UTR</label>
-                        <input className="input" value={payment.payment_ref||''} onChange={e=>setP('payment_ref',e.target.value)} placeholder="UTR / Ref No."/>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Payment Date</label>
-                        <input className="input" type="date" value={payment.payment_date||''} onChange={e=>setP('payment_date',e.target.value)}/>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Amount Received</label>
-                        <input className="input" type="number" min="0" step="0.01"
-                          value={payment.advance_amount||''}
-                          onChange={e=>{ const v=Math.max(0,parseFloat(e.target.value)||0); setP('advance_amount',String(v)); }}
-                          placeholder="0.00"/>
-                      </div>
+              {/* OPTION A: Advance/Partial payment panels moved to Finance page */}
+              {/* Original full + partial advance panels preserved below as comments — DO NOT DELETE */}
+              {(isFullAdvance(effectiveTerms)||isPartialAdvance(effectiveTerms)) && (
+                <div style={{marginTop:8,padding:'12px 16px',borderRadius:'var(--r)',
+                  background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',
+                  display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>
+                      💰 Advance Payment Required
                     </div>
-
-                    {/* Real-time payment status */}
-                    {recvd > 0 && (
-                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:8}}>
-                        <div style={{padding:'10px 14px',borderRadius:'var(--r)',background:'var(--green-lt)',border:'1px solid var(--green)44'}}>
-                          <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:3}}>AMOUNT RECEIVED</div>
-                          <div style={{fontSize:17,fontWeight:800,color:'var(--green)'}}>{fmtCur(recvd)}</div>
-                        </div>
-                        <div style={{padding:'10px 14px',borderRadius:'var(--r)',
-                          background: balance<=0?'var(--green-lt)':'var(--red-lt)',
-                          border:`1px solid ${balance<=0?'var(--green)':'var(--red)'}44`}}>
-                          <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:3}}>BALANCE OUTSTANDING</div>
-                          <div style={{fontSize:17,fontWeight:800,color:balance<=0?'var(--green)':'var(--red)'}}>
-                            {balance<=0?'✅ Fully Paid':fmtCur(balance)}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Validation */}
-                    {total > 0 && recvd > total && <div style={{color:'var(--red)',fontSize:12,fontWeight:600,marginBottom:6}}>⚠ Amount received exceeds order total</div>}
-                    {payment.method&&payment.payment_ref&&recvd>0&&(
-                      <div style={{padding:'7px 12px',borderRadius:'var(--r-sm)',background:'var(--green-lt)',color:'var(--green)',fontSize:12,fontWeight:600}}>
-                        ✅ {payment.method} · Ref: {payment.payment_ref}{payment.payment_date?' · '+payment.payment_date:''} · {fmtCur(recvd)} {isFullyPaid?'(Full Payment)':'(Partial)'}
+                    <div style={{fontSize:12,color:'var(--text2)',marginTop:3}}>
+                      {isFullAdvance(effectiveTerms) ? 'Full advance payment' : 'Partial advance payment'} must
+                      be collected before this order goes to Procurement.
+                      Go to the Finance page to raise a PI and record payment.
+                    </div>
+                    {order.customer_payment_status === 'paid' && (
+                      <div style={{fontSize:12,color:'var(--green)',fontWeight:700,marginTop:4}}>
+                        ✅ Payment recorded by Finance — order released
                       </div>
                     )}
                   </div>
-                );
-              })()}
-
-              {/* Partial Advance panel — reactive two-way binding */}
-              {isPartialAdvance(effectiveTerms)&&(()=>{
-                const total    = orderTotal(order);
-                const fmtCur   = n => '₹' + (Math.round(n*100)/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-                const advPct   = parseFloat(payment.advance_pct)   || 0;
-                const advAmt   = parseFloat(payment.advance_amount) || 0;
-                // Derived balance values
-                const balPct   = advPct   > 0 ? Math.max(0, parseFloat((100 - advPct).toFixed(2)))   : 0;
-                const balAmt   = advAmt   > 0 && total > 0 ? Math.max(0, parseFloat((total - advAmt).toFixed(2))) : 0;
-                const advAmtFromPct = total > 0 && advPct > 0 ? parseFloat((total * advPct / 100).toFixed(2)) : 0;
-                const advPctFromAmt = total > 0 && advAmt > 0 ? parseFloat((advAmt / total * 100).toFixed(2)) : 0;
-
-                // Which field was last edited (tracked via payment._lastEdited)
-                const lastEdit = payment._lastEdited || 'pct';
-                const displayPct = lastEdit==='pct' ? advPct   : (advPctFromAmt||0);
-                const displayAmt = lastEdit==='amt' ? advAmt   : (advAmtFromPct||0);
-                const displayBalPct = parseFloat((100 - displayPct).toFixed(2));
-                const displayBalAmt = total > 0 ? parseFloat((total - displayAmt).toFixed(2)) : 0;
-
-                const onPctChange = v => {
-                  const pct = Math.min(100, Math.max(0, parseFloat(v)||0));
-                  const amt = total > 0 ? parseFloat((total * pct / 100).toFixed(2)) : 0;
-                  setPayment(p=>({...p, advance_pct:String(pct), advance_amount:String(amt), _lastEdited:'pct'}));
-                };
-                const onAmtChange = v => {
-                  const amt = Math.min(total||Infinity, Math.max(0, parseFloat(v)||0));
-                  const pct = total > 0 ? parseFloat((amt / total * 100).toFixed(2)) : 0;
-                  setPayment(p=>({...p, advance_amount:String(amt), advance_pct:String(pct), _lastEdited:'amt'}));
-                };
-
-                return (
-                  <div style={{background:'var(--surface2)',border:'2px solid var(--accent)',borderRadius:'var(--r)',padding:'16px 18px',marginTop:4}}>
-                    <div style={{fontWeight:700,fontSize:13,color:'var(--accent)',marginBottom:14}}>💰 Partial Advance — specify split</div>
-
-                    {/* Order total reference */}
-                    {total > 0 && (
-                      <div style={{marginBottom:14,padding:'8px 12px',background:'var(--accent-lt)',borderRadius:'var(--r-sm)',fontSize:12,color:'var(--accent)',fontWeight:600}}>
-                        📦 Total Order Value: {fmtCur(total)}
-                      </div>
-                    )}
-
-                    {/* Advance row */}
-                    <div style={{display:'grid',gridTemplateColumns:'100px 1fr 1fr 1fr 1fr',gap:10,marginBottom:10}}>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Advance %</label>
-                        <div style={{display:'flex',alignItems:'center',gap:4}}>
-                          <input className="input" type="number" min="0" max="100" step="0.01"
-                            value={payment.advance_pct||''}
-                            onChange={e=>onPctChange(e.target.value)}
-                            placeholder="0.00"
-                            style={{borderColor:'var(--accent)'}}/>
-                          <span style={{fontWeight:700,color:'var(--accent)'}}>%</span>
-                        </div>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Advance Amount</label>
-                        <input className="input" type="number" min="0" step="0.01"
-                          value={payment.advance_amount||''}
-                          onChange={e=>onAmtChange(e.target.value)}
-                          placeholder="0.00"
-                          style={{borderColor:'var(--accent)'}}/>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Payment Method</label>
-                        <select className="input" value={payment.method||''} onChange={e=>setP('method',e.target.value)}>
-                          <option value="">— Select —</option>
-                          {PAYMENT_METHODS.map(o=><option key={o}>{o}</option>)}
-                        </select>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Advance Ref / UTR</label>
-                        <input className="input" value={payment.payment_ref||''} onChange={e=>setP('payment_ref',e.target.value)} placeholder="UTR / Ref"/>
-                      </div>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>Advance Date</label>
-                        <input className="input" type="date" value={payment.payment_date||''} onChange={e=>setP('payment_date',e.target.value)}/>
-                      </div>
-                    </div>
-
-                    {/* Real-time split summary */}
-                    {(displayPct > 0 || displayAmt > 0) && (
-                      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
-                        <div style={{background:'var(--green-lt)',border:'1px solid var(--green)44',borderRadius:'var(--r)',padding:'12px 14px'}}>
-                          <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4,letterSpacing:.5}}>ADVANCE PAYMENT</div>
-                          <div style={{fontSize:18,fontWeight:800,color:'var(--green)',letterSpacing:'-.02em'}}>{fmtCur(displayAmt)}</div>
-                          <div style={{fontSize:12,fontWeight:600,color:'var(--green)',marginTop:2}}>{displayPct.toFixed(2)}% of total</div>
-                        </div>
-                        <div style={{background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)44',borderRadius:'var(--r)',padding:'12px 14px'}}>
-                          <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4,letterSpacing:.5}}>BALANCE DUE</div>
-                          <div style={{fontSize:18,fontWeight:800,color:'var(--amber,#d97706)',letterSpacing:'-.02em'}}>{fmtCur(Math.max(0,displayBalAmt))}</div>
-                          <div style={{fontSize:12,fontWeight:600,color:'var(--amber,#d97706)',marginTop:2}}>{Math.max(0,displayBalPct).toFixed(2)}% of total</div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Balance timing */}
-                    <div style={{display:'grid',gridTemplateColumns:'1.5fr 1fr',gap:10}}>
-                      <div className="form-group" style={{marginBottom:0}}>
-                        <label className="label" style={{fontWeight:700}}>
-                          Balance {displayPct>0?Math.max(0,displayBalPct).toFixed(2)+'%':''} — When to pay?
-                        </label>
-                        <select className="input" value={payment.balance_timing||''} onChange={e=>setP('balance_timing',e.target.value)}>
-                          <option value="">— Select timing —</option>
-                          {BALANCE_TIMINGS.map(t=><option key={t}>{t}</option>)}
-                        </select>
-                      </div>
-                      <div style={{display:'flex',alignItems:'flex-end'}}>
-                        {displayPct > 0 && (
-                          <div style={{background:'var(--accent-lt)',borderRadius:'var(--r-sm)',padding:'8px 12px',width:'100%',fontWeight:700,fontSize:12,color:'var(--accent)',lineHeight:1.5}}>
-                            {displayPct.toFixed(1)}% ({fmtCur(displayAmt)}) Advance<br/>
-                            → {Math.max(0,displayBalPct).toFixed(1)}% ({fmtCur(Math.max(0,displayBalAmt))}) {payment.balance_timing||'(timing not set)'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Validation warnings */}
-                    {displayPct > 100 && <div style={{marginTop:8,color:'var(--red)',fontSize:12,fontWeight:600}}>⚠ Advance % cannot exceed 100%</div>}
-                    {total > 0 && displayAmt > total && <div style={{marginTop:8,color:'var(--red)',fontSize:12,fontWeight:600}}>⚠ Advance amount cannot exceed order total ({fmtCur(total)})</div>}
-                    {displayPct < 0 && <div style={{marginTop:8,color:'var(--red)',fontSize:12,fontWeight:600}}>⚠ Values must be non-negative</div>}
-                  </div>
-                );
-              })()}
-
-              {/* Save payment changes */}
-              <div style={{marginTop:10,display:'flex',justifyContent:'flex-end'}}>
-                <button className="btn btn-sm btn-primary" onClick={()=>{
-                  if(termsChanged&&!orderTermsComment.trim()){toast.error('Please give a reason for changing payment terms');return;}
-                  mutation.mutate({payment_terms:effectiveTerms,notes:(infoForm.notes||order.notes||'')+(termsChanged&&orderTermsComment?'\n[Terms override: '+orderTermsComment+']':''),_action:'Payment terms updated',_comment:orderTermsComment||'',payment});
-                  toast.success('Payment details saved');
-                  setPaymentSaved(true);
-                }}>💾 Save Payment Details</button>
-              </div>
+                  <button className="btn btn-sm"
+                    disabled={order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
+                    style={{background:'var(--amber,#d97706)',color:'#fff',
+                      borderColor:'var(--amber,#d97706)',fontWeight:700,whiteSpace:'nowrap',
+                      opacity:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
+                      cursor:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
+                    title={order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
+                    onClick={async()=>{
+                      if (order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
+                      try {
+                        await mutation.mutateAsync({
+                          status:                  'payment_approval',
+                          payment_terms:           effectiveTerms || custTerms || '',
+                          customer_payment_status: 'pending',
+                          _action: 'Sent to Finance for advance payment collection',
+                          _comment: '',
+                        });
+                      } catch(_) {}
+                      window.location.href = '/finance';
+                    }}>
+                    {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Go to Finance →'}
+                  </button>
+                </div>
+              )}
             </>
             }
             </div>
@@ -498,11 +330,14 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     <th>Qty</th><th>Unit Price</th>
                     {canSeeProcPrice&&<th>Proc. Price</th>}
                     <th style={{textAlign:'right'}}>Base Value</th>
-					<th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax %</th>
-					<th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax Amt</th>
-                    <th style={{textAlign:'right'}}>Total Value</th>
+                    {/* ADDED: Tax columns — value sourced from order_items.tax_rate (set in sourcing) */}
+                    <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax %</th>
+                    <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax Amt</th>
+                    {/* CHANGED: renamed to clarify = Quoted Price × Qty + Tax */}
+                    <th style={{textAlign:'right'}}>Line Total (incl. Tax)</th>
                     <th>Delivery Date</th><th>Status</th>
-                    {canEdit&&<th>Update</th>}
+                    {/* DISABLED: Update column moved — line status updated via Finance/Procurement flow */}
+                    {/* {canEdit&&<th>Update</th>} */}
                   </tr>
                 </thead>
                 <tbody>
@@ -517,7 +352,16 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       {canSeeProcPrice&&<td className="mono">{li.procurement_price?fmtCur(li.procurement_price,li.currency):'—'}</td>}
                       <td style={{textAlign:'right'}}>
                         {(li.qty&&li.unit_price)
-                          ? <span style={{fontWeight:600,fontSize:12}}>{fmtCur(li.qty*li.unit_price,li.currency)}</span>
+                          ? <span style={{fontWeight:600,fontSize:12}}>{fmtAmt(li.qty*li.unit_price,li.currency)}</span>
+                          : <span style={{color:'var(--text3)'}}>—</span>}
+                      </td>
+                      {/* ADDED: Tax % and Tax Amt — reads li.tax_rate set in sourcing */}
+                      <td style={{textAlign:'right',fontSize:12}}>
+                        {Number(li.tax_rate)||0}%
+                      </td>
+                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>
+                        {Number(li.tax_rate)>0
+                          ? fmtAmt((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100), li.currency)
                           : <span style={{color:'var(--text3)'}}>—</span>}
                       </td>
                       <td style={{textAlign:'right'}}>
@@ -530,7 +374,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                             <div style={{padding:'2px 6px',background:tax>0?'var(--green-lt)':'transparent',
                               borderRadius:'var(--r-sm)',fontWeight:700,fontSize:12,
                               color:tax>0?'var(--green)':'var(--text)'}}>
-                              {fmtCur(tot,li.currency)}
+                              {fmtAmt(tot,li.currency)}
                               {tax>0&&<span style={{fontSize:9,marginLeft:4,fontWeight:600}}>+{tax}%</span>}
                             </div>
                           );
@@ -538,21 +382,22 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       </td>
                       <td>{li.delivery_date||'—'}</td>
                       <td><LineStatusBadge s={li.line_status}/></td>
-                      {canEdit&&(
+                      {/* DISABLED: Update td — line status updated via Finance/Procurement flow */}
+                      {/* {canEdit&&(
                         <td>
                           <select className="input" style={{fontSize:11,padding:'2px 6px',minWidth:100}} value={li.line_status}
                             onChange={e=>mutation.mutate({lineItemStatus:{item_id:li.id,line_status:e.target.value},_action:`Line item ${li.component} → ${e.target.value}`,_comment:''})}>
                             {[{v:'negotiating',l:'Negotiating'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}
                           </select>
                         </td>
-                      )}
+                      )} */}
                     </tr>
                   ))}
                   <tr style={{background:'var(--surface2)',fontWeight:700}}>
                     <td colSpan={canSeeProcPrice?6:5} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
                     <td style={{textAlign:'right'}}>
                       {Object.entries(liBaseByCur).map(([c,v])=>(
-                        <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--accent)'}}>{fmtCur(v,c)}</div>
+                        <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--accent)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
                     <td style={{textAlign:'right'}}>
@@ -560,7 +405,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                         <div key={c} style={{fontSize:14,fontWeight:800,
                           color:hasTax?'var(--green)':'var(--accent)',
                           background:hasTax?'var(--green-lt)':'transparent',
-                          padding:hasTax?'3px 6px':'0',borderRadius:'var(--r-sm)'}}>{fmtCur(v,c)}</div>
+                          padding:hasTax?'3px 6px':'0',borderRadius:'var(--r-sm)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
                     <td colSpan={canEdit?3:2}/>
@@ -785,8 +630,41 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                 </div>
               )}
 
-              {/* Send to Procurement */}
-              {['open','draft','payment_pending'].includes(order.status) && !showProcurement && (
+              {/* FIX: Send to Finance button — shown when advance terms and payment not yet done */}
+              {(order.status === 'payment_approval' || (
+                ['open'].includes(order.status) &&
+                (isFullAdvance(effectiveTerms) || isPartialAdvance(effectiveTerms)) &&
+                order.customer_payment_status !== 'paid'
+              )) && (
+                <button className="btn"
+                  disabled={order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
+                  style={{background:'var(--amber,#d97706)',color:'#fff',
+                    borderColor:'var(--amber,#d97706)',fontWeight:700,padding:'8px 18px',
+                    opacity:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
+                    cursor:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
+                  title={order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
+                  onClick={async()=>{
+                    if (order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
+                    try {
+                      await mutation.mutateAsync({
+                        status:                  'payment_approval',
+                        payment_terms:           effectiveTerms || custTerms || '',
+                        customer_payment_status: 'pending',
+                        _action: 'Sent to Finance for advance payment collection',
+                        _comment: '',
+                      });
+                    } catch(_) {}
+                    window.location.href = '/finance';
+                  }}>
+                  {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Go to Finance'}
+                </button>
+              )}
+
+              {/* Send to Procurement — gated: hidden until advance paid (if applicable) */}
+              {['open','draft','payment_pending'].includes(order.status) &&
+               !showProcurement &&
+               (!(isFullAdvance(effectiveTerms) || isPartialAdvance(effectiveTerms)) ||
+                order.customer_payment_status === 'paid') && (
                 <button className="btn"
                   style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,padding:'8px 18px'}}
                   onClick={()=>setShowProcurement(true)}>
@@ -1055,7 +933,8 @@ export default function OrdersPage() {
     return { base:byCur, total:tByCur };
   };
 
-  const FILTERS = ['all','draft','open','procurement','closed','delivered','hold','failed'];
+  // ADDED: waiting_for_payment status filter chip
+  const FILTERS = ['all','draft','open','procurement','waiting_for_payment','closed','delivered','hold','failed'];
 
   // ── Order ageing ─────────────────────────────────────────────────────────
   const todayStr   = new Date().toISOString().slice(0,10);

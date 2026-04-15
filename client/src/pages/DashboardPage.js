@@ -1,5 +1,5 @@
 // client/src/pages/DashboardPage.js  v2
-import React, { useMemo } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import api from '../utils/api';
@@ -15,6 +15,41 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const isAdmin = ['admin','manager'].includes(user.role);
+
+  // ── Global Search ──────────────────────────────────────────────────────────
+  const [searchQ,      setSearchQ]      = useState('');
+  const [searchRes,    setSearchRes]    = useState(null);
+  const [searchLoading,setSearchLoading]= useState(false);
+  const [searchOpen,   setSearchOpen]   = useState(false);
+  const searchRef = useRef(null);
+  const debounceRef = useRef(null);
+
+  const doSearch = useCallback(async (q) => {
+    if (!q || q.length < 2) { setSearchRes(null); setSearchOpen(false); return; }
+    setSearchLoading(true);
+    try {
+      const r = await api.get('/search?q=' + encodeURIComponent(q));
+      setSearchRes(r.data);
+      setSearchOpen(true);
+    } catch(_) {}
+    finally { setSearchLoading(false); }
+  }, []);
+
+  const handleSearchChange = (e) => {
+    const q = e.target.value;
+    setSearchQ(q);
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => doSearch(q), 300);
+  };
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e) => { if (searchRef.current && !searchRef.current.contains(e.target)) setSearchOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const totalResults = searchRes ? (searchRes.orders?.length||0)+(searchRes.items?.length||0)+(searchRes.enquiries?.length||0)+(searchRes.suppliers?.length||0)+(searchRes.customers?.length||0) : 0;
   const { data: summary={} } = useQuery({ queryKey:['summary'], queryFn:()=>api.get('/reports/summary').then(r=>r.data), refetchInterval:15000 });
   const { data: orders=[] }  = useQuery({ queryKey:['orders'],  queryFn:()=>api.get('/orders').then(r=>r.data) });
   const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
@@ -42,6 +77,147 @@ export default function DashboardPage() {
 
   return (
     <div>
+      {/* ── Global Search Bar ──────────────────────────────────────────────── */}
+      <div ref={searchRef} style={{position:'relative',marginBottom:18}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',
+          background:'var(--surface2)',borderRadius:10,
+          border:`1.5px solid ${searchOpen&&searchQ?'var(--accent)':'var(--border)'}`,
+          transition:'border-color .15s'}}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--text3)" strokeWidth="2">
+            <circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/>
+          </svg>
+          <input
+            value={searchQ}
+            onChange={handleSearchChange}
+            onFocus={()=>{ if(searchRes&&searchQ.length>=2) setSearchOpen(true); }}
+            placeholder="Search by MPN, Component, Manufacturer, Order ID, Customer, Supplier…"
+            style={{flex:1,border:'none',background:'transparent',outline:'none',
+              fontSize:14,color:'var(--text)',fontFamily:'inherit'}}
+          />
+          {searchLoading && <span style={{fontSize:11,color:'var(--text3)'}}>Searching…</span>}
+          {searchQ && <button onClick={()=>{setSearchQ('');setSearchRes(null);setSearchOpen(false);}}
+            style={{border:'none',background:'transparent',cursor:'pointer',fontSize:16,
+              color:'var(--text3)',lineHeight:1,padding:0}}>×</button>}
+        </div>
+
+        {/* Results dropdown */}
+        {searchOpen && searchRes && totalResults === 0 && (
+          <div style={{position:'absolute',top:'calc(100% + 4px)',left:0,right:0,zIndex:100,
+            background:'var(--surface)',border:'1px solid var(--border)',borderRadius:8,
+            padding:'16px',textAlign:'center',color:'var(--text3)',fontSize:13,
+            boxShadow:'0 4px 16px rgba(0,0,0,.1)'}}>
+            No results for <strong>{searchQ}</strong>
+          </div>
+        )}
+
+        {searchOpen && searchRes && totalResults > 0 && (
+          <div style={{position:'absolute',top:'calc(100% + 4px)',left:0,right:0,zIndex:100,
+            background:'var(--surface)',border:'1px solid var(--border)',borderRadius:8,
+            maxHeight:420,overflowY:'auto',
+            boxShadow:'0 4px 16px rgba(0,0,0,.12)'}}>
+
+            {/* Orders */}
+            {(searchRes.orders||[]).length > 0 && (
+              <div>
+                <div style={{padding:'6px 14px',fontSize:10,fontWeight:700,color:'var(--text3)',
+                  letterSpacing:.5,background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>ORDERS</div>
+                {searchRes.orders.map(o=>(
+                  <div key={o.id} onClick={()=>{navigate('/orders');setSearchOpen(false);setSearchQ('');}}
+                    style={{padding:'9px 14px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,
+                      borderBottom:'1px solid var(--border)',transition:'background .1s'}}
+                    onMouseEnter={e=>e.currentTarget.style.background='var(--surface2)'}
+                    onMouseLeave={e=>e.currentTarget.style.background=''}>
+                    <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,color:'var(--accent)'}}>{o.id}</span>
+                    <span style={{fontSize:11,color:'var(--text2)'}}>{canSeeCustomer?custName(o.customer_id):''}</span>
+                    {o.po_number&&<span style={{fontSize:11,color:'var(--text3)'}}>PO: {o.po_number}</span>}
+                    <span style={{marginLeft:'auto',fontSize:10,padding:'1px 7px',borderRadius:99,
+                      background:'var(--surface2)',color:'var(--text3)',fontWeight:600}}>{o.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Items (MPN/Component/Manufacturer) */}
+            {(searchRes.items||[]).length > 0 && (
+              <div>
+                <div style={{padding:'6px 14px',fontSize:10,fontWeight:700,color:'var(--text3)',
+                  letterSpacing:.5,background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>COMPONENTS / MPN</div>
+                {searchRes.items.map((li,i)=>(
+                  <div key={i} onClick={()=>{navigate('/orders');setSearchOpen(false);setSearchQ('');}}
+                    style={{padding:'9px 14px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,
+                      borderBottom:'1px solid var(--border)'}}
+                    onMouseEnter={e=>e.currentTarget.style.background='var(--surface2)'}
+                    onMouseLeave={e=>e.currentTarget.style.background=''}>
+                    <span style={{fontSize:12,fontWeight:600,color:'var(--text)'}}>{li.component}</span>
+                    {li.manufacturer&&<span style={{fontSize:11,color:'var(--text3)'}}>— {li.manufacturer}</span>}
+                    {li.ipn&&<span style={{fontSize:11,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>{li.ipn}</span>}
+                    <span style={{marginLeft:'auto',fontSize:10,fontFamily:'monospace',
+                      color:'var(--accent)',fontWeight:600}}>{li.order_id}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Enquiries */}
+            {(searchRes.enquiries||[]).length > 0 && (
+              <div>
+                <div style={{padding:'6px 14px',fontSize:10,fontWeight:700,color:'var(--text3)',
+                  letterSpacing:.5,background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>ENQUIRIES</div>
+                {searchRes.enquiries.map((e,i)=>(
+                  <div key={i} onClick={()=>{navigate('/enquiries');setSearchOpen(false);setSearchQ('');}}
+                    style={{padding:'9px 14px',cursor:'pointer',display:'flex',alignItems:'center',gap:10,
+                      borderBottom:'1px solid var(--border)'}}
+                    onMouseEnter={ev=>ev.currentTarget.style.background='var(--surface2)'}
+                    onMouseLeave={ev=>ev.currentTarget.style.background=''}>
+                    <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,color:'var(--purple,#6d28d9)'}}>{e.enquiry_id}</span>
+                    <span style={{fontSize:12,fontWeight:600}}>{e.component}</span>
+                    {e.manufacturer&&<span style={{fontSize:11,color:'var(--text3)'}}>— {e.manufacturer}</span>}
+                    <span style={{marginLeft:'auto',fontSize:10,padding:'1px 7px',borderRadius:99,
+                      background:'var(--surface2)',color:'var(--text3)',fontWeight:600}}>{e.enq_status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Customers */}
+            {(searchRes.customers||[]).length > 0 && (
+              <div>
+                <div style={{padding:'6px 14px',fontSize:10,fontWeight:700,color:'var(--text3)',
+                  letterSpacing:.5,background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>CUSTOMERS</div>
+                {searchRes.customers.map(c=>(
+                  <div key={c.id} onClick={()=>{navigate('/customers');setSearchOpen(false);setSearchQ('');}}
+                    style={{padding:'9px 14px',cursor:'pointer',display:'flex',alignItems:'center',gap:8,
+                      borderBottom:'1px solid var(--border)'}}
+                    onMouseEnter={e=>e.currentTarget.style.background='var(--surface2)'}
+                    onMouseLeave={e=>e.currentTarget.style.background=''}>
+                    <span style={{fontSize:13,fontWeight:600}}>{c.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Suppliers */}
+            {(searchRes.suppliers||[]).length > 0 && (
+              <div>
+                <div style={{padding:'6px 14px',fontSize:10,fontWeight:700,color:'var(--text3)',
+                  letterSpacing:.5,background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>SUPPLIERS</div>
+                {searchRes.suppliers.map((s,i)=>(
+                  <div key={i} onClick={()=>{navigate('/suppliers');setSearchOpen(false);setSearchQ('');}}
+                    style={{padding:'9px 14px',cursor:'pointer',display:'flex',alignItems:'center',gap:8,
+                      borderBottom:'1px solid var(--border)'}}
+                    onMouseEnter={e=>e.currentTarget.style.background='var(--surface2)'}
+                    onMouseLeave={e=>e.currentTarget.style.background=''}>
+                    <span style={{fontSize:13,fontWeight:600}}>{s.name}</span>
+                    <span style={{fontSize:11,color:'var(--text3)',marginLeft:'auto',fontFamily:'monospace'}}>{s.order_id}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+          </div>
+        )}
+      </div>
+
       <div className="stats-grid">
         <div className="stat-card stat-accent"><div className="stat-label">Total Orders</div><div className="stat-val">{summary.total||0}</div><div className="stat-sub">{summary.customers||0} customers · {summary.enquiries||0} enquiries</div></div>
         <div className="stat-card stat-amber"><div className="stat-label">Open Orders</div><div className="stat-val" style={{color:'var(--amber)'}}>{summary.open||0}</div><div className="stat-sub">{summary.delayed||0} delayed past due date</div></div>

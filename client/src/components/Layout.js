@@ -95,6 +95,13 @@ export default function Layout() {
             <Icon d="M3 4h10M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M4 4l.667 9.333A1 1 0 005.66 14h4.68a1 1 0 00.993-.667L12 4"/>
             Deleted Bin
           </NavLink>
+          {/* Finance nav — visible to accounts dept + admin/manager */}
+          {(isAdmin || user.department === 'accounts' || user.department === 'management') && (
+            <NavLink to="/finance" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+              <Icon d="M2 4h12v8H2zM2 8h12M6 12v2M10 12v2M5 14h6"/>
+              Finance
+            </NavLink>
+          )}
 
           <div className="sb-section">Onboarding</div>
           {canSeeCustomers && (
@@ -142,23 +149,12 @@ export default function Layout() {
           </div>
         </header>
         <main className="page-content"><Outlet /></main>
-		<div style={{
-  position: 'fixed',
-  bottom: '8px',
-  right: '12px',
-  fontSize: '10px',
-  color: 'rgba(0,0,0,0.5)',
-  zIndex: 9999,
-  pointerEvents: 'none'
-}}>
-  Powered by Sencilla Tec Solutions · All Rights Reserved
-</div>
       </div>
     </div>
   );
 }
 
 function PageTitle() {
-  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports'};
+  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance'};
   return map[window.location.pathname] || 'Ciflux OMS';
 }

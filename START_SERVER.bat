@@ -1,59 +1,16 @@
 @echo off
-title Ciflux OMS Server
-color 0A
-
+cd /d C:\ciflux-oms
 echo.
-echo  ============================================
-echo   Ciflux OMS  -  Electronic Components OMS
-echo  ============================================
+echo Checking deasync...
+node -e "require('deasync'); console.log('deasync OK')" 2>&1
 echo.
-
-node --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo  [ERROR] Node.js is not installed!
-    echo  Download from: https://nodejs.org  (LTS version)
-    pause
-    exit /b 1
-)
-echo  [OK] Node.js found:
-node --version
-
-if not exist "node_modules" (
-    echo.
-    echo  [SETUP] Installing server dependencies...
-    call npm install
-)
-
-if not exist "client\node_modules" (
-    echo.
-    echo  [SETUP] Installing client dependencies...
-    cd client
-    call npm install
-    cd ..
-)
-
-if not exist "client\build" (
-    echo.
-    echo  [SETUP] Building React app (first time only, ~1 min)...
-    cd client
-    call npm run build
-    cd ..
-    echo  [OK] Build complete
-)
-
+echo Checking pg...
+node -e "require('pg'); console.log('pg OK')" 2>&1
 echo.
-echo  ============================================
-echo   Starting Ciflux OMS...
-echo  ============================================
+echo Checking dotenv...
+node -e "require('dotenv'); console.log('dotenv OK')" 2>&1
 echo.
-echo  Open your browser:   http://localhost:8080
-echo  Other LAN users:     http://YOUR-IP:8080
-echo  (run ipconfig to find your IP)
+echo All checks done. Starting server...
 echo.
-echo  Login: admin / admin123
-echo  Press Ctrl+C to stop
-echo  ============================================
-echo.
-
-node server/index.js
+node server\index.js
 pause

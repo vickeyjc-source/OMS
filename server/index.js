@@ -1,28 +1,80 @@
 // server/index.js  –  Ciflux OMS v2
 require('dotenv').config();           // loads .env from project root
 const express  = require('express');
+
+// DEBUG: catch any silent crash
+process.on('uncaughtException', err => {
+  console.error('UNCAUGHT EXCEPTION:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason);
+  process.exit(1);
+});
 const fs       = require('fs');
 const path     = require('path');
 
-// ── File-based error logging ──────────────────────────────────────────────────
-const LOG_DIR  = path.join(__dirname, '..', 'logs');
-const LOG_FILE = path.join(LOG_DIR, 'server-errors.log');
+// ── Logging system — 24hr rotation, captures everything ─────────────────────
+const LOG_DIR = path.join(__dirname, '..', 'logs');
 if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+
+const LOG_SERVER_ALL  = path.join(LOG_DIR, 'server.log');
+const LOG_SERVER_ERR  = path.join(LOG_DIR, 'server-errors.log');
+const LOG_CLIENT_ERR  = path.join(LOG_DIR, 'client-errors.log');
+
+// Rotate a log file if it's older than 24 hours (overwrite with fresh file)
+function rotateIfOld(filePath) {
+  try {
+    if (fs.existsSync(filePath)) {
+      const stat = fs.statSync(filePath);
+      const ageHours = (Date.now() - stat.mtimeMs) / 3600000;
+      if (ageHours >= 24) {
+        fs.writeFileSync(filePath,
+          `[${new Date().toISOString()}] ── Log rotated (24hr) ──\n`);
+      }
+    }
+  } catch(_) {}
+}
+
+// Rotate all logs on startup
+rotateIfOld(LOG_SERVER_ALL);
+rotateIfOld(LOG_SERVER_ERR);
+rotateIfOld(LOG_CLIENT_ERR);
+
+// Schedule rotation check every hour
+setInterval(() => {
+  rotateIfOld(LOG_SERVER_ALL);
+  rotateIfOld(LOG_SERVER_ERR);
+  rotateIfOld(LOG_CLIENT_ERR);
+}, 3600000);
+
+function writeLog(filePath, text) {
+  try { fs.appendFileSync(filePath, text); } catch(_) {}
+}
 
 function logError(context, err) {
   const line = `[${new Date().toISOString()}] ${context}\n  ${err?.stack || err}\n\n`;
-  fs.appendFileSync(LOG_FILE, line);
+  writeLog(LOG_SERVER_ERR, line);
+  writeLog(LOG_SERVER_ALL, line);
   console.error('[ERROR]', context, err?.message || err);
 }
 
-// Patch console.error to also write to log file
+// Patch console.error → also write to error log
 const _origErr = console.error.bind(console);
 console.error = (...args) => {
   _origErr(...args);
-  try {
-    const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
-  } catch(_) {}
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  writeLog(LOG_SERVER_ERR, `[${new Date().toISOString()}] ${msg}\n`);
+  writeLog(LOG_SERVER_ALL, `[${new Date().toISOString()}] [ERR] ${msg}\n`);
+};
+
+// Patch console.log → write to server.log (full log)
+const _origLog = console.log.bind(console);
+console.log = (...args) => {
+  _origLog(...args);
+  const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  writeLog(LOG_SERVER_ALL, `[${new Date().toISOString()}] ${msg}\n`);
 };
 const cors     = require('cors');
 const session  = require('express-session');
@@ -37,6 +89,18 @@ const PORT   = process.env.PORT || 8080;
 const SECRET = 'ciflux-jwt-2024';
 
 app.use(cors({ origin: true, credentials: true }));
+
+// ── Request logger — every request captured to server.log ────────────────────
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    const line = `[${new Date().toISOString()}] ${req.method} ${req.path} → ${res.statusCode} (${ms}ms)\n`;
+    writeLog(LOG_SERVER_ALL, line);
+    if (res.statusCode >= 400) writeLog(LOG_SERVER_ERR, line);
+  });
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
 app.use(session({
   secret: 'ciflux-session-2024',
@@ -466,8 +530,8 @@ app.put('/api/enquiries/:id', auth, (req, res) => {
     d.sourcing.forEach(s => {
       try {
         // Always use UPSERT so quote_price is always written regardless of existing/new
-        run(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,availability,lead_time,notes,quote_price,quote_currency,updated_by,updated_at,sourcing_revision_notes,sales_comment,tax_rate)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        run(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,availability,lead_time,notes,quote_price,quote_currency,updated_by,updated_at,sourcing_revision_notes,sales_comment)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                availability=EXCLUDED.availability, lead_time=EXCLUDED.lead_time,
@@ -475,15 +539,13 @@ app.put('/api/enquiries/:id', auth, (req, res) => {
                quote_currency=EXCLUDED.quote_currency, updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
-               sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment),
-               tax_rate=EXCLUDED.tax_rate`,
+               sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment)`,
           [s.id||uuid(), req.params.id, s.enquiry_item_id, s.supplier_id||'',
            s.sourced_price||null, s.sourced_currency||'INR', s.availability||'',
            s.lead_time||'', s.notes||'',
            (s.quote_price !== '' && s.quote_price != null) ? s.quote_price : null,
            s.quote_currency||'INR', req.session.user.id, now,
-           s.sourcing_revision_notes||null, s.sales_comment||null,
-           (s.tax_rate !== '' && s.tax_rate != null) ? s.tax_rate : null]);
+           s.sourcing_revision_notes||null, s.sales_comment||null]);
       } catch(e) {
         console.error('[sourcing save error] row:', JSON.stringify({id:s.id,qp:s.quote_price}), 'err:', e.message);
       }
@@ -562,9 +624,9 @@ app.post('/api/quotes/:id/revise', auth, (req, res) => {
     });
   }
 
-  // Move enquiry back to sourcing for re-pricing
+  // Move enquiry back to sourcing for re-pricing — use returned_to_sourcing so Sourcing Bin shows it under Revision Needed
   if (parent.enquiry_id) {
-    run("UPDATE enquiries SET status='sourcing', updated_at=? WHERE id=?", [now, parent.enquiry_id]);
+    run("UPDATE enquiries SET status='returned_to_sourcing', updated_at=? WHERE id=?", [now, parent.enquiry_id]);
     try {
       run('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
         [uuid(), parent.enquiry_id,
@@ -624,7 +686,10 @@ app.get('/api/quotes/:id/lineitems', auth, (req, res) => {
       quote_price:   qp,
       quote_currency:qc || item.target_currency || 'INR',
       sourced_price: src.sourced_price || null,
-      tax_rate:      src.tax_rate      || 0,
+      // FIX 2: return tax_rate from enquiry_sourcing (set by Sourcing team)
+      // fallback to enquiry_items.tax_rate if sourcing row has none
+      tax_rate: (src.tax_rate != null && src.tax_rate !== '') ? Number(src.tax_rate)
+               : (item.tax_rate != null ? Number(item.tax_rate) : 0),
     };
   });
 
@@ -685,6 +750,7 @@ app.post('/api/orders', auth, (req, res) => {
   const supMap = {};
   (d.lineItems||[]).forEach((item, idx) => {
     const lid = uuid(); // always generate server-side — client ids like li1/li2 clash across orders
+    // FIX 3a: added tax_rate as 15th column (requires order_items.tax_rate column — added in startup migration)
     run('INSERT INTO order_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [lid,d.id,item.component,item.manufacturer||'',item.ipn||'',item.qty||0,
        item.unit_price||0,item.procurement_price||0,item.currency||'INR',
@@ -730,13 +796,9 @@ app.put('/api/orders/:id', auth, (req, res) => {
   if (d.status === 'closed') {
     const undelivered = all("SELECT id FROM order_items WHERE order_id=? AND line_status != 'delivered'", [oid]);
     if (undelivered.length > 0) return res.status(400).json({ error: `Cannot close order: ${undelivered.length} line item(s) not yet delivered` });
-    // Allow close if order was closed via shipment flow (has a delivered shipment)
-    const closedViaShipment = all("SELECT id FROM shipments WHERE order_id=? AND status='delivered'", [oid]).length > 0;
-    if (!closedViaShipment) {
-      const docs = get('SELECT * FROM order_documents WHERE order_id=?', [oid]);
-      if (!docs?.delivery_slip || !docs?.packing_list || !docs?.invoice) {
-        return res.status(400).json({ error: 'Cannot close: Complete the dispatch flow in Delivery Hub first' });
-      }
+    const docs = get('SELECT * FROM order_documents WHERE order_id=?', [oid]);
+    if (!docs?.delivery_slip || !docs?.packing_list || !docs?.invoice) {
+      return res.status(400).json({ error: 'Cannot close: Delivery Slip, Packing List, and Invoice are required' });
     }
     // E-way bill check for Indian orders > 50000 INR
     const items = all('SELECT * FROM order_items WHERE order_id=?', [oid]);
@@ -767,6 +829,7 @@ app.put('/api/orders/:id', auth, (req, res) => {
     const supMap = {};
     d.lineItems.forEach((item, idx) => {
       const lid = uuid(); // always generate server-side — client ids like li1/li2 clash across orders
+      // FIX 3b: added tax_rate as 15th column
       run('INSERT INTO order_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [lid,oid,item.component,item.manufacturer||'',item.ipn||'',item.qty||0,
          item.unit_price||0,item.procurement_price||0,item.currency||'INR',
@@ -813,109 +876,6 @@ app.put('/api/orders/:id', auth, (req, res) => {
 });
 app.delete('/api/orders/:id', adminOnly, (req, res) => {
   run('DELETE FROM orders WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
-});
-
-// ── GRN — save extended inspection fields per line item ───────────────────────
-app.post('/api/orders/:id/grn', auth, (req, res) => {
-  const d = req.body || {};
-  const now = nowStr();
-  const order = get('SELECT * FROM orders WHERE id=?', [req.params.id]);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  const records = d.records || [];
-  // CHANGE: generate GRN document number — one per delivery event, shared by all items in this batch
-  const existingGrnNos = all("SELECT DISTINCT grn_no FROM grn_records WHERE order_id=? AND grn_no != ''", [req.params.id]);
-  const grnSeq  = existingGrnNos.length + 1;
-  const grnNo   = 'GRN-' + req.params.id + '-' + String(grnSeq).padStart(3, '0');
-  records.forEach(r => {
-    if (!r.order_item_id) return;
-    try {
-      // CHANGE: added grn_no column to INSERT (column 15, value grnNo)
-      run(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at,grn_no) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), req.params.id, r.order_item_id, r.supplier_id||'', r.coo||'', r.date_code||'',
-         r.lot_number||'', r.weight_kg||null, r.qty_received||0, r.condition||'good',
-         r.arrived_date||'', r.notes||'', req.session.user.id, now, grnNo]);
-    } catch(e) { console.error('GRN record error:', e.message); }
-    const li = get('SELECT * FROM order_items WHERE id=? AND order_id=?', [r.order_item_id, req.params.id]);
-    if (!li) return;
-    const ns = r.condition==='rejected' ? 'grn_rejected' : parseInt(r.qty_received)<li.qty ? 'grn_partial' : 'ready_to_ship';
-    run('UPDATE order_items SET line_status=? WHERE id=?', [ns, r.order_item_id]);
-  });
-  const allItems = all('SELECT line_status FROM order_items WHERE order_id=?', [req.params.id]);
-  const newOS = allItems.every(li=>li.line_status==='ready_to_ship') ? 'in_hub'
-              : allItems.some(li=>['ready_to_ship','grn_partial'].includes(li.line_status)) ? 'partial_hub'
-              : order.status;
-  if (newOS !== order.status) run('UPDATE orders SET status=? WHERE id=?', [newOS, req.params.id]);
-  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [uuid(),req.params.id,`GRN recorded — ${records.length} item(s) — ${newOS}`,req.session.user.name,'',now]); } catch(_) {}
-  saveNow();
-  // CHANGE: include grn_no in response so client can show it in toast
-  res.json({ ok:true, order_status: newOS, grn_no: grnNo });
-});
-
-// ── SHIPMENTS — outbound dispatch and delivery confirmation ───────────────────
-app.get('/api/orders/:id/shipments', auth, (req, res) => {
-  const rows = all('SELECT * FROM shipments WHERE order_id=? ORDER BY shipment_no', [req.params.id]);
-  const ids  = rows.map(s=>s.id);
-  const items = ids.length ? all('SELECT * FROM shipment_items WHERE shipment_id IN ('+ids.map(()=>'?').join(',')+')', ids) : [];
-  res.json(rows.map(s=>({...s, items: items.filter(i=>i.shipment_id===s.id)})));
-});
-
-app.post('/api/orders/:id/shipments', auth, (req, res) => {
-  const d = req.body || {};
-  const order = get('SELECT * FROM orders WHERE id=?', [req.params.id]);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  const now = nowStr();
-  const existing = all('SELECT shipment_no FROM shipments WHERE order_id=? ORDER BY shipment_no DESC', [req.params.id]);
-  const nextNo = existing.length > 0 ? existing[0].shipment_no + 1 : 1;
-  const shipId = uuid().slice(0,8).toUpperCase();
-  run(`INSERT INTO shipments(id,order_id,shipment_no,type,status,shipper_id,tracking_no,invoice_ref,invoice_file,eway_bill,delivery_slip,packing_list,pod_ref,notes,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [shipId, req.params.id, nextNo, d.type||'full', 'dispatched',
-     d.shipper_id||null, d.tracking_no||'', d.invoice_ref||'', d.invoice_file||'',
-     d.eway_bill||'', d.delivery_slip||'generated', d.packing_list||'generated',
-     '', d.notes||'', req.session.user.id, now]);
-  (d.items||[]).forEach(it => {
-    try {
-      run('INSERT INTO shipment_items(id,shipment_id,order_item_id,qty_shipped) VALUES(?,?,?,?)', [uuid(), shipId, it.order_item_id, it.qty_shipped||0]);
-      run("UPDATE order_items SET line_status='shipped_customer' WHERE id=?", [it.order_item_id]);
-    } catch(_) {}
-  });
-  const allItems = all('SELECT line_status FROM order_items WHERE order_id=?', [req.params.id]);
-  const allShipped = allItems.every(li=>['shipped_customer','delivered','grn_rejected'].includes(li.line_status));
-  const anyShipped = allItems.some(li=>li.line_status==='shipped_customer');
-  const newOS = allShipped ? 'transit_customer' : anyShipped ? 'partial_dispatched' : order.status;
-  if (newOS !== order.status) run('UPDATE orders SET status=? WHERE id=?', [newOS, req.params.id]);
-  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [uuid(),req.params.id,`Shipment ${nextNo} dispatched — ${(d.items||[]).length} item(s)`,req.session.user.name,'',now]); } catch(_) {}
-  saveNow();
-  res.json({ id: shipId, shipment_no: nextNo, order_status: newOS });
-});
-
-app.put('/api/shipments/:id', auth, (req, res) => {
-  const d = req.body || {};
-  const ship = get('SELECT * FROM shipments WHERE id=?', [req.params.id]);
-  if (!ship) return res.status(404).json({ error: 'Shipment not found' });
-  const now = nowStr();
-  run(`UPDATE shipments SET status=?,shipper_id=?,tracking_no=?,invoice_ref=?,invoice_file=?,eway_bill=?,delivery_slip=?,packing_list=?,dispatched_at=?,delivered_at=?,pod_ref=?,notes=? WHERE id=?`,
-    [d.status??ship.status, d.shipper_id??ship.shipper_id, d.tracking_no??ship.tracking_no??'',
-     d.invoice_ref??ship.invoice_ref??'', d.invoice_file??ship.invoice_file??'',
-     d.eway_bill??ship.eway_bill??'', d.delivery_slip??ship.delivery_slip??'',
-     d.packing_list??ship.packing_list??'',
-     d.status==='dispatched'?now:(ship.dispatched_at||null),
-     d.status==='delivered'?now:(ship.delivered_at||null),
-     d.pod_ref??ship.pod_ref??'', d.notes??ship.notes??'', req.params.id]);
-  if (d.status==='delivered' && ship.status!=='delivered') {
-    const shipItems = all('SELECT * FROM shipment_items WHERE shipment_id=?', [req.params.id]);
-    shipItems.forEach(si => run("UPDATE order_items SET line_status='delivered' WHERE id=?", [si.order_item_id]));
-    const allShips = all("SELECT * FROM shipments WHERE order_id=?", [ship.order_id]);
-    const allDone  = allShips.every(s => s.id===req.params.id ? true : s.status==='delivered');
-    const allItemsDone = all("SELECT line_status FROM order_items WHERE order_id=?", [ship.order_id]).every(li=>['delivered','grn_rejected'].includes(li.line_status));
-    if (allDone && allItemsDone) {
-      run("UPDATE orders SET status='closed', closed_at=? WHERE id=?", [now, ship.order_id]);
-      try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [uuid(),ship.order_id,'All shipments delivered — order closed',req.session.user.name,d.pod_ref||'',now]); } catch(_) {}
-    } else {
-      run("UPDATE orders SET status='transit_customer' WHERE id=? AND status NOT IN ('closed')", [ship.order_id]);
-    }
-  }
-  saveNow();
-  res.json({ ok: true });
 });
 
 // ── APPROVAL WORKFLOWS ───────────────────────────────────────
@@ -1000,6 +960,57 @@ app.delete('/api/admin/delete-all', adminOnly, (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
+// ── GLOBAL SEARCH ────────────────────────────────────────────────────────────
+app.get('/api/search', auth, (req, res) => {
+  const q = (req.query.q || '').trim();
+  if (!q || q.length < 2) return res.json({ orders:[], enquiries:[], items:[] });
+  const like = '%' + q.toLowerCase() + '%';
+  try {
+    // Orders — match on id, po_number, customer_ref, customer name
+    const orderRows = all(`
+      SELECT DISTINCT o.id, o.status, o.customer_id, o.po_number, o.customer_ref, o.created_at
+      FROM orders o
+      LEFT JOIN customers c ON c.id = o.customer_id
+      WHERE o.status NOT IN ('deleted')
+        AND (LOWER(o.id) LIKE ? OR LOWER(o.po_number) LIKE ? OR LOWER(o.customer_ref) LIKE ? OR LOWER(c.name) LIKE ?)
+      LIMIT 8`, [like, like, like, like]);
+
+    // Order items — match on component, manufacturer, ipn
+    const itemRows = all(`
+      SELECT DISTINCT oi.order_id, oi.component, oi.manufacturer, oi.ipn, oi.line_status,
+             o.status as order_status, o.customer_id
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.status NOT IN ('deleted')
+        AND (LOWER(oi.component) LIKE ? OR LOWER(oi.manufacturer) LIKE ? OR LOWER(oi.ipn) LIKE ?)
+      LIMIT 10`, [like, like, like]);
+
+    // Enquiry items — match component/manufacturer/ipn
+    const enqRows = all(`
+      SELECT DISTINCT ei.enquiry_id, ei.component, ei.manufacturer, ei.ipn,
+             e.status as enq_status, e.customer_id
+      FROM enquiry_items ei
+      JOIN enquiries e ON e.id = ei.enquiry_id
+      WHERE LOWER(ei.component) LIKE ? OR LOWER(ei.manufacturer) LIKE ? OR LOWER(ei.ipn) LIKE ?
+      LIMIT 8`, [like, like, like]);
+
+    // Suppliers
+    const supRows = all(`
+      SELECT DISTINCT s.id, s.name, so.order_id
+      FROM suppliers s
+      JOIN supplier_orders so ON so.supplier_id = s.id
+      WHERE LOWER(s.name) LIKE ?
+      LIMIT 5`, [like]);
+
+    const customers = all(`SELECT id, name FROM customers WHERE LOWER(name) LIKE ? LIMIT 5`, [like]);
+
+    res.json({ orders: orderRows, items: itemRows, enquiries: enqRows, suppliers: supRows, customers });
+  } catch(e) {
+    console.error('[SEARCH]', e.message);
+    res.json({ orders:[], items:[], enquiries:[], suppliers:[], customers:[] });
+  }
+});
+
 // ── REPORTS ──────────────────────────────────────────────────
 app.get('/api/reports/summary', auth, (req, res) => {
   const g = q => (get(q)||{c:0}).c;
@@ -1023,6 +1034,7 @@ app.get('/api/reports/summary', auth, (req, res) => {
     sourcing:      g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
     procurement:     g("SELECT COUNT(*) as c FROM order_items WHERE line_status='procurement'"),
     in_transit:      g("SELECT COUNT(*) as c FROM order_items WHERE line_status='shipped'"),
+    finance_pending: g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'"),
     delivery_hub:    g("SELECT COUNT(*) as c FROM order_items WHERE line_status='delivered_hub'"),
   });
 });
@@ -1037,6 +1049,10 @@ function getLanIp() {
   return '127.0.0.1';
 }
 initDb().then(() => {
+  console.log('[STARTUP] DB ready — registering routes...');
+  // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
+  // customer_payments table created by db.js initDb() via pool.query()
+  // ─────────────────────────────────────────────────────────────────────────────
   // ── PURCHASE ORDER (Supplier PO) routes ──────────────────────────────────────
 
 // Raise a new PO for an order → supplier
@@ -1067,13 +1083,11 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
     poId = uuid().slice(0,8);
     poNo = nextPoNo();
     run(`INSERT INTO supplier_orders(id,order_id,supplier_id,internal_po_no,po_no,status,
-         confirmed_price,confirmed_currency,buying_price_per_unit,promised_delivery_date,supplier_ref,
+         confirmed_price,confirmed_currency,promised_delivery_date,supplier_ref,
          shipping_status,notes,created_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [poId, req.params.id, d.supplier_id, poNo, d.po_no||'',
-       (d.payment_terms_type==='advance'||d.payment_terms_type==='split') ? 'pending_payment' : 'draft',
-       d.confirmed_price||null, d.confirmed_currency||'INR',
-       d.buying_price_per_unit||null,
+       'draft', d.confirmed_price||null, d.confirmed_currency||'INR',
        d.promised_delivery_date||'', d.supplier_ref||'',
        'pending', d.notes||'', now]);
   }
@@ -1104,15 +1118,28 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
      d.zoho_po_number||'', paymentBlocked, poId]);
 
   // If advance payment required → create finance queue item
-  if (paymentBlocked === 1 && d.confirmed_price) {
-    const fqId = uuid();
-    run(`INSERT INTO finance_queue(id,supplier_order_id,order_id,supplier_id,amount,
-         currency,payment_terms,due_date,status,created_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [fqId, poId, req.params.id, d.supplier_id,
-       d.confirmed_price, d.confirmed_currency||'INR',
-       (d.payment_advance_pct||100)+'% Advance required',
-       '', 'pending', now]);
+  // FIX B: check for existing pending entry before inserting to prevent duplicates
+  if (paymentBlocked === 1) {  // create finance_queue even if confirmed_price not yet set
+    // Set order status to sup_payment_update so it's visible across the system
+    run("UPDATE orders SET status='sup_payment_update' WHERE id=? AND status NOT IN ('closed','cancelled','payment_approval','cust_payment_update')", [req.params.id]);
+    const existingFQ = get(
+      "SELECT id FROM finance_queue WHERE supplier_order_id=? AND status='pending'",
+      [poId]
+    );
+    if (existingFQ) {
+      run('UPDATE finance_queue SET amount=?,currency=?,payment_terms=? WHERE id=?',
+        [d.confirmed_price, d.confirmed_currency||'INR',
+         (d.payment_advance_pct||100)+'% Advance required', existingFQ.id]);
+    } else {
+      const fqId = uuid();
+      run(`INSERT INTO finance_queue(id,supplier_order_id,order_id,supplier_id,amount,
+           currency,payment_terms,due_date,status,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)`,
+        [fqId, poId, req.params.id, d.supplier_id,
+         d.confirmed_price, d.confirmed_currency||'INR',
+         (d.payment_advance_pct||100)+'% Advance required',
+         '', 'pending', now]);
+    }
   }
 
   try {
@@ -1121,10 +1148,6 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
        `PO raised: ${poNo} → ${d.supplier_id}${paymentBlocked?' [BLOCKED - Advance required]':''}`,
        req.session.user.name, '', now]);
   } catch(_) {}
-
-  if (paymentBlocked === 1) {
-    run("UPDATE orders SET status='payment_approval' WHERE id=? AND status NOT IN ('closed','delivered')", [req.params.id]);
-  }
 
   saveNow();
   res.json({ id: poId, internal_po_no: poNo, payment_blocked: paymentBlocked });
@@ -1137,37 +1160,22 @@ app.put('/api/supplier-orders/:id', auth, (req, res) => {
   if (!so) return res.status(404).json({ error: 'PO not found' });
   const now = nowStr();
 
-  let newStatus = d.status ?? so.status;
-
-  // Auto-transition: if tracking entered and PO is confirmed → in_transit
-  const trackingEntered = (d.tracking_no||'').trim() && !(so.tracking_no||'').trim();
-  if (trackingEntered && newStatus === 'confirmed') newStatus = 'in_transit';
-
-  // Auto-transition: if payment_blocked cleared → advance to po_issued
-  if (d.payment_blocked === 0 && (so.payment_blocked === 1 || so.payment_blocked === true)) {
-    newStatus = 'po_issued';
-  }
-
-  const confirmedAt = (newStatus==='confirmed'||newStatus==='awaiting_confirmation') && !['confirmed','awaiting_confirmation'].includes(so.status) ? now : (so.confirmed_at||null);
-  const receivedAt  = (newStatus==='received'||newStatus==='partially_received') && !['received','partially_received'].includes(so.status) ? now : (so.received_at||null);
-
-  // If payment_blocked is explicitly set to 0, unblock
-  const newBlocked = d.payment_blocked !== undefined ? (d.payment_blocked ? 1 : 0) : (so.payment_blocked || 0);
+  const newStatus       = d.status ?? so.status;
+  const confirmedAt     = newStatus === 'confirmed' && so.status !== 'confirmed' ? now : (so.confirmed_at||null);
+  const receivedAt      = newStatus === 'received'  && so.status !== 'received'  ? now : (so.received_at||null);
 
   run(`UPDATE supplier_orders SET
        po_no=?, status=?, confirmed_price=?, confirmed_currency=?,
-       buying_price_per_unit=?,
        promised_delivery_date=?, supplier_ref=?, shipping_status=?,
        shipper_id=?, tracking_no=?, notes=?,
        zoho_po_number=?, payment_terms_type=?, payment_net_days=?,
        payment_advance_pct=?, payment_due_date=?,
-       confirmed_at=?, received_at=?, payment_blocked=?
+       confirmed_at=?, received_at=?
        WHERE id=?`,
     [d.po_no ?? so.po_no ?? '',
      newStatus,
      d.confirmed_price    ?? so.confirmed_price    ?? null,
      d.confirmed_currency ?? so.confirmed_currency ?? 'INR',
-     (d.buying_price_per_unit !== '' && d.buying_price_per_unit !== undefined) ? (parseFloat(d.buying_price_per_unit)||null) : (so.buying_price_per_unit||null),
      d.promised_delivery_date ?? so.promised_delivery_date ?? '',
      d.supplier_ref       ?? so.supplier_ref       ?? '',
      d.shipping_status    ?? so.shipping_status    ?? 'pending',
@@ -1179,39 +1187,9 @@ app.put('/api/supplier-orders/:id', auth, (req, res) => {
      d.payment_net_days   ?? so.payment_net_days   ?? 30,
      d.payment_advance_pct?? so.payment_advance_pct?? 0,
      d.payment_due_date   ?? so.payment_due_date   ?? '',
-     confirmedAt, receivedAt, newBlocked,
+     confirmedAt, receivedAt,
      req.params.id]);
 
-  // If buying_price_per_unit changed → propagate to enquiry_sourcing + order_items
-  const newBpu = (d.buying_price_per_unit !== undefined && d.buying_price_per_unit !== '') ? parseFloat(d.buying_price_per_unit)||null : so.buying_price_per_unit;
-  const oldBpu = so.buying_price_per_unit;
-  if (newBpu && String(newBpu) !== String(oldBpu)) {
-    // Get linked line items for this PO
-    const linkedItems = all('SELECT item_id FROM supplier_order_items WHERE supplier_order_id=?', [req.params.id]);
-    linkedItems.forEach(li => {
-      // Update order_items.procurement_price
-      try {
-        run('UPDATE order_items SET procurement_price=? WHERE id=?', [newBpu, li.item_id]);
-      } catch(_) {}
-      // Update enquiry_sourcing.sourced_price via order_items → orders → enquiry
-      try {
-        const orderRow = get('SELECT enquiry_id FROM orders WHERE id=?', [so.order_id]);
-        if (orderRow?.enquiry_id) {
-          // Match by order_item → enquiry_item via component name
-          const oi = get('SELECT component FROM order_items WHERE id=?', [li.item_id]);
-          if (oi?.component) {
-            const enqItem = get('SELECT id FROM enquiry_items WHERE enquiry_id=? AND component=?', [orderRow.enquiry_id, oi.component]);
-            if (enqItem?.id) {
-              run('UPDATE enquiry_sourcing SET sourced_price=? WHERE enquiry_id=? AND enquiry_item_id=?',
-                [newBpu, orderRow.enquiry_id, enqItem.id]);
-            }
-          }
-        }
-      } catch(_) {}
-    });
-  }
-
-  // If buying_price_per_unit changed → propagate to enquiry_sourcing + order_items
   // Log status change
   if (d.status && d.status !== so.status) {
     try {
@@ -1225,17 +1203,18 @@ app.put('/api/supplier-orders/:id', auth, (req, res) => {
     } catch(_) {}
   }
 
-  // When PO moves to in_transit → order status = transit_hub
-  if (newStatus === 'in_transit' && so.status !== 'in_transit') {
-    run("UPDATE orders SET status='transit_hub' WHERE id=? AND status NOT IN ('closed','delivered')", [so.order_id]);
-  }
-
   // When PO is received → update linked order line items to 'delivered_hub'
-  if ((newStatus==='received'||newStatus==='partially_received') && !['received','partially_received'].includes(so.status)) {
+  if (newStatus === 'received' && so.status !== 'received') {
     const linkedItems = all('SELECT item_id FROM supplier_order_items WHERE supplier_order_id=?', [req.params.id]);
     linkedItems.forEach(li => {
       run("UPDATE order_items SET line_status='delivered_hub' WHERE id=?", [li.item_id]);
     });
+    // FIX: if ALL POs for this order are now received, set order status to delivery_hub
+    const allPOs = all('SELECT status FROM supplier_orders WHERE order_id=?', [so.order_id]);
+    const allReceived = allPOs.every(p => p.status === 'received' || p.id === req.params.id);
+    if (allReceived) {
+      run("UPDATE orders SET status='delivery_hub' WHERE id=? AND status NOT IN ('closed','cancelled')", [so.order_id]);
+    }
   }
 
   saveNow();
@@ -1269,7 +1248,15 @@ app.post('/api/orders/:id/sync-po-terms', auth, (req, res) => {
     }
     run('UPDATE supplier_orders SET payment_terms_type=?,payment_net_days=?,payment_advance_pct=?,payment_due_date=?,payment_blocked=? WHERE id=?',
       [so.sup_type, so.sup_days||30, so.sup_pct||0, paymentDueDate, paymentBlocked, so.id]);
-
+    // Create finance queue entry if now blocked and not already there
+    if (paymentBlocked) {
+      const existing = get("SELECT id FROM finance_queue WHERE supplier_order_id=? AND status='pending'", [so.id]);
+      if (!existing && so.confirmed_price) {
+        run('INSERT INTO finance_queue(id,supplier_order_id,order_id,supplier_id,amount,currency,payment_terms,due_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+          [uuid(), so.id, req.params.id, so.supplier_id, so.confirmed_price, so.confirmed_currency||'INR',
+           (so.sup_pct||100)+'% Advance required', '', 'pending', now]);
+      }
+    }
     synced++;
   });
   saveNow();
@@ -1353,6 +1340,50 @@ app.delete('/api/po-templates/:id', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ── FINANCE QUEUE ─────────────────────────────────────────────────────────────
+// ── Repair: single SQL INSERT for any missing finance_queue entries ───────────
+app.post('/api/finance-queue/repair', auth, (req, res) => {
+  try {
+    // One SQL: delete orphans
+    run('DELETE FROM finance_queue WHERE supplier_order_id NOT IN (SELECT id FROM supplier_orders)');
+    saveNow();
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/finance-queue', auth, (req, res) => {
+  const entries = all('SELECT * FROM finance_queue ORDER BY created_at DESC');
+  res.json(entries);
+});
+
+// Finance pays a blocked PO → release it
+app.put('/api/finance-queue/:id', auth, (req, res) => {
+  const d  = req.body;
+  const fq = get('SELECT * FROM finance_queue WHERE id=?', [req.params.id]);
+  if (!fq) return res.status(404).json({ error: 'Not found' });
+  const now = nowStr();
+  run(`UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,
+       paid_amount=?,paid_by=?,notes=?,paid_at=? WHERE id=?`,
+    [d.status||'paid', d.payment_ref||'', d.payment_date||now.slice(0,10),
+     d.paid_amount||fq.amount, req.session.user.name,
+     d.notes||'', now, req.params.id]);
+
+  // Release the PO block
+  if (d.status==='paid' || d.status==='released') {
+    run('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?',
+      ['sent', fq.supplier_order_id]);
+    try {
+      run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+        [uuid(), fq.order_id,
+         'Finance released PO ' + (get('SELECT internal_po_no FROM supplier_orders WHERE id=?',[fq.supplier_order_id])?.internal_po_no||fq.supplier_order_id),
+         req.session.user.name, d.notes||'', now]);
+    } catch(_) {}
+  }
+  saveNow();
+  res.json({ ok: true });
+});
 
 // ── Update PO to include payment terms + Zoho PO + finance queue trigger ─────
 // (Override the existing PUT /api/supplier-orders/:id to handle payment blocking)
@@ -1360,15 +1391,9 @@ app.delete('/api/po-templates/:id', auth, (req, res) => {
 // ── Client-side error logging endpoint ───────────────────────────────────────
 app.post('/api/log-client-error', (req, res) => {
   const { message, stack, component, url, time } = req.body || {};
-  const CLIENT_LOG = path.join(LOG_DIR, 'client-errors.log');
-  const entry = `[${time||new Date().toISOString()}] CLIENT ERROR
-  URL:     ${url||'unknown'}
-  Message: ${message||'unknown'}
-  Stack:   ${stack||'none'}
-  Component:${component||'none'}
-${'─'.repeat(80)}
-`;
-  fs.appendFileSync(CLIENT_LOG, entry);
+  const entry = `[${time||new Date().toISOString()}] [CLIENT]\n  URL:      ${url||'unknown'}\n  Message:  ${message||'unknown'}\n  Stack:    ${(stack||'none').split('\n')[0]}\n${'─'.repeat(60)}\n`;
+  writeLog(LOG_CLIENT_ERR, entry);
+  writeLog(LOG_SERVER_ALL, entry);
   console.error('[CLIENT ERROR]', message);
   res.json({ ok: true });
 });
@@ -1386,6 +1411,298 @@ app.use('/logs', (req, res, next) => {
   next();
 }, express.static(path.join(__dirname, '..', 'logs')));
 
+// ── FINANCE ROUTES ────────────────────────────────────────────────────────────
+
+function isAdvanceTerms(t) {
+  if (!t) return false;
+  const l = t.toLowerCase();
+  return l.includes('advance') || l.includes('cia') || l.includes('cash in advance') ||
+         l.includes('cash before shipment') || l.includes('cbs') || l.includes('100%');
+}
+function isPartialAdvanceTerms(t) {
+  if (!t) return false;
+  return t.toLowerCase().includes('partial advance');
+}
+function isNetTerms(t) {
+  if (!t) return false;
+  const l = t.toLowerCase();
+  return l.includes('net ') || l.includes('eom') || l.includes('net30') ||
+         l.includes('deferred') || l.includes('consignment');
+}
+
+// GET /api/finance/customer-queue
+app.get('/api/finance/customer-queue', auth, (req, res) => {
+  console.log('[FINANCE] customer-queue called by', req.session?.user?.name);
+  const orders = all("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') ORDER BY created_at DESC");
+  console.log('[FINANCE] total orders found:', orders.length);
+  orders.forEach(o => console.log('[FINANCE] order:', o.id, '| status:', o.status, '| payment_terms:', o.payment_terms||'(empty)'));
+  const customers = all('SELECT id, name, email, gstin, customer_no, billing_city, billing_state FROM customers');
+  let payments = [];
+  try { payments = all('SELECT * FROM customer_payments ORDER BY recorded_at DESC'); } catch(_) {}
+  const custMap = {};
+  customers.forEach(c => { custMap[c.id] = c; });
+  const result = orders
+    .filter(o => {
+      // Exclude orders where customer has already paid
+      if (o.customer_payment_status === 'paid') return false;
+      // Exclude orders in supplier payment update — they belong in supplier queue not customer queue
+      if (o.status === 'sup_payment_update') return false;
+      if (o.status === 'payment_approval' || o.status === 'waiting_for_payment') {
+        console.log('[FINANCE] PASS (status gate):', o.id, o.status);
+        return true;
+      }
+      const t = o.payment_terms || '';
+      const passes = t.length > 0;
+      console.log('[FINANCE] order', o.id, '| terms:', t||'(empty)', '| passes:', passes);
+      return passes;
+    })
+    .map(o => {
+      const items = all('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [o.id]);
+      const total = items.reduce((s, li) => {
+        const base = (li.qty||0)*(li.unit_price||0);
+        return s + base + base*((li.tax_rate||0)/100);
+      }, 0);
+      const paid = payments.filter(p => p.order_id === o.id && p.status === 'paid')
+        .reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
+      return {
+        ...o,
+        customer: custMap[o.customer_id] || null,
+        order_total: parseFloat(total.toFixed(2)),
+        total_paid:  parseFloat(paid.toFixed(2)),
+        balance_due: parseFloat(Math.max(0, total - paid).toFixed(2)),
+        payment_type: isAdvanceTerms(o.payment_terms) ? 'full_advance'
+          : isPartialAdvanceTerms(o.payment_terms) ? 'partial_advance'
+          : isNetTerms(o.payment_terms) ? 'net' : 'other',
+        last_payment: payments.filter(p => p.order_id === o.id)[0] || null,
+      };
+    });
+  res.json(result);
+});
+
+// POST /api/finance/pi/:order_id
+app.post('/api/finance/pi/:order_id', auth, (req, res) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+  const piNo = o.pi_no || ('PI-' + req.params.order_id + '-' + new Date().getFullYear());
+  try { run("ALTER TABLE orders ADD COLUMN pi_no TEXT DEFAULT ''"); } catch(_) {}
+  try { run("ALTER TABLE orders ADD COLUMN pi_sent_at TEXT DEFAULT ''"); } catch(_) {}
+  run('UPDATE orders SET pi_no=?, pi_sent_at=? WHERE id=?', [piNo, now, req.params.order_id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.order_id, 'PI generated: '+piNo, req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, pi_no: piNo });
+});
+
+// POST /api/finance/customer-pay/:order_id
+app.post('/api/finance/customer-pay/:order_id', auth, (req, res) => {
+  const d = req.body || {};
+  const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+  try {
+    run(`CREATE TABLE IF NOT EXISTS customer_payments (
+      id TEXT PRIMARY KEY, order_id TEXT NOT NULL, pi_no TEXT DEFAULT '',
+      pi_sent_at TEXT DEFAULT '', payment_type TEXT DEFAULT 'advance',
+      amount NUMERIC DEFAULT 0, currency TEXT DEFAULT 'INR',
+      payment_method TEXT DEFAULT '', payment_ref TEXT DEFAULT '',
+      payment_date TEXT DEFAULT '', advance_pct NUMERIC DEFAULT 0,
+      balance_due NUMERIC DEFAULT 0, status TEXT DEFAULT 'pending',
+      recorded_by TEXT DEFAULT '', recorded_at TEXT NOT NULL, notes TEXT DEFAULT '')`);
+  } catch(_) {}
+  const items = all('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
+  const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
+  const prevPaid = (() => { try { return all("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'",[req.params.order_id]).reduce((s,p)=>s+(parseFloat(p.amount)||0),0); } catch(_){return 0;} })();
+  const newPaid  = prevPaid + (parseFloat(d.amount)||0);
+  const balance  = parseFloat(Math.max(0,total-newPaid).toFixed(2));
+  const pmtStatus= balance <= 0 ? 'paid' : 'partial';
+  run('INSERT INTO customer_payments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    [uuid(), req.params.order_id, d.pi_no||o.pi_no||'', d.pi_sent_at||'',
+     d.payment_type||'advance', parseFloat(d.amount)||0, d.currency||'INR',
+     d.payment_method||'', d.payment_ref||'', d.payment_date||now.slice(0,10),
+     parseFloat(d.advance_pct)||0, balance, 'paid',
+     req.session.user.id, now, d.notes||'']);
+  try { run("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
+  run('UPDATE orders SET customer_payment_status=? WHERE id=?', [pmtStatus, req.params.order_id]);
+  if (balance <= 0) run("UPDATE orders SET status='open', customer_payment_status='paid' WHERE id=?", [req.params.order_id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.order_id, 'Customer payment recorded: '+(d.currency||'INR')+' '+d.amount, req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, balance_due: balance, status: pmtStatus });
+});
+
+// PUT /api/finance/customer-pay/:payment_id — edit existing payment (requires manager approval)
+app.put('/api/finance/customer-pay/:payment_id', auth, (req, res) => {
+  const d = req.body || {};
+  const pmt = get('SELECT * FROM customer_payments WHERE id=?', [req.params.payment_id]);
+  if (!pmt) return res.status(404).json({ error: 'Payment not found' });
+  // Verify approver credentials server-side
+  if (!d.approver_username || !d.approver_password)
+    return res.status(400).json({ error: 'Manager approval required' });
+  const approver = get("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'",
+    [d.approver_username, d.approver_username]);
+  if (!approver) return res.status(401).json({ error: 'Approver not found' });
+  if (!['admin','manager'].includes(approver.role))
+    return res.status(403).json({ error: 'Only managers or admins can approve edits' });
+  if (!bcrypt.compareSync(d.approver_password, approver.password))
+    return res.status(401).json({ error: 'Incorrect password' });
+  const now = nowStr();
+  run(`UPDATE customer_payments SET amount=?,currency=?,payment_method=?,payment_ref=?,
+       payment_date=?,notes=?,recorded_by=? WHERE id=?`,
+    [parseFloat(d.amount)||pmt.amount, d.currency||pmt.currency,
+     d.payment_method||pmt.payment_method, d.payment_ref||pmt.payment_ref,
+     d.payment_date||pmt.payment_date, d.notes||pmt.notes,
+     req.session.user.id, req.params.payment_id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), pmt.order_id,
+     'Payment edited by '+req.session.user.name+' — approved by '+approver.name,
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// GET /api/finance/customer-pay/:order_id — get payment records for an order
+app.get('/api/finance/customer-pay/:order_id', auth, (req, res) => {
+  try {
+    const pmts = all('SELECT * FROM customer_payments WHERE order_id=? ORDER BY recorded_at DESC',
+      [req.params.order_id]);
+    res.json(pmts);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/finance/supplier-queue
+app.get('/api/finance/supplier-queue', auth, (req, res) => {
+  let advRows = [];
+  try { advRows = all("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
+  const netRows = all("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
+  const suppliers = all('SELECT id, name FROM suppliers');
+  const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
+  res.json({
+    advance: advRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
+    net:     netRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
+  });
+});
+
+// PUT /api/finance/supplier-pay/:fq_id
+app.put('/api/finance/supplier-pay/:fq_id', auth, (req, res) => {
+  const d = req.body || {};
+  let fq; try { fq = get('SELECT * FROM finance_queue WHERE id=?', [req.params.fq_id]); } catch(_) {}
+  if (!fq) return res.status(404).json({ error: 'Not found' });
+  const now = nowStr();
+  run('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_by=?,paid_at=?,notes=? WHERE id=?',
+    ['paid', d.payment_ref||'', d.payment_date||now.slice(0,10), req.session.user.id, now, d.notes||'', req.params.fq_id]);
+  run('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?', ['po_issued', fq.supplier_order_id]);
+  // FIX A: if all POs for this order are now unblocked, restore order status to 'procurement'
+  const remainingBlocked = get(
+    "SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=? AND payment_blocked=1",
+    [fq.order_id]
+  );
+  // FIX: PostgreSQL COUNT returns string — parseInt needed for === 0 comparison
+  if (parseInt(remainingBlocked?.c || 0) === 0) {
+    const ord = get('SELECT status FROM orders WHERE id=?', [fq.order_id]);
+    // Only revert if status is sup_payment_update — not payment_approval (customer still pending)
+    if (ord?.status === 'sup_payment_update') {
+      run("UPDATE orders SET status='procurement' WHERE id=?", [fq.order_id]);
+    }
+  }
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), fq.order_id, 'Supplier paid | Ref: '+(d.payment_ref||'—')+' | PO unblocked → back to Procurement', req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+console.log('[STARTUP] Finance routes registered');
+// ── GRN ROUTES ───────────────────────────────────────────────────────────────
+// POST /api/orders/:id/grn — record goods receipt
+app.post('/api/orders/:id/grn', auth, (req, res) => {
+  const { records = [], partial = false } = req.body;
+  const order = get('SELECT * FROM orders WHERE id=?', [req.params.id]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+
+  // Generate GRN number
+  let grnNo;
+  try {
+    const last = get("SELECT id FROM grn_records ORDER BY recorded_at DESC LIMIT 1");
+    const existing = all('SELECT DISTINCT id FROM grn_records WHERE order_id=?', [req.params.id]);
+    const grnCount = existing.length + 1;
+    grnNo = 'GRN-' + req.params.id + '-' + String(grnCount).padStart(2,'0');
+  } catch(_) { grnNo = 'GRN-' + req.params.id + '-01'; }
+
+  // Insert grn_records + update line statuses
+  let allFull = true;
+  let anyReceived = false;
+  records.forEach(r => {
+    const li = get('SELECT * FROM order_items WHERE id=?', [r.order_item_id]);
+    if (!li) return;
+    const qty = parseInt(r.qty_received) || 0;
+    if (qty > 0) anyReceived = true;
+    if (qty < li.qty) allFull = false;
+    const lineStatus = qty <= 0 ? 'delivered_hub'
+      : qty >= li.qty ? 'ready_to_ship'
+      : 'grn_partial';
+    try {
+      run(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), req.params.id, r.order_item_id, r.supplier_id||'', r.coo||'',
+         r.date_code||'', r.lot_number||'', r.weight_kg||null, qty,
+         r.condition||'good', r.arrived_date||now.slice(0,10), r.notes||'',
+         req.session.user.id, now]);
+    } catch(_) {}
+    if (qty > 0) {
+      run('UPDATE order_items SET line_status=? WHERE id=?', [lineStatus, r.order_item_id]);
+    }
+  });
+
+  // Update order status
+  const newOrderStatus = allFull && anyReceived ? 'delivery_hub' : anyReceived ? 'partial_hub' : order.status;
+  run("UPDATE orders SET status=? WHERE id=?", [newOrderStatus, req.params.id]);
+
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.id, (allFull?'Full':'Partial')+' GRN recorded — '+grnNo,
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, grn_no: grnNo, order_status: newOrderStatus });
+});
+
+// POST /api/orders/:id/escalate — mark order as overdue / escalated
+app.post('/api/orders/:id/escalate', auth, (req, res) => {
+  const { level = 1, new_date = '' } = req.body;
+  const order = get('SELECT * FROM orders WHERE id=?', [req.params.id]);
+  if (!order) return res.status(404).json({ error: 'Not found' });
+  const now = nowStr();
+  try { run('ALTER TABLE orders ADD COLUMN escalation_level INTEGER DEFAULT 0'); } catch(_) {}
+  try { run("ALTER TABLE orders ADD COLUMN escalated_at TEXT DEFAULT ''"); } catch(_) {}
+  run('UPDATE orders SET escalation_level=?, escalated_at=? WHERE id=?',
+    [level, now, req.params.id]);
+  if (new_date) run('UPDATE orders SET tentative_date=? WHERE id=?', [new_date, req.params.id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.id,
+     'Escalation L'+level+' — '+(new_date?'Delivery rescheduled to '+new_date:'Overdue flagged'),
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// DELETE /api/finance/history — clear all paid history (manager only)
+app.delete('/api/finance/history', auth, (req, res) => {
+  if (!['admin','manager'].includes(req.session.user.role))
+    return res.status(403).json({ error: 'Manager access required' });
+  try { run("DELETE FROM customer_payments"); } catch(_) {}
+  try { run("DELETE FROM finance_queue WHERE status='paid'"); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// GET /api/finance/history
+app.get('/api/finance/history', auth, (req, res) => {
+  let custPmts = []; try { custPmts = all('SELECT cp.*, o.po_number FROM customer_payments cp LEFT JOIN orders o ON o.id=cp.order_id ORDER BY cp.recorded_at DESC'); } catch(_) {}
+  let supPmts  = []; try { supPmts  = all("SELECT fq.*, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='paid' ORDER BY fq.paid_at DESC"); } catch(_) {}
+  res.json({ customer: custPmts, supplier: supPmts });
+});
+
+  console.log('[STARTUP] All routes registered — starting listener...');
+  console.log('[STARTUP] PORT =', PORT);
 app.listen(PORT, '0.0.0.0', () => {
     const ip = getLanIp();
     console.log('\n' + '═'.repeat(52));
@@ -1398,10 +1715,10 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('  sourcing1/pass123  ·  procure1/pass123');
     console.log('═'.repeat(52) + '\n');
   });
-}).catch(err => { console.error('Start failed:', err); process.exit(1); });
+// ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
+  app.get('*', (req, res) => {
+    const idx = path.join(__dirname, '..', 'client', 'build', 'index.html');
+    fs.existsSync(idx) ? res.sendFile(idx) : res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
+  });
 
-// ── CATCH-ALL — must be last route ─────────────────────────────────────────
-app.get('*', (req, res) => {
-  const idx = path.join(__dirname, '..', 'client', 'build', 'index.html');
-  fs.existsSync(idx) ? res.sendFile(idx) : res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
-});
+}).catch(err => { console.error('Start failed:', err); process.exit(1); });

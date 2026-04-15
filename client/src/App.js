@@ -23,6 +23,7 @@ import SourcingBinPage from './pages/SourcingBinPage';
 import ProcurementBinPage from './pages/ProcurementBinPage';
 import ClosedBinPage from './pages/ClosedBinPage';
 import DeletedBinPage from './pages/DeletedBinPage';
+import FinancePage from './pages/FinancePage'; // Finance module
 
 function Spinner() {
   return (
@@ -67,6 +68,7 @@ function AppRoutes() {
         <Route path="procurement-bin" element={<ProcurementBinPage />} />
         <Route path="closed-bin" element={<ClosedBinPage />} />
         <Route path="deleted-bin" element={<DeletedBinPage />} />
+        <Route path="finance" element={<FinancePage />} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/' : '/login'} replace />} />
     </Routes>

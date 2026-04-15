@@ -191,12 +191,21 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
         if (!bySupplier[row.supplier_id]) bySupplier[row.supplier_id] = { ...row, item_ids: [] };
         bySupplier[row.supplier_id].item_ids.push(itemId);
       });
+      // ADDED: collect responses to check if any PO is advance-blocked
+      let anyBlocked = false;
       for (const [supplierId, data] of Object.entries(bySupplier)) {
-        await api.post('/orders/'+order.id+'/po', { ...data, supplier_id: supplierId });
+        const r = await api.post('/orders/'+order.id+'/po', { ...data, supplier_id: supplierId });
+        if (r.data?.payment_blocked === 1) anyBlocked = true;
       }
-      toast.success(`✅ ${Object.keys(bySupplier).length} PO(s) raised!`);
       qc.invalidateQueries(['orders']);
-      onSaved();
+      if (anyBlocked) {
+        // ADDED: supplier advance terms → navigate to Finance (same pattern as customer advance in OrdersPage)
+        toast.success('✅ PO raised — Advance payment required. Sending to Finance...');
+        setTimeout(() => { window.location.href = '/finance?tab=sup-advance'; }, 1500);
+      } else {
+        toast.success(`✅ ${Object.keys(bySupplier).length} PO(s) raised!`);
+        onSaved();
+      }
     } catch(e) { toast.error(e.response?.data?.error||'Failed'); }
     finally { setSaving(false); }
   };
@@ -342,6 +351,22 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                               placeholder="Supplier PI No. *"
                               style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':undefined}}/>
                             {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ PI required for advance payment</div>}
+                            {/* BUG1 FIX: show price input when supplier differs from sourced, even on advance terms */}
+                            {a.supplier_id && a.supplier_id !== a._sourced_supplier_id && (
+                              <div style={{marginTop:6}}>
+                                <div style={{fontSize:10,color:'var(--text3)',marginBottom:2}}>Negotiated Price / Unit</div>
+                                <input className="input" type="number" step="0.01"
+                                  value={a.buying_price_per_unit||''}
+                                  onChange={e=>{
+                                    const bpu = parseFloat(e.target.value)||0;
+                                    setA(li.id,'buying_price_per_unit',e.target.value);
+                                    setA(li.id,'confirmed_price', bpu*(li.qty||0)>0?(bpu*(li.qty||0)).toFixed(2):'');
+                                  }}
+                                  placeholder="0.00"
+                                  style={{fontSize:11,borderColor:'var(--amber,#d97706)'}}/>
+                                <div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2,fontWeight:600}}>✏ New supplier — enter negotiated price</div>
+                              </div>
+                            )}
                           </div>
                         ) : poMode==='external' ? (
                           <input className="input" value={a.zoho_po_number||''}
@@ -350,20 +375,40 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                         ) : (
                           <div>
                             <div style={{fontSize:10,color:'var(--text3)',marginBottom:2}}>Buying Price / Unit</div>
-                            <div style={{display:'flex',gap:4}}>
-                              <input className="input" type="number" step="0.01"
-                                value={a.buying_price_per_unit||''}
-                                onChange={e=>{
-                                  const bpu = parseFloat(e.target.value)||0;
-                                  const total = bpu * (li.qty||0);
-                                  setA(li.id,'buying_price_per_unit',e.target.value);
-                                  setA(li.id,'confirmed_price', total>0?total.toFixed(2):'');
-                                }}
-                                placeholder="0.00" style={{fontSize:11,flex:1}}/>
-                              <select className="input" style={{width:60,fontSize:10}} value={a.confirmed_currency||'INR'}
-                                onChange={e=>setA(li.id,'confirmed_currency',e.target.value)}>
-                                {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
-                              </select>
+                            {/* CHANGE 2: locked when same as sourced supplier, editable when supplier changed */}
+                            {a.supplier_id && a.supplier_id === a._sourced_supplier_id ? (
+                              <div style={{display:'flex',gap:4,alignItems:'center'}}>
+                                <div style={{padding:'6px 10px',background:'var(--surface2)',borderRadius:'var(--r-sm)',
+                                  fontSize:12,fontWeight:600,flex:1,border:'1px solid var(--border)',color:'var(--text2)'}}>
+                                  🔒 {fmtM(a.buying_price_per_unit||0, a.confirmed_currency||'INR')}
+                                </div>
+                                <select className="input" style={{width:60,fontSize:10}} value={a.confirmed_currency||'INR'}
+                                  onChange={e=>setA(li.id,'confirmed_currency',e.target.value)}>
+                                  {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
+                                </select>
+                              </div>
+                            ) : (
+                              <div>
+                                <div style={{display:'flex',gap:4}}>
+                                  <input className="input" type="number" step="0.01"
+                                    value={a.buying_price_per_unit||''}
+                                    onChange={e=>{
+                                      const bpu = parseFloat(e.target.value)||0;
+                                      const total = bpu * (li.qty||0);
+                                      setA(li.id,'buying_price_per_unit',e.target.value);
+                                      setA(li.id,'confirmed_price', total>0?total.toFixed(2):'');
+                                    }}
+                                    placeholder="0.00"
+                                    style={{fontSize:11,flex:1,borderColor:'var(--amber,#d97706)'}}/>
+                                  <select className="input" style={{width:60,fontSize:10}} value={a.confirmed_currency||'INR'}
+                                    onChange={e=>setA(li.id,'confirmed_currency',e.target.value)}>
+                                    {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
+                                  </select>
+                                </div>
+                                {a.supplier_id && <div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2,fontWeight:600}}>✏ New supplier — enter negotiated price</div>}
+                              </div>
+                            )}
+                            <div style={{display:'none'}}>
                             </div>
                             {a.buying_price_per_unit>0&&(
                               <div style={{fontSize:10,marginTop:2,color:'var(--text2)'}}>
@@ -437,6 +482,7 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
           </div>
           <div style={{display:'flex',gap:8}}>
             <button className="btn" onClick={onClose}>Cancel</button>
+            {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
             <button className="btn btn-primary" disabled={saving||Object.keys(grouped).length===0} onClick={handleSave}>
               {saving?'Saving POs…':`📤 ${Object.keys(grouped).length>0?'Save':'Generate'} PO Allocation`}
             </button>
@@ -529,6 +575,14 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
             {isBlocked&&<span style={{fontSize:11,fontWeight:700,color:'var(--red)',
               background:'var(--red-lt,#fef2f2)',padding:'2px 9px',borderRadius:999,
               border:'1px solid var(--red)44'}}>🔒 Payment Blocked</span>}
+            {/* ADDED: Go to Finance button in ManagePO header when blocked */}
+            {isBlocked&&(
+              <button className="btn btn-sm"
+                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',fontWeight:700}}
+                onClick={()=>window.location.href='/finance'}>
+                💰 Go to Finance →
+              </button>
+            )}
             <POStatusBadge status={form.status}/>
             {poList.length>1&&onNavigate&&(
               <div style={{display:'flex',gap:4,alignItems:'center'}}>
@@ -689,20 +743,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
                   💡 Enter tracking number below to auto-advance to In Transit
                 </div>
               )}
-              {form.status==='in_transit'&&(
-                <div style={{display:'flex',gap:8}}>
-                  <button type="button" className="btn btn-primary"
-                    onClick={()=>set('status','received')}
-                    style={{background:'var(--green)',borderColor:'var(--green)',fontSize:12}}>
-                    📦 Mark Fully Received
-                  </button>
-                  <button type="button" className="btn"
-                    onClick={()=>set('status','partially_received')}
-                    style={{fontSize:12,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
-                    ⚠ Mark Partially Received
-                  </button>
-                </div>
-              )}
+              {/* REMOVED: Mark Fully/Partially Received moved to Delivery Hub page */}
               {!['draft','cancelled','received','partially_received'].includes(form.status)&&(
                 <button type="button" className="btn btn-xs"
                   onClick={()=>set('status','cancelled')}
@@ -893,6 +934,28 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
           <div style={{display:'flex',gap:8}}>
             <button className="btn" onClick={onClose}>Cancel</button>
             <button className="btn btn-primary" disabled={saving} onClick={save}>{saving?'Saving…':'💾 Save PO'}</button>
+            {/* ADDED: Move to Delivery Hub — saves PO as received then navigates */}
+            {['confirmed','in_transit','sent','po_issued'].includes(form.status) && (
+              <button className="btn"
+                style={{background:'var(--teal,#0d9488)',color:'#fff',
+                  borderColor:'var(--teal,#0d9488)',fontWeight:600,fontSize:12}}
+                disabled={saving}
+                onClick={async()=>{
+                  set('status','received');
+                  await new Promise(r=>setTimeout(r,50));
+                  setSaving(true);
+                  try {
+                    await api.put('/supplier-orders/'+po.id,{...form,status:'received'});
+                    qc.invalidateQueries(['orders']);
+                    toast.success('PO marked received — moving to Delivery Hub');
+                    onSaved();
+                    window.location.href='/delivery-hub';
+                  } catch(e){ toast.error(e.response?.data?.error||'Failed'); }
+                  finally{ setSaving(false); }
+                }}>
+                📦 Move to Delivery Hub →
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -982,9 +1045,17 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
           })()}
           {blockedPOs.length>0&&(
             <div style={{padding:'10px 14px',borderRadius:'var(--r)',background:'var(--red-lt,#fef2f2)',
-              border:'2px solid var(--red)',marginBottom:14,fontSize:12,color:'var(--red)',fontWeight:600}}>
-              🔒 {blockedPOs.length} PO{blockedPOs.length!==1?'s are':' is'} blocked pending advance payment.
-              Finance team must record payment to release.
+              border:'2px solid var(--red)',marginBottom:14,fontSize:12,color:'var(--red)',fontWeight:600,
+              display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+              <span>🔒 {blockedPOs.length} PO{blockedPOs.length!==1?'s are':' is'} blocked pending advance payment.
+              Finance team must record payment to release.</span>
+              {/* ADDED: Go to Finance button — same pattern as customer advance in OrdersPage */}
+              <button className="btn btn-sm"
+                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
+                  fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
+                onClick={()=>window.location.href='/finance'}>
+                💰 Go to Finance →
+              </button>
             </div>
           )}
           {/* Line Items + sourcing context */}
@@ -993,7 +1064,22 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
               <span>📦 Line Items ({allItems.length})</span>
               {unPOd.length>0&&<span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ {unPOd.length} without PO</span>}
             </div>
-            <table className="li-table">
+            {/* ADDED: tableLayout fixed + colgroup for column alignment */}
+            <table className="li-table" style={{tableLayout:'fixed',width:'100%'}}>
+              <colgroup>
+                <col style={{width:30}}/>{/* # */}
+                <col style={{width:140}}/>{/* Component */}
+                <col style={{width:45}}/>{/* Qty */}
+                <col style={{width:90}}/>{/* Cust Price */}
+                <col style={{width:90}}/>{/* Target Price */}
+                <col style={{width:55}}/>{/* Tax % */}
+                <col style={{width:80}}/>{/* Tax Amt */}
+                <col style={{width:140}}/>{/* Sourced From */}
+                <col style={{width:90}}/>{/* Sourced Price */}
+                <col style={{width:90}}/>{/* PO Assigned */}
+                <col style={{width:90}}/>{/* Status */}
+                <col style={{width:100}}/>{/* Gross Margin */}
+              </colgroup>
               <thead>
                 <tr>
                   <th>#</th><th>Component</th><th>Qty</th>
@@ -1036,6 +1122,15 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
                               </span>
                             : <span style={{color:'var(--text3)'}}>—</span>;
                         })()}
+                      </td>
+                      {/* ADDED: Tax % and Tax Amt tds to match thead — reads from order_items.tax_rate */}
+                      <td style={{textAlign:'right',fontSize:12}}>
+                        {Number(li.tax_rate)||0}%
+                      </td>
+                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>
+                        {Number(li.tax_rate)>0
+                          ? fmtCur((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100), li.currency)
+                          : <span style={{color:'var(--text3)'}}>—</span>}
                       </td>
                       {/* Sourced from */}
                       <td>
@@ -1126,10 +1221,10 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
             <div className="card-title">
               <span>🛒 Purchase Orders ({soList.length})</span>
               <button className="btn btn-xs btn-primary" onClick={()=>setShowAlloc(true)}>
-                {soList.length>0?'+ Add / Re-allocate':'📋 Allocate & Raise POs'}
+                {soList.length>0?'✏ Manage':'📋 Manage'}
               </button>
             </div>
-            {soList.length===0&&<div style={{color:'var(--text3)',fontSize:13,padding:'8px 0'}}>No POs raised. Click "Allocate & Raise POs" to assign components to suppliers.</div>}
+            {soList.length===0&&<div style={{color:'var(--text3)',fontSize:13,padding:'8px 0'}}>No POs raised. Click "Manage" to assign components to suppliers.</div>}
             {soList.map(so=>{
               const cfg=PO_STATUS[so.status]||PO_STATUS.draft;
               const soItems=(so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
@@ -1156,7 +1251,12 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
                         {so.payment_terms_type==='split'&&<> · {so.payment_advance_pct}% advance</>}
                       </div>
                     </div>
-                    <button className="btn btn-xs" onClick={()=>setManagingPO(so)}>✏ Manage</button>
+                    <button className="btn btn-xs"
+                      disabled={so.payment_blocked===1||so.payment_blocked===true}
+                      title={so.payment_blocked===1||so.payment_blocked===true?'Supplier advance payment pending — Finance must pay first':''}
+                      style={{opacity:(so.payment_blocked===1||so.payment_blocked===true)?0.4:1,
+                        cursor:(so.payment_blocked===1||so.payment_blocked===true)?'not-allowed':'pointer'}}
+                      onClick={()=>{ if(so.payment_blocked===1||so.payment_blocked===true) return; setManagingPO(so); }}>✏ Manage</button>
                   </div>
                   <div style={{display:'flex',gap:16,flexWrap:'wrap',fontSize:12}}>
                     <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>COMPONENTS</div>
@@ -1410,7 +1510,11 @@ export default function ProcurementBinPage() {
                 {/* Actions */}
                 <div style={{display:'flex',gap:6,justifyContent:'flex-end'}} onClick={e=>e.stopPropagation()}>
                   <button className="btn btn-xs btn-primary"
-                    onClick={()=>setSelected(order)}>
+                    disabled={order.status==='sup_payment_update'||order.status==='payment_approval'}
+                    title={order.status==='sup_payment_update'?'Supplier payment pending — Finance must pay first':order.status==='payment_approval'?'Customer payment pending — Finance must approve first':''}
+                    style={{opacity:(order.status==='sup_payment_update'||order.status==='payment_approval')?0.4:1,
+                      cursor:(order.status==='sup_payment_update'||order.status==='payment_approval')?'not-allowed':'pointer'}}
+                    onClick={()=>{ if(order.status==='sup_payment_update'||order.status==='payment_approval') return; setSelected(order); }}>
                     ✏ Manage
                   </button>
                 </div>
@@ -1425,13 +1529,21 @@ export default function ProcurementBinPage() {
                   {hasBlocked&&(
                     <div style={{marginBottom:10,padding:'8px 12px',borderRadius:'var(--r-sm)',
                       background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)33',
-                      fontSize:12,color:'var(--red)',fontWeight:600}}>
-                      🔒 Waiting for Finance to pay:&nbsp;
+                      fontSize:12,color:'var(--red)',fontWeight:600,
+                      display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+                      <span>🔒 Waiting for Finance to pay:&nbsp;
                       {soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true).map(so=>(
                         <strong key={so.id} style={{marginRight:8}}>
                           {so.internal_po_no} ({suppliers.find(s=>s.id===so.supplier_id)?.name||'—'})
                         </strong>
-                      ))}
+                      ))}</span>
+                      {/* ADDED: Go to Finance button for supplier advance */}
+                      <button className="btn btn-sm"
+                        style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
+                          fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
+                        onClick={()=>window.location.href='/finance'}>
+                        💰 Go to Finance →
+                      </button>
                     </div>
                   )}
                   {allRcvd&&(
@@ -1505,7 +1617,12 @@ export default function ProcurementBinPage() {
                         ⚠ Raise PO for {unPOd.length} unallocated item{unPOd.length!==1?'s':''}
                       </button>
                     )}
-                    <button className="btn btn-sm btn-primary" onClick={()=>setSelected(order)}>
+                    <button className="btn btn-sm btn-primary"
+                      disabled={order.status==='sup_payment_update'||order.status==='payment_approval'}
+                      style={{opacity:(order.status==='sup_payment_update'||order.status==='payment_approval')?0.4:1,
+                        cursor:(order.status==='sup_payment_update'||order.status==='payment_approval')?'not-allowed':'pointer'}}
+                      title={order.status==='sup_payment_update'?'Supplier payment pending':order.status==='payment_approval'?'Customer payment pending':''}
+                      onClick={()=>{ if(order.status==='sup_payment_update'||order.status==='payment_approval') return; setSelected(order); }}>
                       ✏ Full Manage →
                     </button>
                   </div>

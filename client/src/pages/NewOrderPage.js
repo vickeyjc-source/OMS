@@ -137,16 +137,16 @@ export default function NewOrderPage() {
         component:    li.component    || '',
         manufacturer: li.manufacturer || '',
         ipn:          li.ipn          || '',
-        // FIX: added fallback aliases (li.quantity, li.quote_price etc) — existing checks unchanged
-        qty:          String(li.qty   || li.quantity || ''),
-        unit_price:   li.unit_price   || li.quoted_price || li.quote_price || '',
-        quoted_price: li.quoted_price || li.unit_price   || li.quote_price || '',
-        procurement_price: li.procurement_price || li.sourced_price || '',
+        qty:          String(li.qty   || ''),
+        unit_price:   li.unit_price   || li.quoted_price || '',
+        quoted_price: li.quoted_price || li.unit_price   || '',
         target_price: li.target_price || '',
-        currency:     li.currency     || li.target_currency || 'INR',
+        currency:     li.currency     || 'INR',
         order_date:   today(),
-        delivery_date:li.delivery_date || li.preferred_delivery_date || '',
+        delivery_date:li.delivery_date || '',
         line_status:  'negotiating',
+        // ADDED: carry tax_rate from quote/sourcing so order line items show correct tax
+        tax_rate:     Number(li.tax_rate) || 0,
       }));
     }
     return [{ id:'li1', component:'', manufacturer:'', ipn:'', qty:'', unit_price:'', quoted_price:'', target_price:'', currency:'INR', order_date:today(), delivery_date:'', line_status:'negotiating' }];
@@ -209,6 +209,8 @@ export default function NewOrderPage() {
           order_date:       today(),
           delivery_date:    li.preferred_delivery_date || '',
           line_status:      'negotiating',
+          // ADDED: carry tax_rate from sourcing via quote lineitems endpoint
+          tax_rate:         Number(li.tax_rate) || 0,
         })));
       }
     } catch(e) {
@@ -231,12 +233,14 @@ export default function NewOrderPage() {
       po_file_ref: poFiles.map(f=>f.name).join(', '),
       lineItems: valid.map((i,idx) => ({ ...i, qty:Number(i.qty)||0, unit_price:Number(i.unit_price)||Number(i.quoted_price)||0, quoted_price:Number(i.quoted_price)||0, target_price:Number(i.target_price)||0, tax_rate:Number(i.tax_rate)||0, sort_order:idx+1 })),
       notes: form.notes,
+      // FIX 1: save customer payment terms so Finance page can detect advance orders
+      payment_terms: customerPayTerms || '',
     };
   };
 
   const validate = (isDraft) => {
     if (!form.customer_id)   { toast.error('Select a customer'); return false; }
-    if (!form.customer_ref)  { toast.error('Enter customer reference'); return false; }
+    // CHANGE 2: customer_ref is no longer mandatory — removed validation
     if (!isDraft && !form.po_number) { toast.error('PO Number is mandatory'); return false; }
     if (!isDraft && poFiles.length === 0) { toast.error('Please upload at least one PO file'); return false; }
     if (!isDraft && !form.tentative_date) { toast.error('Expected delivery date is required'); return false; }
@@ -295,19 +299,21 @@ export default function NewOrderPage() {
       }
     },
 
-    /* ── Margin vs target ── */
-    { key:'margin', label:'Margin', flex:'0.75 1 65px',
+    /* ── CHANGE 4: Margin % = ((Quoted×QTY - Sourced×QTY) / Quoted×QTY) × 100 ── */
+    { key:'margin', label:'Margin %', flex:'0.75 1 65px',
       render:(li,idx)=>{
-        const sellPrice = Number(li.unit_price) || Number(li.quoted_price) || 0;
-        const costPrice = Number(li.procurement_price) || 0;
-        if (!sellPrice || !costPrice) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
-        const marginAmt = sellPrice - costPrice;
-        const pct = (marginAmt / costPrice * 100).toFixed(1);
-        const col = marginAmt < 0 ? 'var(--red)'
+        const qty       = Number(li.qty)||0;
+        const quoted    = Number(li.unit_price)||Number(li.quoted_price)||0;
+        const sourced   = Number(li.procurement_price)||0;
+        const qRev      = quoted * qty;
+        if (!qRev || !sourced) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
+        const sRev      = sourced * qty;
+        const pct       = ((qRev - sRev) / qRev * 100).toFixed(1);
+        const col = Number(pct) < 0  ? 'var(--red)'
           : Number(pct) <= 10 ? 'var(--amber,#d97706)'
           : Number(pct) <= 15 ? 'var(--green)'
           : '#ca8a04';
-        const bg = marginAmt < 0 ? 'var(--red-lt,#fef2f2)'
+        const bg = Number(pct) < 0  ? 'var(--red-lt,#fef2f2)'
           : Number(pct) <= 10 ? 'var(--amber-lt,#fffbeb)'
           : Number(pct) <= 15 ? 'var(--green-lt)'
           : '#fefce8';
@@ -315,7 +321,7 @@ export default function NewOrderPage() {
           <div style={{padding:'5px 8px',background:bg,borderRadius:'var(--r-sm)',
             fontWeight:700,fontSize:11,textAlign:'right',
             color:col,border:`1px solid ${col}33`}}>
-            {marginAmt>=0?'+':''}{pct}%
+            {Number(pct)>=0?'+':''}{pct}%
           </div>
         );
       }
@@ -326,18 +332,13 @@ export default function NewOrderPage() {
         {['INR','USD','EUR','SGD','GBP','AED'].map(c=><option key={c}>{c}</option>)}
       </select>
     },
-    { key:'delivery_date', label:'Promised Delivery Date', flex:'1.15 1 112px',
-      render:(li,idx)=><input className="input" type="date" value={li.delivery_date} onChange={e=>upd(idx,'delivery_date',e.target.value)}/>
-    },
-    { key:'line_status',   label:'Status',              flex:'0.95 1 88px',
-      render:(li,idx)=><select className="input" value={li.line_status} onChange={e=>upd(idx,'line_status',e.target.value)}>
-        <option value="negotiating">Negotiating</option>
-        <option value="procurement">Procurement</option>
-      </select>
-    },
+    // CHANGE 3: Promised Delivery Date removed from line items view
+    // (delivery_date still saved in state and sent in payload — only hidden from UI)
+    // CHANGE 5: Status col removed from New Order view
+    // (line_status still initialised as 'negotiating' in state and sent in payload)
 
-    /* ── Line Value = Qty × Unit Price — read-only ── */
-    { key:'line_value', label:'Line Value', flex:'1 1 88px',
+    /* ── CHANGE 6: Base Value = Unit Price × QTY ── */
+    { key:'base_value', label:'Base Value', flex:'1 1 88px',
       render:(li,idx)=>{
         const qty = Number(li.qty)||0;
         const up  = Number(li.unit_price)||Number(li.quoted_price)||0;
@@ -347,6 +348,35 @@ export default function NewOrderPage() {
             fontWeight:700,fontSize:13,textAlign:'right',whiteSpace:'nowrap',
             border:'1px solid var(--border)',color:'var(--text)'}}>
             {fmtMoney(qty*up, li.currency)}
+          </div>
+        );
+      }
+    },
+    /* ── CHANGE 7: Tax % — from sourcing for this line item ── */
+    { key:'tax_pct', label:'Tax %', flex:'0.55 1 52px',
+      render:(li,idx)=>(
+        <div style={{padding:'6px 8px',textAlign:'right',fontSize:12,
+          color:Number(li.tax_rate)>0?'var(--teal,#0d9488)':'var(--text3)'}}>
+          {Number(li.tax_rate)||0}%
+        </div>
+      )
+    },
+    /* ── CHANGE 8: Total Value = Base Value + Tax ── */
+    { key:'total_value', label:'Total Value', flex:'1 1 88px',
+      render:(li,idx)=>{
+        const qty  = Number(li.qty)||0;
+        const up   = Number(li.unit_price)||Number(li.quoted_price)||0;
+        const base = qty * up;
+        const tax  = Number(li.tax_rate)||0;
+        const tot  = base + (base * tax / 100);
+        if (!base) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
+        return (
+          <div style={{padding:'6px 10px',background:tax>0?'var(--green-lt)':'var(--surface2)',
+            borderRadius:'var(--r-sm)',fontWeight:700,fontSize:13,textAlign:'right',
+            whiteSpace:'nowrap',border:'1px solid var(--border)',
+            color:tax>0?'var(--green)':'var(--text)'}}>
+            {fmtMoney(tot, li.currency)}
+            {tax>0&&<span style={{fontSize:9,marginLeft:4,fontWeight:600,opacity:.7}}>+{tax}%</span>}
           </div>
         );
       }
@@ -385,10 +415,11 @@ export default function NewOrderPage() {
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:13, marginBottom:13 }}>
           <div className="form-group">
             <label className="label">Customer <span className="req">*</span></label>
-            {/* FIX: lock customer display when order comes from a quote — select unchanged as else branch */}
-            {form.quote_id
-              ? <div className="input" style={{background:'var(--surface2)',cursor:'default',
-                  color:'var(--text)',fontWeight:600,display:'flex',alignItems:'center',gap:6}}>
+            {/* CHANGE 1: lock customer when prefilled from enquiry/quote */}
+            {form.customer_id && (form.enquiry_id || form.quote_id)
+              ? <div style={{padding:'8px 12px',background:'var(--surface2)',borderRadius:'var(--r-sm)',
+                  border:'1px solid var(--border)',fontWeight:600,fontSize:13,
+                  color:'var(--text)',display:'flex',alignItems:'center',gap:6}}>
                   🔒 {customers.find(c=>c.id===form.customer_id)?.name||form.customer_id}
                 </div>
               : <select className="input" value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}>
@@ -398,7 +429,8 @@ export default function NewOrderPage() {
             }
           </div>
           <div className="form-group">
-            <label className="label">Customer Ref / Order No. <span className="req">*</span></label>
+            {/* CHANGE 2: Customer Ref made non-mandatory */}
+            <label className="label">Customer Ref / Order No.</label>
             <input className="input" value={form.customer_ref} onChange={e=>setForm(f=>({...f,customer_ref:e.target.value}))} placeholder="e.g. TB-2024-045" />
           </div>
           <div className="form-group">
@@ -449,7 +481,7 @@ export default function NewOrderPage() {
             // Deduplicate by stringified address content
             const seen = new Set();
             shippingAddresses = raw.filter(addr => {
-              const key = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].map(v=>(v||'').trim()).filter(Boolean).join('|');
+              const key = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join('|');
               if (seen.has(key)) return false;
               seen.add(key);
               return true;
@@ -472,35 +504,26 @@ export default function NewOrderPage() {
                   <a href="/customers" style={{marginLeft:8,color:'var(--accent)'}}>Add in Customers →</a>
                 </div>
               ) : (
-                <div>
-  <select className="input"
-    value={form.delivery_address||''}
-    onChange={e=>setForm(f=>({...f,delivery_address:e.target.value}))}>
-    <option value="">— Select delivery address —</option>
-    {shippingAddresses.map((addr,i)=>{
-      const addrStr = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ');
-      return <option key={i} value={addrStr}>{addrStr}</option>;
-    })}
-  </select>
-  {/* Preview selected address */}
-  {form.delivery_address && (() => {
-    const sel = shippingAddresses.find(addr =>
-      [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ') === form.delivery_address
-    );
-    if (!sel) return null;
-    return (
-      <div style={{marginTop:8,padding:'10px 14px',borderRadius:'var(--r-sm)',
-        background:'var(--accent-lt)',border:'1px solid var(--accent)33',fontSize:12}}>
-        {sel.attention&&<div style={{fontWeight:700}}>{sel.attention}</div>}
-        <div style={{color:'var(--text2)',lineHeight:1.5}}>
-          {[sel.street1,sel.street2].filter(Boolean).join(', ')}<br/>
-          {[sel.city,sel.state,sel.country,sel.pincode].filter(Boolean).join(', ')}
-          {sel.phone&&<div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>📞 {sel.phone}</div>}
-        </div>
-      </div>
-    );
-  })()}
-</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:10}}>
+                  {shippingAddresses.map((addr,i)=>{
+                    const addrStr = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ');
+                    const isSelected = form.delivery_address === addrStr;
+                    return (
+                      <div key={i} onClick={()=>setForm(f=>({...f,delivery_address:isSelected?'':addrStr}))}
+                        style={{cursor:'pointer',padding:'10px 14px',borderRadius:'var(--r)',
+                          border:`2px solid ${isSelected?'var(--accent)':'var(--border)'}`,
+                          background:isSelected?'var(--accent-lt)':'var(--surface2)'}}>
+                        {addr.attention&&<div style={{fontWeight:700,fontSize:13}}>{addr.attention}</div>}
+                        <div style={{fontSize:12,color:isSelected?'var(--accent)':'var(--text2)',lineHeight:1.5}}>
+                          {[addr.street1,addr.street2].filter(Boolean).join(', ')}<br/>
+                          {[addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ')}
+                          {addr.phone&&<div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>📞 {addr.phone}</div>}
+                        </div>
+                        {isSelected&&<div style={{fontSize:11,color:'var(--accent)',fontWeight:700,marginTop:4}}>✅ Selected</div>}
+                      </div>
+                    );
+                  })}
+                </div>
               )}
               {form.delivery_address&&(
                 <div style={{marginTop:6,fontSize:11,color:'var(--text3)'}}>

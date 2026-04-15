@@ -1,27 +1,7 @@
 // client/src/utils/helpers.js  v2
 export const initials = n => n.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
-export const fmt = n => Number(n || 0).toLocaleString('en-IN');
-eexport const fmtCur = (amount, currency = 'INR') => {
-  const symbols = {
-    INR: '₹',
-    USD: '$',
-    EUR: '€',
-    GBP: '£',
-    SGD: 'S$',
-    AED: 'AED ',
-    JPY: '¥',
-    CNY: '¥',
-    AUD: 'A$',
-    CAD: 'C$'
-  };
-
-  const value = Number(amount) || 0;
-
-  return `${symbols[currency] || currency + ' '}${value.toLocaleString('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  })}`;
-};
+export const fmt = n => new Intl.NumberFormat('en-IN').format(n||0);
+export const fmtCur = (n, c='INR') => c==='USD'?`$${fmt(n)}`:c==='EUR'?`€${fmt(n)}`:c==='GBP'?`£${fmt(n)}`:`₹${fmt(n)}`;
 export const today = () => new Date().toISOString().slice(0,10);
 export const orderTotal = o => (o.lineItems||[]).reduce((s,i)=>s+(i.qty*i.unit_price),0);
 export const isDelayed = o => {
@@ -79,21 +59,14 @@ export const STATUS_BADGE = {
   quoted:      ['badge-orange', 'Quoted'],
   ordered:     ['badge-blue',   'Ordered'],
   // Generic
-  pending:     ['badge-gray',   'Pending'],
-  'in-transit':['badge-teal',   'In Transit'],
-  received:    ['badge-green',  'Received'],
-  cancelled:           ['badge-red',    'Cancelled'],
-  // Order lifecycle — procurement → delivery hub → customer
-  draft:               ['badge-gray',   'Draft'],
-  payment_approval:    ['badge-amber',  'Payment Approval'],
-  transit_hub:         ['badge-teal',   'In Transit to Hub'],
-  in_hub:              ['badge-blue',   'In Hub'],
-  partial_hub:         ['badge-amber',  'Partial in Hub'],
-  transit_customer:    ['badge-teal',   'In Transit to Customer'],
-  partial_dispatched:  ['badge-teal',   'Partial Dispatched'],
-  shipped_customer:    ['badge-teal',   'Shipped to Customer'],
-  returned_to_sourcing:['badge-amber',  'Returned to Sourcing'],
-  superseded:          ['badge-gray',   'Superseded'],
+  pending:              ['badge-gray',   'Pending'],
+  'in-transit':         ['badge-teal',   'In Transit'],
+  received:             ['badge-green',  'Received'],
+  cancelled:            ['badge-red',    'Cancelled'],
+  // Finance payment statuses
+  payment_approval:     ['badge-amber',  'Customer Payment Update'],
+  cust_payment_update:  ['badge-amber',  'Customer Payment Update'],
+  sup_payment_update:   ['badge-amber',  'Supplier Payment Update'],
 };
 
 export const StatusBadge = ({ s }) => {

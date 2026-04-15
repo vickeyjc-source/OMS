@@ -13,25 +13,22 @@ function fmtM(n,c='INR'){const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'}
 function GRNModal({ order, suppliers, onClose, onSaved }) {
   const qc = useQueryClient();
   const supName = id => suppliers.find(s=>s.id===id)?.name||id;
-
-  // GRN state per line item: qty_received, condition, notes + extended inspection fields
   const today = new Date().toISOString().slice(0,10);
+
   const [grn, setGrn] = useState(() => {
     const g = {};
     (order.lineItems||[]).forEach(li => {
-      // Find the PO that covers this line item — that supplier is the default
       const po = (order.supplierOrders||[]).find(so=>(so.items||[]).includes(li.id));
       g[li.id] = {
-        qty_received: li.qty,           // default to full qty
-        condition:    'good',           // good | partial | damaged | rejected
+        qty_received: String(li.qty),
+        condition:    'good',
         notes:        '',
-        // Extended GRN inspection fields (new — isolated addition)
-        supplier_id:  po?.supplier_id || '',   // default = PO supplier, user can change
-        coo:          '',                       // Country of Origin
-        date_code:    '',                       // DC of goods actually received
-        lot_number:   '',                       // Batch/LOT number
-        weight_kg:    '',                       // Actual weight received
-        arrived_date: today,                    // Actual arrival date
+        supplier_id:  po?.supplier_id || '',
+        coo:          '',
+        date_code:    '',
+        lot_number:   '',
+        weight_kg:    '',
+        arrived_date: today,
       };
     });
     return g;
@@ -39,36 +36,47 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
   const [saving, setSaving] = useState(false);
   const setG = (id,k,v) => setGrn(g=>({...g,[id]:{...g[id],[k]:v}}));
 
-  const allGood     = Object.values(grn).every(r=>r.condition==='good'&&parseInt(r.qty_received)>0);
-  const hasShortage = Object.entries(grn).some(([id,r])=>{
-    const li = (order.lineItems||[]).find(l=>l.id===id);
-    return li && parseInt(r.qty_received) < li.qty;
-  });
+  const items = order.lineItems||[];
+
+  // ── Summary calculations ──────────────────────────────────────────────────
+  const summary = items.reduce((acc, li) => {
+    const qty = parseInt(grn[li.id]?.qty_received) || 0;
+    acc.totalOrdered += li.qty;
+    acc.totalReceived += qty;
+    if (qty >= li.qty && li.qty > 0) acc.full++;
+    else if (qty > 0) acc.partial++;
+    else acc.pending++;
+    return acc;
+  }, { full:0, partial:0, pending:0, totalOrdered:0, totalReceived:0 });
+  const overallPct = summary.totalOrdered > 0
+    ? Math.round((summary.totalReceived / summary.totalOrdered) * 100) : 0;
+  const allFull     = summary.full === items.length && items.length > 0;
+  const anyFilled   = summary.full + summary.partial > 0;
+  const hasShortage = items.some(li => (parseInt(grn[li.id]?.qty_received)||0) < li.qty);
   const hasDamaged  = Object.values(grn).some(r=>r.condition==='damaged'||r.condition==='rejected');
 
-  const handleGRN = async () => {
+  const buildRecords = () => items.map(li => {
+    const row = grn[li.id]||{};
+    return {
+      order_item_id: li.id,
+      qty_received:  parseInt(row.qty_received)||0,
+      condition:     row.condition||'good',
+      notes:         row.notes||'',
+      supplier_id:   row.supplier_id||'',
+      coo:           row.coo||'',
+      date_code:     row.date_code||'',
+      lot_number:    row.lot_number||'',
+      weight_kg:     row.weight_kg ? parseFloat(row.weight_kg) : null,
+      arrived_date:  row.arrived_date||'',
+    };
+  });
+
+  const handleGRN = async (partialSave=false) => {
     setSaving(true);
     try {
-      // Build records array with all fields (existing + new extended fields)
-      const records = (order.lineItems||[]).map(li => {
-        const row = grn[li.id]||{};
-        return {
-          order_item_id: li.id,
-          qty_received:  parseInt(row.qty_received)||0,
-          condition:     row.condition||'good',
-          notes:         row.notes||'',
-          // Extended inspection fields
-          supplier_id:   row.supplier_id||'',
-          coo:           row.coo||'',
-          date_code:     row.date_code||'',
-          lot_number:    row.lot_number||'',
-          weight_kg:     row.weight_kg ? parseFloat(row.weight_kg) : null,
-          arrived_date:  row.arrived_date||'',
-        };
-      });
-      const res = await api.post('/orders/'+order.id+'/grn', { records });
+      const records = buildRecords();
+      const res = await api.post('/orders/'+order.id+'/grn', { records, partial: partialSave });
       const partialMsg = res.data.order_status === 'partial_hub' ? ' — Partial, balance still expected' : '';
-      // CHANGE: show GRN document number in toast
       const grnLabel = res.data.grn_no ? res.data.grn_no + ' recorded!' : 'GRN recorded!';
       toast.success('✅ ' + grnLabel + partialMsg);
       qc.invalidateQueries(['orders']);
@@ -77,14 +85,21 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
     finally { setSaving(false); }
   };
 
+  // Status badge label
+  const grnBadge = allFull ? {label:'Ready to submit', bg:'#E1F5EE', color:'#085041'}
+    : anyFilled ? {label:'Partial entry', bg:'#FEF3C7', color:'#92400E'}
+    : {label:'Pending GRN', bg:'var(--surface2)', color:'var(--text3)'};
+
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl">
         <div className="modal-header">
           <div>
             <h2>📋 Goods Receipt Note — {order.id}</h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              Confirm what was physically received. Any shortage or damage will be flagged.
+            <div style={{fontSize:12,color:'var(--text3)',marginTop:2,display:'flex',gap:8,alignItems:'center'}}>
+              <span>Confirm what was physically received.</span>
+              <span style={{padding:'2px 10px',borderRadius:20,fontSize:11,fontWeight:600,
+                background:grnBadge.bg,color:grnBadge.color}}>{grnBadge.label}</span>
             </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
@@ -103,134 +118,157 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
             </div>
           )}
 
-          {/* GRN table */}
+          {/* ── UPGRADED GRN table with progress bars ── */}
           <table className="li-table">
             <thead>
               <tr>
-                <th>#</th><th>Component</th>
-                <th>PO Qty</th><th style={{color:'var(--green)'}}>Qty Rcvd <span style={{color:'var(--red)'}}>*</span></th>
+                <th style={{width:20}}></th>
+                <th>Part / Description</th>
+                <th style={{textAlign:'right'}}>Ordered</th>
+                <th style={{textAlign:'right'}}>Received</th>
+                <th style={{width:100}}>Receipt %</th>
                 <th>Condition</th>
-                <th style={{color:'var(--teal,#0d9488)'}}>Actual Supplier</th>
                 <th style={{color:'var(--teal,#0d9488)'}}>COO</th>
                 <th style={{color:'var(--teal,#0d9488)'}}>Date Code</th>
                 <th style={{color:'var(--teal,#0d9488)'}}>LOT</th>
-                <th style={{color:'var(--teal,#0d9488)'}}>Weight (kg)</th>
-                <th style={{color:'var(--teal,#0d9488)'}}>Arrived Date</th>
                 <th>Notes</th>
               </tr>
             </thead>
             <tbody>
-              {(order.lineItems||[]).map((li,i) => {
-                const row = grn[li.id]||{};
-                const shortage = parseInt(row.qty_received) < li.qty;
+              {items.map((li,i) => {
+                const row    = grn[li.id]||{};
+                const qty    = parseInt(row.qty_received)||0;
+                const pct    = li.qty > 0 ? Math.round((qty/li.qty)*100) : 0;
+                const isFull = qty >= li.qty && li.qty > 0;
+                const isPartial = qty > 0 && !isFull;
+                const shortage  = qty < li.qty;
+                const dotColor  = isFull ? '#1D9E75' : isPartial ? '#BA7517' : 'var(--border)';
+                const inputBorderColor = isFull ? '#1D9E75' : isPartial ? '#BA7517' : 'var(--border)';
+                const barColor  = isFull ? '#1D9E75' : '#BA7517';
                 return (
-                  <tr key={li.id} style={{background:row.condition==='rejected'?'var(--red-lt,#fef2f2)':shortage?'var(--amber-lt,#fffbeb)':'transparent'}}>
-                    <td>{i+1}</td>
-                    <td className="bold">{li.component}<div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div></td>
-                    {/* DISABLED: orphan manufacturer <td> — no matching <th>, caused all extended columns to shift right by 1 */}
-                    {/* <td>{li.manufacturer||'—'}</td> */}
-                    <td style={{fontWeight:600}}>{fmt(li.qty)}</td>
+                  <tr key={li.id} style={{background:
+                    row.condition==='rejected'?'var(--red-lt,#fef2f2)':
+                    row.condition==='damaged'?'#FFF7ED':
+                    shortage&&qty>0?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    {/* Row status dot */}
                     <td>
+                      <span style={{width:8,height:8,borderRadius:'50%',display:'inline-block',
+                        background:dotColor}}/>
+                    </td>
+                    {/* Component */}
+                    <td className="bold">
+                      {li.component}
+                      {li.manufacturer&&<div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div>}
+                    </td>
+                    {/* Ordered qty */}
+                    <td style={{textAlign:'right',fontWeight:600}}>{li.qty}</td>
+                    {/* Received qty input */}
+                    <td style={{textAlign:'right'}}>
                       <input className="input" type="number" min="0" max={li.qty*2}
                         value={row.qty_received}
                         onChange={e=>setG(li.id,'qty_received',e.target.value)}
-                        style={{width:80,fontWeight:700,
-                          borderColor:shortage?'var(--amber,#d97706)':undefined}}/>
-                      {shortage && <div style={{fontSize:10,color:'var(--amber,#d97706)',fontWeight:600,marginTop:2}}>
-                        ⚠ Short by {li.qty - parseInt(row.qty_received||0)}
-                      </div>}
+                        style={{width:72,textAlign:'center',fontWeight:700,
+                          borderColor: inputBorderColor}}/>
+                      {shortage && qty>0 && (
+                        <div style={{fontSize:10,color:'#BA7517',fontWeight:600,marginTop:2}}>
+                          ⚠ Short by {li.qty - qty}
+                        </div>
+                      )}
                     </td>
+                    {/* Progress bar */}
+                    <td>
+                      <div style={{width:80,height:4,background:'var(--surface2)',borderRadius:2}}>
+                        <div style={{width:pct+'%',height:4,borderRadius:2,
+                          background:qty>0?barColor:'transparent',transition:'width .2s'}}/>
+                      </div>
+                      <div style={{fontSize:10,color:'var(--text3)',marginTop:3,fontFamily:'monospace'}}>
+                        {qty>0?pct+'%':'—'}
+                      </div>
+                    </td>
+                    {/* Condition */}
                     <td>
                       <select className="input" value={row.condition}
                         onChange={e=>setG(li.id,'condition',e.target.value)}
-                        style={{borderColor:row.condition==='damaged'||row.condition==='rejected'?'var(--red)':undefined}}>
+                        style={{fontSize:11,
+                          borderColor:row.condition==='damaged'||row.condition==='rejected'?'var(--red)':
+                          row.condition==='good'&&isFull?'#1D9E75':undefined}}>
                         <option value="good">✅ Good</option>
-                        <option value="partial">⚠ Partial</option>
+                        <option value="partial">⚠ Partial damage</option>
                         <option value="damaged">❌ Damaged</option>
                         <option value="rejected">🚫 Rejected</option>
                       </select>
                     </td>
-                    {/* ── Extended GRN fields — new isolated addition ── */}
-                    {/* Actual Supplier — dropdown, defaults to PO supplier */}
-                    <td style={{minWidth:160}}>
-                      {(()=>{
-                        const po=(order.supplierOrders||[]).find(so=>(so.items||[]).includes(li.id));
-                        const poSupId=po?.supplier_id;
-                        return (
-                          <select className="input" value={row.supplier_id||''}
-                            onChange={e=>setG(li.id,'supplier_id',e.target.value)}
-                            style={{fontSize:11}}>
-                            <option value="">— Select —</option>
-                            {(suppliers||[]).map(s=>(
-                              <option key={s.id} value={s.id}>
-                                {s.id===poSupId?'★ ':''}{s.name}
-                              </option>
-                            ))}
-                          </select>
-                        );
-                      })()}
-                    </td>
                     {/* COO */}
-                    <td style={{minWidth:90}}>
-                      <input className="input" value={row.coo||''}
-                        onChange={e=>setG(li.id,'coo',e.target.value)}
-                        placeholder="e.g. CN" style={{fontSize:11,width:70}}/>
-                    </td>
+                    <td><input className="input" value={row.coo||''}
+                      onChange={e=>setG(li.id,'coo',e.target.value)}
+                      placeholder="CN" style={{fontSize:11,width:55}}/></td>
                     {/* Date Code */}
-                    <td style={{minWidth:90}}>
-                      <input className="input" value={row.date_code||''}
-                        onChange={e=>setG(li.id,'date_code',e.target.value)}
-                        placeholder="e.g. 2345" style={{fontSize:11,width:70}}/>
-                    </td>
+                    <td><input className="input" value={row.date_code||''}
+                      onChange={e=>setG(li.id,'date_code',e.target.value)}
+                      placeholder="2345" style={{fontSize:11,width:60}}/></td>
                     {/* LOT */}
-                    <td style={{minWidth:100}}>
-                      <input className="input" value={row.lot_number||''}
-                        onChange={e=>setG(li.id,'lot_number',e.target.value)}
-                        placeholder="Batch/LOT" style={{fontSize:11,width:80}}/>
-                    </td>
-                    {/* Weight */}
-                    <td style={{minWidth:80}}>
-                      <input className="input" type="number" step="0.01"
-                        value={row.weight_kg||''}
-                        onChange={e=>setG(li.id,'weight_kg',e.target.value)}
-                        placeholder="kg" style={{fontSize:11,width:65}}/>
-                    </td>
-                    {/* Arrived Date */}
-                    <td style={{minWidth:120}}>
-                      <input className="input" type="date"
-                        value={row.arrived_date||''}
-                        onChange={e=>setG(li.id,'arrived_date',e.target.value)}
-                        style={{fontSize:11}}/>
-                    </td>
-                    {/* Notes — existing field, unchanged */}
-                    <td>
-                      <input className="input" value={row.notes}
-                        onChange={e=>setG(li.id,'notes',e.target.value)}
-                        placeholder="e.g. 5 units dented packaging"
-                        style={{fontSize:11}}/>
-                    </td>
+                    <td><input className="input" value={row.lot_number||''}
+                      onChange={e=>setG(li.id,'lot_number',e.target.value)}
+                      placeholder="Batch/LOT" style={{fontSize:11,width:80}}/></td>
+                    {/* Notes */}
+                    <td><input className="input" value={row.notes}
+                      onChange={e=>setG(li.id,'notes',e.target.value)}
+                      placeholder="Optional remarks"
+                      style={{fontSize:11}}/></td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
 
-          {/* Summary */}
+          {/* ── Summary bar ── */}
+          <div style={{display:'flex',alignItems:'center',gap:20,
+            background:'var(--surface2)',border:'1px solid var(--border)',
+            borderRadius:8,padding:'12px 18px',margin:'14px 0'}}>
+            {[
+              {label:'Line Items',        val:items.length,       color:'var(--text)'},
+              {label:'Fully Received',    val:summary.full,       color:'#1D9E75'},
+              {label:'Partially Received',val:summary.partial,    color:'#BA7517'},
+              {label:'Not Yet Received',  val:summary.pending,    color:'var(--text3)'},
+              {label:'Overall Receipt',   val:overallPct+'%',     color:overallPct===100?'#1D9E75':overallPct>0?'#BA7517':'var(--text3)'},
+            ].map((s,i,arr)=>(
+              <React.Fragment key={s.label}>
+                <div style={{textAlign:'center'}}>
+                  <div style={{fontFamily:'monospace',fontSize:20,fontWeight:500,color:s.color}}>{s.val}</div>
+                  <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:.5,marginTop:2}}>{s.label}</div>
+                </div>
+                {i<arr.length-1&&<div style={{width:1,height:36,background:'var(--border)'}}/>}
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Discrepancy warning */}
           {(hasShortage||hasDamaged) && (
-            <div style={{marginTop:12,padding:'10px 14px',borderRadius:'var(--r)',
+            <div style={{padding:'10px 14px',borderRadius:'var(--r)',
               background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)'}}>
               <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)',marginBottom:4}}>⚠ Discrepancies Found</div>
-              {hasShortage && <div style={{fontSize:12}}>• Short shipment detected — follow up with supplier for balance</div>}
+              {hasShortage && <div style={{fontSize:12}}>• Short shipment detected — balance stays pending in hub</div>}
               {hasDamaged  && <div style={{fontSize:12}}>• Damaged/rejected items — raise RMA or insurance claim</div>}
-              <div style={{fontSize:12,marginTop:4}}>These will be flagged in the order history. Order will still proceed with received items.</div>
+              <div style={{fontSize:12,marginTop:4,color:'var(--text3)'}}>Order will proceed with received items. Remaining items flagged for follow-up.</div>
             </div>
           )}
         </div>
+
+        {/* ── Footer: Save Partial + Submit Full ── */}
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={saving} onClick={handleGRN}
-            style={{background:allGood?'var(--green)':undefined,borderColor:allGood?'var(--green)':undefined}}>
-            {saving?'Recording GRN…':allGood?'✅ Confirm Full Receipt':'⚠ Record GRN with Discrepancies'}
+          {/* P2: Separate partial save and full submit buttons */}
+          <button className="btn"
+            style={{background:'#FAEEDA',color:'#633806',borderColor:'#EF9F27',fontWeight:600}}
+            disabled={saving || !anyFilled || allFull}
+            onClick={()=>handleGRN(true)}>
+            {saving?'Saving…':'⚠ Save Partial GRN'}
+          </button>
+          <button className="btn btn-primary"
+            style={{background:allFull?'#1D9E75':undefined,borderColor:allFull?'#1D9E75':undefined,fontWeight:700}}
+            disabled={saving || !allFull}
+            onClick={()=>handleGRN(false)}>
+            {saving?'Submitting…':'✅ Submit Full GRN'}
           </button>
         </div>
       </div>
@@ -576,6 +614,7 @@ export default function DeliveryHubPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [selected,   setSelected]   = useState(null);
+  const [escalating, setEscalating] = useState(null); // { order, newDate }
   const [search,     setSearch]     = useState('');
   const [filter,     setFilter]     = useState('all');
   const [dispatch,   setDispatch]   = useState(null);
@@ -703,9 +742,27 @@ export default function DeliveryHubPage() {
                   {hasReject  && <span className="badge badge-red">❌ Rejected Items</span>}
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  {order.tentative_date && (
-                    <span style={{fontSize:12,color:'var(--text3)'}}>Due: <strong>{order.tentative_date}</strong></span>
-                  )}
+                  {/* P3: Overdue detection + escalation */}
+                  {(()=>{
+                    if (!order.tentative_date) return null;
+                    const today = new Date().toISOString().slice(0,10);
+                    const isOverdue = order.tentative_date < today && !['transit_customer','partial_dispatched','closed'].includes(order.status);
+                    const level = order.escalation_level || 0;
+                    return (
+                      <span style={{fontSize:12,
+                        color: isOverdue ? (level>=2?'var(--red)':'var(--amber,#d97706)') : 'var(--text3)',
+                        fontWeight: isOverdue ? 700 : 400,
+                        display:'flex',alignItems:'center',gap:4}}>
+                        {level>=2 && <span style={{color:'var(--red)',fontSize:14}}>★</span>}
+                        Due: <strong>{order.tentative_date}</strong>
+                        {isOverdue && <span style={{fontSize:10,padding:'1px 6px',borderRadius:99,
+                          background:level>=2?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
+                          color:level>=2?'var(--red)':'var(--amber,#d97706)'}}>
+                          {level>=2?'🔴 Escalated':'⚠ Overdue'}
+                        </span>}
+                      </span>
+                    );
+                  })()}
                   {isInTransit ? (
                     <button className="btn btn-xs"
                       style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
@@ -713,9 +770,25 @@ export default function DeliveryHubPage() {
                       ✅ Mark Received by Customer
                     </button>
                   ) : !grnDone ? (
-                    <button className="btn btn-xs btn-primary" onClick={()=>setSelected(order)}>
-                      📋 Record GRN
-                    </button>
+                    <div style={{display:'flex',gap:6}}>
+                      <button className="btn btn-xs btn-primary" onClick={()=>setSelected(order)}>
+                        📋 Record GRN
+                      </button>
+                      {/* P3: Escalation button — shown when overdue */}
+                      {(()=>{
+                        const today = new Date().toISOString().slice(0,10);
+                        const isOverdue = order.tentative_date && order.tentative_date < today;
+                        if (!isOverdue) return null;
+                        const level = order.escalation_level || 0;
+                        return (
+                          <button className="btn btn-xs"
+                            style={{color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontSize:11}}
+                            onClick={()=>setEscalating({order, newDate:''})}>
+                            {level>=1?'🔴 Re-escalate':'⚠ Escalate'}
+                          </button>
+                        );
+                      })()}
+                    </div>
                   ) : (
                     <button className="btn btn-xs btn-primary"
                       style={{background:'var(--teal,#0d9488)',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
@@ -805,6 +878,50 @@ export default function DeliveryHubPage() {
         <GRNModal order={selected} suppliers={suppliers}
           onClose={()=>setSelected(null)}
           onSaved={()=>{ setSelected(null); qc.invalidateQueries(['orders']); }}/>
+      )}
+
+      {/* P3: Escalation modal */}
+      {escalating && (
+        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setEscalating(null)}>
+          <div className="modal modal-sm">
+            <div className="modal-header">
+              <h2>⚠ Escalate Overdue Delivery</h2>
+              <button className="close-x" onClick={()=>setEscalating(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{marginBottom:14,fontSize:13,color:'var(--text2)'}}>
+                Order <strong>{escalating.order.id}</strong> is overdue.
+                {(escalating.order.escalation_level||0) >= 1 && (
+                  <span style={{color:'var(--red)',fontWeight:700}}> (Previously escalated {escalating.order.escalation_level}×)</span>
+                )}
+              </div>
+              <div className="form-group">
+                <label className="label">Reschedule Delivery Date (optional)</label>
+                <input className="input" type="date"
+                  value={escalating.newDate}
+                  onChange={e=>setEscalating(s=>({...s,newDate:e.target.value}))}/>
+                <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>Leave blank to flag without rescheduling.</div>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={()=>setEscalating(null)}>Cancel</button>
+              <button className="btn btn-primary"
+                style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}
+                onClick={async()=>{
+                  const level = (escalating.order.escalation_level||0) + 1;
+                  try {
+                    await api.post('/orders/'+escalating.order.id+'/escalate',
+                      { level, new_date: escalating.newDate });
+                    toast.success('Escalation L'+level+' recorded'+(escalating.newDate?' — rescheduled to '+escalating.newDate:''));
+                    qc.invalidateQueries(['orders']);
+                    setEscalating(null);
+                  } catch(e){ toast.error('Failed'); }
+                }}>
+                {(escalating.order.escalation_level||0)>=1?'🔴 Re-escalate':'⚠ Escalate'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {dispatch && (
         <CreateShipmentModal order={dispatch} customers={customers} shippers={shippers}

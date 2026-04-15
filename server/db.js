@@ -201,6 +201,25 @@ async function createSchema() {
       id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT DEFAULT 'standard',
       is_default INTEGER DEFAULT 0, config TEXT NOT NULL, created_at TEXT
     );
+    -- ── Finance: customer payment receipts ──────────────────────────────────
+    CREATE TABLE IF NOT EXISTS customer_payments (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      pi_no TEXT DEFAULT '',
+      pi_sent_at TEXT DEFAULT '',
+      payment_type TEXT DEFAULT 'advance',
+      amount NUMERIC DEFAULT 0,
+      currency TEXT DEFAULT 'INR',
+      payment_method TEXT DEFAULT '',
+      payment_ref TEXT DEFAULT '',
+      payment_date TEXT DEFAULT '',
+      advance_pct NUMERIC DEFAULT 0,
+      balance_due NUMERIC DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      recorded_by TEXT DEFAULT '',
+      recorded_at TEXT NOT NULL,
+      notes TEXT DEFAULT ''
+    );
     CREATE TABLE IF NOT EXISTS enquiries (
       id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, created_by TEXT NOT NULL,
       assigned_to TEXT, status TEXT NOT NULL DEFAULT 'new',
@@ -310,9 +329,7 @@ async function createSchema() {
       supplier_id TEXT DEFAULT '', coo TEXT DEFAULT '', date_code TEXT DEFAULT '',
       lot_number TEXT DEFAULT '', weight_kg NUMERIC, qty_received INTEGER DEFAULT 0,
       condition TEXT DEFAULT 'good', arrived_date TEXT DEFAULT '',
-      notes TEXT DEFAULT '', recorded_by TEXT, recorded_at TEXT NOT NULL,
-      grn_no TEXT DEFAULT ''
-      -- GRN-<order_id>-<seq> e.g. GRN-CFOR0001-001; shared by all items in same delivery event
+      notes TEXT DEFAULT '', recorded_by TEXT, recorded_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS shipments (
@@ -421,7 +438,14 @@ async function initDb() {
     console.error('     Check PG_HOST / PG_USER / PG_PASSWORD / PG_DB env vars.\n');
     throw err;
   }
-  await createSchema();
+  console.log('[DB] Creating schema...');
+  try {
+    await createSchema();
+    console.log('[DB] Schema done');
+  } catch(err) {
+    console.error('[DB] createSchema FAILED:', err.message);
+    throw err;
+  }
   // ── Migrate customers table — add extended fields if missing ──────────────
   const customerCols = [
     ['customer_type',     'TEXT DEFAULT \'business\''],
@@ -643,14 +667,26 @@ async function initDb() {
   try { await pool.query("ALTER TABLE customers ADD COLUMN allow_partial_shipment INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE customers ADD COLUMN shipment_notes TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN allow_partial_shipment INTEGER DEFAULT 0"); } catch(_) {}
-  // ── Migrate grn_records — add grn_no for GRN document numbering ────────────
-  try { await pool.query("ALTER TABLE grn_records ADD COLUMN grn_no TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate enquiry_sourcing — add quote_price / quote_currency ───────────
   for (const [col, def] of [['quote_price','NUMERIC'],['quote_currency',"TEXT DEFAULT 'INR'"]]) {
     try { await pool.query('ALTER TABLE enquiry_sourcing ADD COLUMN ' + col + ' ' + def); } catch(_) {}
   }
+  // ── Finance: customer_payments table migration ──────────────────────────────
+  try { await pool.query("ALTER TABLE orders ADD COLUMN pi_no TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN pi_sent_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN payment_due_date TEXT DEFAULT ''"); } catch(_) {}
+  // ── Finance: supplier_orders Phase 2 fields ──────────────────────────────────
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_no TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN expected_ship_date TEXT DEFAULT ''"); } catch(_) {}
+  console.log('[DB] All migrations done');
   const { rows } = await pool.query('SELECT COUNT(*) as n FROM users');
-  if (Number(rows[0].n) === 0) await seedData();
+  if (Number(rows[0].n) === 0) {
+    console.log('[DB] Seeding data...');
+    await seedData();
+    console.log('[DB] Seed done');
+  }
   return pool;
 }
 
