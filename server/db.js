@@ -387,7 +387,10 @@ async function seedData() {
     ['S002','Avnet Asia Pacific','international','James Lee','james@avnet.com.sg','+65 6222 3333','avnet.com','Singapore','','Singapore','','Net 45','USD','active','',today],
     ['S003','Future Electronics','international','Mike Chan','mike@future.com','+1 514 694 7710','futureelectronics.com','Montreal','','USA','','Net 30','USD','active','',today],
     ['S004','Ruchika Distributors','domestic','Ramesh Gupta','ramesh@ruchika.co.in','+91 11 2345 6789','','Delhi','Delhi','India','07BBBBB1111B2Z6','Net 15','INR','active','',today],
-  ]) await pool.query('INSERT INTO suppliers VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)', s);
+  ]) await pool.query(
+    'INSERT INTO suppliers(id,name,type,contact,email,phone,website,city,state,country,gstin,payment_terms,currency,status,notes,created) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',
+    s
+  );
 
   for (const [s,l] of [['S001','LC001'],['S001','LC002'],['S002','LC003'],['S002','LC005'],['S003','LC007'],['S003','LC008']])
     await pool.query('INSERT INTO supplier_linecards VALUES($1,$2)', [s,l]);

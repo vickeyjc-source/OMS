@@ -4,19 +4,26 @@
   "description": "Ciflux OMS Server",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "backend": "node server/index.js",
+    "ui": "npm --prefix client start",
+    "dev": "concurrently --kill-others-on-fail -n \"backend,ui\" -c \"blue,green\" \"npm run backend\" \"npm run ui\"",
+    "stop": "lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null; lsof -ti:3000 2>/dev/null | xargs kill -9 2>/dev/null; echo '■ Stopped all servers'"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "deasync": "^0.1.29",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",
     "express-session": "^1.17.3",
     "jsonwebtoken": "^9.0.0",
+    "multer": "^1.4.5-lts.1",
     "pg": "^8.11.0",
     "pg-pool": "^3.6.1",
-    "uuid": "^9.0.0",
-    "deasync": "^0.1.29",
-    "multer": "^1.4.5-lts.1"
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }
