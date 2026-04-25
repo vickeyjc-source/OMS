@@ -331,7 +331,7 @@ app.post('/api/suppliers', auth, (req, res) => {
   const supNo = id;
   const postTermsText  = d.payment_terms||'Net 30';
   const postParsedTerms= parsePaymentTerms(postTermsText);
-  run('INSERT INTO suppliers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+  run('INSERT INTO suppliers(id,name,type,contact,email,phone,website,city,state,country,gstin,payment_terms,currency,status,notes,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     [id,d.name,d.type||'domestic',d.contact||'',d.email||'',d.phone||'',d.website||'',
      d.billing_city||d.city||'',d.billing_state||d.state||'',
      d.billing_country||d.country||'India',d.gstin||'',
@@ -377,7 +377,7 @@ app.post('/api/suppliers/bulk', auth, (req, res) => {
     if (!d.name) { errors.push('Row '+(i+2)+': Name missing'); return; }
     try {
       const id = nextId('suppliers','CFSUP',4);
-      run('INSERT INTO suppliers VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      run('INSERT INTO suppliers(id,name,type,contact,email,phone,website,city,state,country,gstin,payment_terms,currency,status,notes,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         [id,d.name,d.type||'domestic',d.contact||'',d.email||'',d.phone||'',d.website||'',
          d.city||'',d.state||'',d.country||'India',d.gstin||'',
          d.payment_terms||'Net 30',d.currency||'INR',d.status||'active',d.notes||'',todayStr()]);
@@ -448,8 +448,8 @@ app.post('/api/enquiries', auth, (req, res) => {
   const now = nowStr();
   const initStatus = ['sourcing','draft'].includes(d.status) ? d.status : 'new';
   const initSourNo = initStatus === 'sourcing' ? nextSourNo() : '';
-  run('INSERT INTO enquiries(id,customer_id,created_by,assigned_to,status,priority,notes,sourcing_no,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-    [id, d.customer_id, req.session.user.id, d.assigned_to||null, initStatus, d.priority||'normal', d.notes||'', initSourNo, now, now]);
+  run('INSERT INTO enquiries(id,customer_id,created_by,assigned_to,status,priority,notes,sourcing_no,buying_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+    [id, d.customer_id, req.session.user.id, d.assigned_to||null, initStatus, d.priority||'normal', d.notes||'', initSourNo, d.buying_type||'', now, now]);
   if (initStatus === 'sourcing') {
     run('INSERT INTO enquiry_history VALUES(?,?,?,?,?)', [uuid(),id,'Submitted to Sourcing — '+initSourNo,req.session.user.name,now]);
   }
@@ -515,8 +515,13 @@ app.put('/api/enquiries/:id', auth, (req, res) => {
   if (d.status === 'sourcing' && !sourNo) {
     sourNo = nextSourNo();
   }
-  run('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,updated_at=? WHERE id=?',
-    [d.status||e.status, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo, now, req.params.id]);
+  const newCharges = d.charges !== undefined ? JSON.stringify(d.charges) : e.charges;
+  // Persist existing_order_id when provided (set when order triggers enquiry revision)
+  const newExistingOrderId = d.existing_order_id !== undefined ? (d.existing_order_id || null) : (e.existing_order_id || null);
+  try { run('ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
+  run('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,updated_at=? WHERE id=?',
+    [d.status||e.status, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
+     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, now, req.params.id]);
   if (d.items !== undefined) {
     run('DELETE FROM enquiry_items WHERE enquiry_id=?', [req.params.id]);
     d.items.forEach((item, idx) => {
@@ -525,26 +530,58 @@ app.put('/api/enquiries/:id', auth, (req, res) => {
          item.target_price||null,item.target_currency||'INR',item.quantity||0,
          item.preferred_delivery_date||'',item.date_code||'',idx+1,item.tax_rate||0]);
     });
+    // When items are updated and sent back to sourcing, mark any active quote as
+    // returned_to_sourcing so it doesn't appear as the current active quote and
+    // a proper new revision is generated after sourcing re-prices.
+    if (d.status === 'sourcing' || d.status === 'returned_to_sourcing') {
+      const activeQuotes = all("SELECT id, quote_no FROM quotes WHERE enquiry_id=? AND status='active'", [req.params.id]);
+      activeQuotes.forEach(q => {
+        run("UPDATE quotes SET status='returned_to_sourcing' WHERE id=?", [q.id]);
+        try {
+          run('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+            [uuid(), req.params.id, 'Quote ' + q.quote_no + ' returned to sourcing for re-pricing', req.session.user.name, now]);
+        } catch(_) {}
+      });
+    }
   }
   if (d.sourcing !== undefined) {
     d.sourcing.forEach(s => {
       try {
         // Always use UPSERT so quote_price is always written regardless of existing/new
-        run(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,availability,lead_time,notes,quote_price,quote_currency,updated_by,updated_at,sourcing_revision_notes,sales_comment)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        run(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
+               src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
+               hsn_code=EXCLUDED.hsn_code,
+               freight_pct=EXCLUDED.freight_pct, insurance_pct=EXCLUDED.insurance_pct,
+               duty_pct=EXCLUDED.duty_pct, cess_pct=EXCLUDED.cess_pct,
+               bank_fixed_usd=EXCLUDED.bank_fixed_usd, clearance_fixed_inr=EXCLUDED.clearance_fixed_inr,
+               margin_pct=EXCLUDED.margin_pct,
+               freight_inr=EXCLUDED.freight_inr, insurance_inr=EXCLUDED.insurance_inr,
+               duty_inr=EXCLUDED.duty_inr, cess_inr=EXCLUDED.cess_inr,
+               bank_inr=EXCLUDED.bank_inr, clearance_inr=EXCLUDED.clearance_inr,
+               margin_inr=EXCLUDED.margin_inr,
                availability=EXCLUDED.availability, lead_time=EXCLUDED.lead_time,
                notes=EXCLUDED.notes, quote_price=EXCLUDED.quote_price,
-               quote_currency=EXCLUDED.quote_currency, updated_by=EXCLUDED.updated_by,
+               quote_currency=EXCLUDED.quote_currency, tax_rate=EXCLUDED.tax_rate,
+               updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
                sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment)`,
           [s.id||uuid(), req.params.id, s.enquiry_item_id, s.supplier_id||'',
-           s.sourced_price||null, s.sourced_currency||'INR', s.availability||'',
-           s.lead_time||'', s.notes||'',
+           s.sourced_price||null, s.sourced_currency||'INR',
+           s.src_price_foreign||null, s.exchange_rate||null,
+           s.hsn_code||'',
+           s.freight_pct??20, s.insurance_pct??1.125, s.duty_pct??7.5, s.cess_pct??10,
+           s.bank_fixed_usd??15, s.clearance_fixed_inr??1800, s.margin_pct??15,
+           s.freight_inr||null, s.insurance_inr||null, s.duty_inr||null, s.cess_inr||null,
+           s.bank_inr||null, s.clearance_inr||null, s.margin_inr||null,
+           s.availability||'', s.lead_time||'', s.notes||'',
            (s.quote_price !== '' && s.quote_price != null) ? s.quote_price : null,
-           s.quote_currency||'INR', req.session.user.id, now,
+           s.quote_currency||'INR',
+           (s.tax_rate !== '' && s.tax_rate != null) ? Number(s.tax_rate) : null,
+           req.session.user.id, now,
            s.sourcing_revision_notes||null, s.sales_comment||null]);
       } catch(e) {
         console.error('[sourcing save error] row:', JSON.stringify({id:s.id,qp:s.quote_price}), 'err:', e.message);
@@ -562,8 +599,15 @@ app.post('/api/quotes', auth, (req, res) => {
   if (!d.customer_id || !d.quote_no) return res.status(400).json({ error: 'customer_id and quote_no required' });
   if (get('SELECT id FROM quotes WHERE quote_no=?', [d.quote_no])) return res.status(409).json({ error: 'Quote number exists' });
   const id = uuid();
-  run('INSERT INTO quotes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-    [id,d.enquiry_id||null,d.customer_id,d.quote_no,d.zoho_quote_no||'',d.file_ref||'','active',d.valid_until||'',req.session.user.id,nowStr(),d.notes||'']);
+  // Resolve existing_order_id: use provided value, or look up from linked enquiry
+  let existingOrderId = d.existing_order_id || null;
+  if (!existingOrderId && d.enquiry_id) {
+    const enqRow = get('SELECT existing_order_id FROM enquiries WHERE id=?', [d.enquiry_id]);
+    if (enqRow?.existing_order_id) existingOrderId = enqRow.existing_order_id;
+  }
+  try { run('ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
+  run('INSERT INTO quotes(id,enquiry_id,customer_id,quote_no,zoho_quote_no,file_ref,status,valid_until,created_by,created_at,notes,existing_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    [id,d.enquiry_id||null,d.customer_id,d.quote_no,d.zoho_quote_no||'',d.file_ref||'','active',d.valid_until||'',req.session.user.id,nowStr(),d.notes||'',existingOrderId]);
   if (d.enquiry_id) {
     run('UPDATE enquiries SET status=?,updated_at=? WHERE id=?', ['quoted',nowStr(),d.enquiry_id]);
     run('INSERT INTO enquiry_history VALUES(?,?,?,?,?)', [uuid(),d.enquiry_id,`Quote ${d.quote_no} created`,req.session.user.name,nowStr()]);
@@ -601,14 +645,16 @@ app.post('/api/quotes/:id/revise', auth, (req, res) => {
   const salesNotes = d.sales_revision_notes || '';
 
   const newId = uuid();
+  // Carry existing_order_id forward to revision quote so "Update Order" flow works
+  const parentExistingOrderId = parent.existing_order_id || null;
   run(`INSERT INTO quotes(id,enquiry_id,customer_id,quote_no,zoho_quote_no,file_ref,status,
        valid_until,created_by,created_at,notes,parent_quote_id,revision,
        customer_response,customer_response_date,customer_response_notes,customer_response_by,
-       sales_revision_notes)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,?)`,
+       sales_revision_notes,existing_order_id)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,?,?)`,
     [newId, parent.enquiry_id, parent.customer_id, newQuoteNo,
-     '', '', 'active', '', req.session.user.id, now,
-     parent.notes||'', parent.id, attempt, salesNotes]);
+     parent.zoho_quote_no||'', '', 'active', parent.valid_until||'', req.session.user.id, now,
+     parent.notes||'', parent.id, attempt, salesNotes, parentExistingOrderId]);
 
   // Mark the parent as superseded
   run("UPDATE quotes SET status='superseded' WHERE id=?", [parent.id]);
@@ -686,6 +732,9 @@ app.get('/api/quotes/:id/lineitems', auth, (req, res) => {
       quote_price:   qp,
       quote_currency:qc || item.target_currency || 'INR',
       sourced_price: src.sourced_price || null,
+      supplier_id:   src.supplier_id   || '',
+      margin_inr:  src.margin_inr  != null ? Number(src.margin_inr)  : null,
+      margin_pct:  src.margin_pct  != null ? Number(src.margin_pct)  : null,
       // FIX 2: return tax_rate from enquiry_sourcing (set by Sourcing team)
       // fallback to enquiry_items.tax_rate if sourcing row has none
       tax_rate: (src.tax_rate != null && src.tax_rate !== '') ? Number(src.tax_rate)
@@ -703,7 +752,9 @@ app.put('/api/quotes/:id', auth, (req, res) => {
   run(`UPDATE quotes SET
        quote_no=?, zoho_quote_no=?, file_ref=?, status=?, valid_until=?, notes=?,
        customer_response=?, customer_response_date=?, customer_response_notes=?, customer_response_by=?,
-       revision=COALESCE(revision,1)
+       sent_to_customer=?,
+       revision=COALESCE(revision,1),
+       updated_at=?
        WHERE id=?`,
     [
       d.quote_no      ?? old.quote_no,
@@ -713,9 +764,11 @@ app.put('/api/quotes/:id', auth, (req, res) => {
       d.valid_until   ?? old.valid_until   ?? '',
       d.notes         ?? old.notes         ?? '',
       d.customer_response       ?? old.customer_response       ?? null,
-      d.customer_response_date  ?? old.customer_response_date  ?? null,
+      d.customer_response       != null ? (new Date().toISOString().slice(0,10)) : (old.customer_response_date ?? null),
       d.customer_response_notes ?? old.customer_response_notes ?? null,
       d.customer_response_by    ?? old.customer_response_by    ?? null,
+      d.sent_to_customer != null ? (d.sent_to_customer ? 1 : 0) : (old.sent_to_customer ?? 0),
+      nowStr(),
       req.params.id,
     ]);
   saveNow(); res.json({ ok: true });
@@ -871,6 +924,10 @@ app.put('/api/orders/:id', auth, (req, res) => {
   }
   run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(),oid,d._action||'Order updated',u.name,d._comment||'',nowStr()]);
+  // Mark the linked quote as order_created so it can't be re-ordered
+  if (d.quote_id) {
+    run("UPDATE quotes SET status='order_created' WHERE id=?", [d.quote_id]);
+  }
   saveNow();
   res.json(stripSensitive(assembleOrder(get('SELECT * FROM orders WHERE id=?',[oid])), u));
 });
@@ -1041,6 +1098,130 @@ app.get('/api/reports/summary', auth, (req, res) => {
 
 
 
+// ── STOCK INVENTORY ──────────────────────────────────────────────────────────
+app.get('/api/inventory', auth, (req, res) => {
+  try {
+    const rows = all('SELECT si.*, c.name AS customer_name FROM stock_inventory si LEFT JOIN customers c ON c.id = si.holder_id ORDER BY si.added_at DESC');
+    res.json(rows.map(r => ({
+      ...r,
+      holder_display: r.holder_type === 'customer'
+        ? (r.customer_name || r.holder_name || r.holder_id)
+        : r.holder_type === 'supplier'
+          ? (r.holder_name || r.holder_id || 'Supplier')
+          : (r.holder_name || 'Our Warehouse'),
+    })));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Search inventory by component/manufacturer/ipn — used by Sourcing Bin auto-check
+app.get('/api/inventory/search', auth, (req, res) => {
+  try {
+    const q = (req.query.q || '').trim().toLowerCase();
+    if (!q || q.length < 2) return res.json([]);
+    const like = '%' + q + '%';
+    const rows = all(
+      `SELECT si.*, c.name AS customer_name FROM stock_inventory si
+       LEFT JOIN customers c ON c.id = si.holder_id
+       WHERE (LOWER(si.component) LIKE ? OR LOWER(si.ipn) LIKE ? OR LOWER(si.manufacturer) LIKE ?)
+         AND si.quantity_available > 0
+       ORDER BY si.quantity_available DESC`,
+      [like, like, like]
+    );
+    res.json(rows.map(r => ({
+      ...r,
+      holder_display: r.holder_type === 'customer'
+        ? (r.customer_name || r.holder_name || r.holder_id)
+        : r.holder_type === 'supplier'
+          ? (r.holder_name || r.holder_id || 'Supplier')
+          : (r.holder_name || 'Our Warehouse'),
+    })));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/inventory', auth, (req, res) => {
+  try {
+    const d   = req.body;
+    if (!d.component) return res.status(400).json({ error: 'Component name required' });
+    const id  = 'INV-' + uuid().slice(0,8).toUpperCase();
+    const now = nowStr();
+    run(`INSERT INTO stock_inventory(id,component,ipn,manufacturer,linecard_id,date_code,
+         quantity_total,quantity_available,target_currency,target_price,
+         holder_type,holder_id,holder_name,reference_order_id,notes,added_by,added_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, d.component, d.ipn||'', d.manufacturer||'', d.linecard_id||null,
+       d.date_code||'',
+       parseInt(d.quantity_total)||0, parseInt(d.quantity_available||d.quantity_total)||0,
+       d.target_currency||'INR', d.target_price||null,
+       d.holder_type||'warehouse', d.holder_id||'', d.holder_name||'',
+       d.reference_order_id||'', d.notes||'',
+       req.session.user.name, now]);
+    saveNow();
+    res.json({ id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/inventory/bulk', auth, (req, res) => {
+  try {
+    const rows = req.body.rows;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows provided' });
+    const created = [], errors = [];
+    const now = nowStr();
+    rows.forEach((d, i) => {
+      if (!d.component) { errors.push(`Row ${i+2}: Component name missing`); return; }
+      try {
+        const id = 'INV-' + uuid().slice(0,8).toUpperCase();
+        run(`INSERT INTO stock_inventory(id,component,ipn,manufacturer,linecard_id,date_code,
+             quantity_total,quantity_available,target_currency,target_price,
+             holder_type,holder_id,holder_name,reference_order_id,notes,added_by,added_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [id, d.component, d.ipn||'', d.manufacturer||'', d.linecard_id||null,
+           d.date_code||'',
+           parseInt(d.quantity_available||d.quantity_total)||0, parseInt(d.quantity_available||d.quantity_total)||0,
+           d.target_currency||'INR', d.target_price||null,
+           d.holder_type||'warehouse', d.holder_id||'', d.holder_name||'',
+           d.reference_order_id||'', d.notes||'',
+           req.session.user.name, now]);
+        created.push(id);
+      } catch(e) { errors.push(`Row ${i+2}: ${e.message}`); }
+    });
+    saveNow();
+    res.json({ created: created.length, errors });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/inventory/:id', auth, (req, res) => {
+  try {
+    const inv = get('SELECT * FROM stock_inventory WHERE id=?', [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Not found' });
+    const d = req.body;
+    run(`UPDATE stock_inventory SET
+         component=?,ipn=?,manufacturer=?,linecard_id=?,date_code=?,
+         quantity_total=?,quantity_available=?,target_currency=?,target_price=?,
+         holder_type=?,holder_id=?,holder_name=?,reference_order_id=?,notes=?
+         WHERE id=?`,
+      [d.component||inv.component, d.ipn??inv.ipn, d.manufacturer??inv.manufacturer,
+       d.linecard_id??inv.linecard_id,
+       d.date_code??inv.date_code,
+       d.quantity_total!=null?parseInt(d.quantity_total):inv.quantity_total,
+       d.quantity_available!=null?parseInt(d.quantity_available):inv.quantity_available,
+       d.target_currency||inv.target_currency, d.target_price??inv.target_price,
+       d.holder_type||inv.holder_type, d.holder_id??inv.holder_id,
+       d.holder_name??inv.holder_name, d.reference_order_id??inv.reference_order_id,
+       d.notes??inv.notes,
+       req.params.id]);
+    saveNow();
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/inventory/:id', auth, (req, res) => {
+  try {
+    run('DELETE FROM stock_inventory WHERE id=?', [req.params.id]);
+    saveNow();
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── START ────────────────────────────────────────────────────
 function getLanIp() {
   for (const nets of Object.values(os.networkInterfaces())) {
@@ -1076,6 +1257,10 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
     // Update existing draft PO
     poId = existingSO.id;
     poNo = existingSO.internal_po_no;
+    const systemPoRef = order.finance_po_no || order.po_number || '';
+    if (!existingSO.po_no && systemPoRef) {
+      run('UPDATE supplier_orders SET po_no=? WHERE id=?', [systemPoRef, poId]);
+    }
     // Remove old item links so we can re-link cleanly
     run('DELETE FROM supplier_order_items WHERE supplier_order_id=?', [poId]);
   } else {
@@ -1086,7 +1271,7 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
          confirmed_price,confirmed_currency,promised_delivery_date,supplier_ref,
          shipping_status,notes,created_at)
          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [poId, req.params.id, d.supplier_id, poNo, d.po_no||'',
+       [poId, req.params.id, d.supplier_id, poNo, d.po_no||order.finance_po_no||order.po_number||'',
        'draft', d.confirmed_price||null, d.confirmed_currency||'INR',
        d.promised_delivery_date||'', d.supplier_ref||'',
        'pending', d.notes||'', now]);
@@ -1111,11 +1296,11 @@ app.post('/api/orders/:id/po', auth, (req, res) => {
 
   // Update with payment fields
   run(`UPDATE supplier_orders SET payment_terms_type=?,payment_net_days=?,
-       payment_advance_pct=?,payment_due_date=?,zoho_po_number=?,payment_blocked=?
+       payment_advance_pct=?,payment_due_date=?,zoho_po_number=?,payment_blocked=?,notes=?
        WHERE id=?`,
     [d.payment_terms_type||'net', netDays,
      d.payment_advance_pct||0, paymentDueDate,
-     d.zoho_po_number||'', paymentBlocked, poId]);
+     d.zoho_po_number||'', paymentBlocked, d.notes||'', poId]);
 
   // If advance payment required → create finance queue item
   // FIX B: check for existing pending entry before inserting to prevent duplicates
@@ -1201,6 +1386,11 @@ app.put('/api/supplier-orders/:id', auth, (req, res) => {
            req.session.user.name, d.notes||'', now]);
       }
     } catch(_) {}
+  }
+
+  // When PO → in_transit, set parent order to transit_hub so it shows in Delivery Hub
+  if (newStatus === 'in_transit' && so.status !== 'in_transit') {
+    run("UPDATE orders SET status='transit_hub' WHERE id=? AND status NOT IN ('delivery_hub','partial_hub','partial_dispatched','transit_customer','closed','cancelled')", [so.order_id]);
   }
 
   // When PO is received → update linked order line items to 'delivered_hub'
@@ -1430,12 +1620,16 @@ function isNetTerms(t) {
          l.includes('deferred') || l.includes('consignment');
 }
 
+function normalizedFinanceDocNo(prefix, orderId, existingValue) {
+  const year = new Date().getFullYear();
+  const normalized = `CIFLUX-${prefix}-${orderId}-${year}`;
+  if (!existingValue) return normalized;
+  return existingValue.startsWith(`CIFLUX-${prefix}-`) ? existingValue : normalized;
+}
+
 // GET /api/finance/customer-queue
 app.get('/api/finance/customer-queue', auth, (req, res) => {
-  console.log('[FINANCE] customer-queue called by', req.session?.user?.name);
   const orders = all("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') ORDER BY created_at DESC");
-  console.log('[FINANCE] total orders found:', orders.length);
-  orders.forEach(o => console.log('[FINANCE] order:', o.id, '| status:', o.status, '| payment_terms:', o.payment_terms||'(empty)'));
   const customers = all('SELECT id, name, email, gstin, customer_no, billing_city, billing_state FROM customers');
   let payments = [];
   try { payments = all('SELECT * FROM customer_payments ORDER BY recorded_at DESC'); } catch(_) {}
@@ -1445,16 +1639,15 @@ app.get('/api/finance/customer-queue', auth, (req, res) => {
     .filter(o => {
       // Exclude orders where customer has already paid
       if (o.customer_payment_status === 'paid') return false;
-      // Exclude orders in supplier payment update — they belong in supplier queue not customer queue
-      if (o.status === 'sup_payment_update') return false;
-      if (o.status === 'payment_approval' || o.status === 'waiting_for_payment') {
-        console.log('[FINANCE] PASS (status gate):', o.id, o.status);
+      // Only show orders that have reached a customer-payment-relevant stage
+      // Exclude pure supplier/procurement statuses — customer billing hasn't started yet
+      const SUPPLIER_ONLY_STATUSES = ['procurement', 'sup_payment_update', 'sourcing', 'enquiry', 'quote'];
+      if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
+      if (o.status === 'payment_approval' || o.status === 'waiting_for_payment' || o.status === 'cust_payment_update') {
         return true;
       }
       const t = o.payment_terms || '';
-      const passes = t.length > 0;
-      console.log('[FINANCE] order', o.id, '| terms:', t||'(empty)', '| passes:', passes);
-      return passes;
+      return t.length > 0;
     })
     .map(o => {
       const items = all('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [o.id]);
@@ -1484,14 +1677,76 @@ app.post('/api/finance/pi/:order_id', auth, (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
   if (!o) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
-  const piNo = o.pi_no || ('PI-' + req.params.order_id + '-' + new Date().getFullYear());
+  const piNo = normalizedFinanceDocNo('PI', req.params.order_id, o.pi_no);
   try { run("ALTER TABLE orders ADD COLUMN pi_no TEXT DEFAULT ''"); } catch(_) {}
   try { run("ALTER TABLE orders ADD COLUMN pi_sent_at TEXT DEFAULT ''"); } catch(_) {}
   run('UPDATE orders SET pi_no=?, pi_sent_at=? WHERE id=?', [piNo, now, req.params.order_id]);
   try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'PI generated: '+piNo, req.session.user.name, '', now]); } catch(_) {}
+
+  // Auto-create draft supplier POs (grouped by sourced supplier) so Procurement can continue immediately.
+  // Existing supplier POs are preserved; only missing supplier groups are created.
+  const orderItems = all('SELECT id, supplier_id FROM order_items WHERE order_id=?', [req.params.order_id]);
+  const bySupplier = {};
+  orderItems.forEach(li => {
+    if (!li?.supplier_id) return;
+    if (!bySupplier[li.supplier_id]) bySupplier[li.supplier_id] = [];
+    bySupplier[li.supplier_id].push(li.id);
+  });
+
+  const autoCreated = [];
+  Object.entries(bySupplier).forEach(([supplierId, itemIds]) => {
+    const existing = get('SELECT id, internal_po_no FROM supplier_orders WHERE order_id=? AND supplier_id=? LIMIT 1',
+      [req.params.order_id, supplierId]);
+    if (existing) return;
+
+    const poId = uuid().slice(0,8);
+    const poNo = nextPoNo();
+    run(`INSERT INTO supplier_orders(id,order_id,supplier_id,internal_po_no,po_no,status,
+         confirmed_price,confirmed_currency,promised_delivery_date,supplier_ref,
+         shipping_status,notes,created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [poId, req.params.order_id, supplierId, poNo, o.po_number||'',
+       'draft', null, 'INR', '', '', 'pending', 'Auto-created from PI generation', now]);
+
+    itemIds.forEach(itemId => {
+      try { run('INSERT INTO supplier_order_items VALUES(?,?)', [poId, itemId]); } catch(_) {}
+    });
+
+    autoCreated.push({ id: poId, internal_po_no: poNo, supplier_id: supplierId });
+  });
+
+  if (autoCreated.length > 0) {
+    try {
+      run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+        [uuid(), req.params.order_id,
+         `Auto-created ${autoCreated.length} PO(s) from PI generation`,
+         req.session.user.name, '', now]);
+    } catch(_) {}
+  }
+
   saveNow();
-  res.json({ ok: true, pi_no: piNo });
+  res.json({ ok: true, pi_no: piNo, auto_pos: autoCreated });
+});
+
+// POST /api/finance/po/:order_id
+app.post('/api/finance/po/:order_id', auth, (req, res) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+  const poNo = normalizedFinanceDocNo('PO', req.params.order_id, o.finance_po_no);
+
+  try { run("ALTER TABLE orders ADD COLUMN finance_po_no TEXT DEFAULT ''"); } catch(_) {}
+  try { run("ALTER TABLE orders ADD COLUMN po_generated_at TEXT DEFAULT ''"); } catch(_) {}
+  run('UPDATE orders SET finance_po_no=?, po_generated_at=? WHERE id=?', [poNo, now, req.params.order_id]);
+
+  try {
+    run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), req.params.order_id, 'Finance PO generated: ' + poNo, req.session.user.name, '', now]);
+  } catch(_) {}
+
+  saveNow();
+  res.json({ ok: true, po_no: poNo });
 });
 
 // POST /api/finance/customer-pay/:order_id
@@ -1502,7 +1757,7 @@ app.post('/api/finance/customer-pay/:order_id', auth, (req, res) => {
   const now = nowStr();
   try {
     run(`CREATE TABLE IF NOT EXISTS customer_payments (
-      id TEXT PRIMARY KEY, order_id TEXT NOT NULL, pi_no TEXT DEFAULT '',
+      id TEXT PRIMARY KEY, order_id TEXT NOT NULL, customer_po_no TEXT DEFAULT '', finance_po_no TEXT DEFAULT '', pi_no TEXT DEFAULT '',
       pi_sent_at TEXT DEFAULT '', payment_type TEXT DEFAULT 'advance',
       amount NUMERIC DEFAULT 0, currency TEXT DEFAULT 'INR',
       payment_method TEXT DEFAULT '', payment_ref TEXT DEFAULT '',
@@ -1510,28 +1765,144 @@ app.post('/api/finance/customer-pay/:order_id', auth, (req, res) => {
       balance_due NUMERIC DEFAULT 0, status TEXT DEFAULT 'pending',
       recorded_by TEXT DEFAULT '', recorded_at TEXT NOT NULL, notes TEXT DEFAULT '')`);
   } catch(_) {}
+  try { run("ALTER TABLE customer_payments ADD COLUMN customer_po_no TEXT DEFAULT ''"); } catch(_) {}
+  try { run("ALTER TABLE customer_payments ADD COLUMN finance_po_no TEXT DEFAULT ''"); } catch(_) {}
   const items = all('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
   const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
   const prevPaid = (() => { try { return all("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'",[req.params.order_id]).reduce((s,p)=>s+(parseFloat(p.amount)||0),0); } catch(_){return 0;} })();
   const newPaid  = prevPaid + (parseFloat(d.amount)||0);
   const balance  = parseFloat(Math.max(0,total-newPaid).toFixed(2));
   const pmtStatus= balance <= 0 ? 'paid' : 'partial';
-  run('INSERT INTO customer_payments VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-    [uuid(), req.params.order_id, d.pi_no||o.pi_no||'', d.pi_sent_at||'',
+  run(`INSERT INTO customer_payments(
+        id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+        payment_type, amount, currency, payment_method, payment_ref,
+        payment_date, advance_pct, balance_due, status, recorded_by, recorded_at, notes
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [uuid(), req.params.order_id, d.customer_po_no||o.po_number||'', d.finance_po_no||o.finance_po_no||'',
+     d.pi_no||o.pi_no||'', d.pi_sent_at||'',
      d.payment_type||'advance', parseFloat(d.amount)||0, d.currency||'INR',
      d.payment_method||'', d.payment_ref||'', d.payment_date||now.slice(0,10),
      parseFloat(d.advance_pct)||0, balance, 'paid',
      req.session.user.id, now, d.notes||'']);
   try { run("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
-  run('UPDATE orders SET customer_payment_status=? WHERE id=?', [pmtStatus, req.params.order_id]);
-  if (balance <= 0) run("UPDATE orders SET status='open', customer_payment_status='paid' WHERE id=?", [req.params.order_id]);
+  run('UPDATE orders SET customer_payment_status=? WHERE id=?', ['payment_recorded', req.params.order_id]);
   try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment recorded: '+(d.currency||'INR')+' '+d.amount, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, balance_due: balance, status: pmtStatus });
+  res.json({ ok: true, balance_due: balance, status: 'payment_recorded' });
 });
 
-// PUT /api/finance/customer-pay/:payment_id — edit existing payment (requires manager approval)
+// POST /api/finance/customer-release/:order_id — confirm and release payment to procurement
+app.post('/api/finance/customer-release/:order_id', auth, (req, res) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+  run("UPDATE orders SET status='open', customer_payment_status='paid' WHERE id=?", [req.params.order_id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// POST /api/finance/customer-release/:order_id — confirm and release payment to procurement
+app.post('/api/finance/customer-release/:order_id', auth, (req, res) => {
+  const o = get('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const now = nowStr();
+  run("UPDATE orders SET status='open', customer_payment_status='paid' WHERE id=?", [req.params.order_id]);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// ── PO REQUESTS (Procurement → Finance workflow for Supplier PI + Zoho PO) ───
+
+// GET /api/po-requests
+app.get('/api/po-requests', auth, (req, res) => {
+  try {
+    run(`CREATE TABLE IF NOT EXISTS po_requests (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      supplier_order_id TEXT DEFAULT '',
+      supplier_id TEXT NOT NULL,
+      supplier_name TEXT DEFAULT '',
+      order_ref TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending',
+      requested_by TEXT DEFAULT '',
+      requested_at TEXT NOT NULL,
+      notes TEXT DEFAULT '',
+      fulfilled_by TEXT DEFAULT '',
+      fulfilled_at TEXT DEFAULT '',
+      supplier_ref TEXT DEFAULT '',
+      zoho_po_number TEXT DEFAULT ''
+    )`);
+  } catch(_) {}
+  try {
+    const rows = all("SELECT * FROM po_requests ORDER BY requested_at DESC");
+    res.json(rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/po-requests — Procurement requests Finance fill in PI + Zoho PO
+app.post('/api/po-requests', auth, (req, res) => {
+  const d = req.body || {};
+  if (!d.order_id || !d.supplier_id) return res.status(400).json({ error: 'order_id and supplier_id are required' });
+  const now = nowStr();
+  // Prevent duplicate pending requests for same order+supplier
+  try {
+    const existing = get("SELECT id FROM po_requests WHERE order_id=? AND supplier_id=? AND status='pending'",
+      [d.order_id, d.supplier_id]);
+    if (existing) return res.json({ ok: true, id: existing.id, already_exists: true });
+  } catch(_) {}
+  const id = uuid();
+  run(`INSERT INTO po_requests(id,order_id,supplier_order_id,supplier_id,supplier_name,order_ref,
+       status,requested_by,requested_at,notes,fulfilled_by,fulfilled_at,supplier_ref,zoho_po_number)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, d.order_id, d.supplier_order_id||'', d.supplier_id,
+     d.supplier_name||'', d.order_ref||'',
+     'pending', req.session.user.name, now,
+     d.notes||'', '', '', '', '']);
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), d.order_id, 'PO request sent to Finance for supplier: '+(d.supplier_name||d.supplier_id),
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, id });
+});
+
+// PUT /api/po-requests/:id — Finance fulfills request with supplier_ref + zoho_po_number
+app.put('/api/po-requests/:id', auth, (req, res) => {
+  const d = req.body || {};
+  const pr = get('SELECT * FROM po_requests WHERE id=?', [req.params.id]);
+  if (!pr) return res.status(404).json({ error: 'Request not found' });
+  if (!d.supplier_ref?.trim() || !d.zoho_po_number?.trim())
+    return res.status(400).json({ error: 'Supplier PI and Zoho PO number are required' });
+  const now = nowStr();
+  run(`UPDATE po_requests SET status='fulfilled', fulfilled_by=?, fulfilled_at=?,
+       supplier_ref=?, zoho_po_number=? WHERE id=?`,
+    [req.session.user.name, now, d.supplier_ref.trim(), d.zoho_po_number.trim(), req.params.id]);
+  // Also update the linked supplier_order record so Procurement sees the data
+  if (pr.supplier_order_id) {
+    try {
+      run('UPDATE supplier_orders SET supplier_ref=?, zoho_po_number=? WHERE id=?',
+        [d.supplier_ref.trim(), d.zoho_po_number.trim(), pr.supplier_order_id]);
+    } catch(_) {}
+  }
+  try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), pr.order_id, 'Finance fulfilled PO request — PI: '+d.supplier_ref.trim()+' | Zoho PO: '+d.zoho_po_number.trim(),
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+});
+
+// DELETE /api/po-requests/:id — cancel a pending request
+app.delete('/api/po-requests/:id', auth, (req, res) => {
+  run('DELETE FROM po_requests WHERE id=?', [req.params.id]);
+  saveNow();
+  res.json({ ok: true });
+});
+
+
 app.put('/api/finance/customer-pay/:payment_id', auth, (req, res) => {
   const d = req.body || {};
   const pmt = get('SELECT * FROM customer_payments WHERE id=?', [req.params.payment_id]);
@@ -1575,7 +1946,7 @@ app.get('/api/finance/supplier-queue', auth, (req, res) => {
   let advRows = [];
   try { advRows = all("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
   const netRows = all("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
-  const suppliers = all('SELECT id, name FROM suppliers');
+  const suppliers = all('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
   res.json({
     advance: advRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
@@ -1588,10 +1959,38 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, (req, res) => {
   const d = req.body || {};
   let fq; try { fq = get('SELECT * FROM finance_queue WHERE id=?', [req.params.fq_id]); } catch(_) {}
   if (!fq) return res.status(404).json({ error: 'Not found' });
+
+  // Resolve the real entity — could be a supplier OR a customer (inventory holder)
+  let bankEntity = null;
+  if (fq.supplier_id && fq.supplier_id.startsWith('__inv__')) {
+    const invId = fq.supplier_id.slice(7);
+    const inv = get('SELECT holder_type, holder_id FROM stock_inventory WHERE id=?', [invId]);
+    if (inv?.holder_type === 'customer') {
+      // customers table has no 'type' column — omit it
+      bankEntity = get('SELECT id, bank_account_name, bank_account_no, bank_ifsc, bank_swift FROM customers WHERE id=?', [inv.holder_id]);
+    } else if (inv?.holder_type === 'supplier') {
+      bankEntity = get('SELECT id, type, bank_account_name, bank_account_no, bank_ifsc, bank_swift FROM suppliers WHERE id=?', [inv.holder_id]);
+    }
+  } else {
+    bankEntity = get('SELECT id, type, bank_account_name, bank_account_no, bank_ifsc, bank_swift FROM suppliers WHERE id=?', [fq.supplier_id]);
+  }
+
+  if (!bankEntity) return res.status(400).json({ error: 'Payee not found — add bank details first' });
+  const baseBankOk = !!(bankEntity.bank_account_name && bankEntity.bank_account_no);
+  // For customers (no type column): accept either IFSC or SWIFT; for international suppliers: require SWIFT
+  const bankReady = bankEntity.type === 'international'
+    ? (baseBankOk && !!bankEntity.bank_swift)
+    : (baseBankOk && !!(bankEntity.bank_ifsc || bankEntity.bank_swift));
+  if (!bankReady) return res.status(400).json({ error: 'Bank details are required before marking paid' });
+
+  const zohoPo = (d.zoho_po_number || '').trim();
+  const supplierRef = (d.supplier_ref || '').trim();
+  if (!zohoPo || !supplierRef) return res.status(400).json({ error: 'Zoho PO Number and Supplier PI Number are required' });
+
   const now = nowStr();
   run('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_by=?,paid_at=?,notes=? WHERE id=?',
     ['paid', d.payment_ref||'', d.payment_date||now.slice(0,10), req.session.user.id, now, d.notes||'', req.params.fq_id]);
-  run('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?', ['po_issued', fq.supplier_order_id]);
+  run('UPDATE supplier_orders SET payment_blocked=0, status=?, zoho_po_number=?, supplier_ref=? WHERE id=?', ['po_issued', zohoPo, supplierRef, fq.supplier_order_id]);
   // FIX A: if all POs for this order are now unblocked, restore order status to 'procurement'
   const remainingBlocked = get(
     "SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=? AND payment_blocked=1",
@@ -1637,10 +2036,7 @@ app.post('/api/orders/:id/grn', auth, (req, res) => {
     if (!li) return;
     const qty = parseInt(r.qty_received) || 0;
     if (qty > 0) anyReceived = true;
-    if (qty < li.qty) allFull = false;
-    const lineStatus = qty <= 0 ? 'delivered_hub'
-      : qty >= li.qty ? 'ready_to_ship'
-      : 'grn_partial';
+    // Insert GRN record first so cumulative sum includes this batch
     try {
       run(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1650,7 +2046,13 @@ app.post('/api/orders/:id/grn', auth, (req, res) => {
          req.session.user.id, now]);
     } catch(_) {}
     if (qty > 0) {
+      // Use cumulative received total to determine status (handles multi-batch partial receipts)
+      const totalRec = parseInt(get('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id])?.t || 0);
+      if (totalRec < li.qty) allFull = false;
+      const lineStatus = totalRec >= li.qty ? 'ready_to_ship' : 'grn_partial';
       run('UPDATE order_items SET line_status=? WHERE id=?', [lineStatus, r.order_item_id]);
+    } else {
+      allFull = false;
     }
   });
 
@@ -1658,11 +2060,172 @@ app.post('/api/orders/:id/grn', auth, (req, res) => {
   const newOrderStatus = allFull && anyReceived ? 'delivery_hub' : anyReceived ? 'partial_hub' : order.status;
   run("UPDATE orders SET status=? WHERE id=?", [newOrderStatus, req.params.id]);
 
+  // Auto-update supplier_orders.status based on cumulative GRN receipts
+  // Find all supplier POs that own any of the GRN'd items
+  const affectedItemIds = records.map(r => r.order_item_id).filter(Boolean);
+  const affectedSOIds = affectedItemIds.length
+    ? all(`SELECT DISTINCT supplier_order_id FROM supplier_order_items WHERE item_id IN (${affectedItemIds.map(()=>'?').join(',')})`, affectedItemIds).map(r => r.supplier_order_id)
+    : [];
+  affectedSOIds.forEach(soId => {
+    const soRow = get('SELECT * FROM supplier_orders WHERE id=?', [soId]);
+    if (!soRow || soRow.status === 'cancelled') return;
+    // All items in this PO
+    const poItemIds = all('SELECT item_id FROM supplier_order_items WHERE supplier_order_id=?', [soId]).map(r => r.item_id);
+    let poAllFull = true, poAnyReceived = false;
+    poItemIds.forEach(itemId => {
+      const li = get('SELECT qty FROM order_items WHERE id=?', [itemId]);
+      if (!li) return;
+      const totalRec = parseInt(get('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [itemId])?.t || 0);
+      if (totalRec > 0) poAnyReceived = true;
+      if (totalRec < li.qty) poAllFull = false;
+    });
+    const newPoStatus = poAllFull && poAnyReceived ? 'received' : poAnyReceived ? 'partially_received' : soRow.status;
+    if (newPoStatus !== soRow.status) {
+      run('UPDATE supplier_orders SET status=? WHERE id=?', [newPoStatus, soId]);
+    }
+  });
+
   try { run('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.id, (allFull?'Full':'Partial')+' GRN recorded — '+grnNo,
      req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true, grn_no: grnNo, order_status: newOrderStatus });
+});
+
+// POST /api/orders/:id/shipments — create outbound shipment from Delivery Hub
+app.post('/api/orders/:id/shipments', auth, (req, res) => {
+  const d = req.body || {};
+  const order = get('SELECT * FROM orders WHERE id=?', [req.params.id]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!d.shipper_id) return res.status(400).json({ error: 'Carrier is required' });
+  if (!d.tracking_no) return res.status(400).json({ error: 'AWB / Tracking number is required' });
+  if (!Array.isArray(d.items) || d.items.length === 0) return res.status(400).json({ error: 'Shipment items are required' });
+
+  const allItems = all('SELECT * FROM order_items WHERE order_id=?', [req.params.id]);
+  const selectedIds = d.items.map(i => i.order_item_id).filter(Boolean);
+  const selectedItems = allItems.filter(li => selectedIds.includes(li.id));
+  if (selectedItems.length === 0) return res.status(400).json({ error: 'No valid shipment items found' });
+
+  const shipmentId = uuid();
+  const lastShip = get('SELECT COALESCE(MAX(shipment_no), 0) AS n FROM shipments WHERE order_id=?', [req.params.id]);
+  const shipmentNo = Number(lastShip?.n || 0) + 1;
+  const now = nowStr();
+
+  run(`INSERT INTO shipments(
+        id, order_id, shipment_no, type, status, shipper_id, tracking_no,
+        invoice_ref, invoice_file, eway_bill, delivery_slip, packing_list,
+        notes, created_by, created_at, dispatched_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [
+        shipmentId,
+        req.params.id,
+        shipmentNo,
+        d.type || 'full',
+        'dispatched',
+        d.shipper_id,
+        d.tracking_no,
+        d.invoice_ref || '',
+        d.invoice_file || '',
+        d.eway_bill || '',
+        d.delivery_slip || '',
+        d.packing_list || '',
+        d.notes || '',
+        req.session.user.id,
+        now,
+        now,
+      ]);
+
+  d.items.forEach(item => {
+    if (!item?.order_item_id) return;
+    run('INSERT INTO shipment_items(id, shipment_id, order_item_id, qty_shipped) VALUES(?,?,?,?)', [
+      uuid(), shipmentId, item.order_item_id, parseInt(item.qty_shipped) || 0,
+    ]);
+    // Check cumulative shipped vs ordered — if balance remains, mark partial_shipped (still expected from supplier)
+    const liData = allItems.find(a => a.id === item.order_item_id);
+    const orderedQty = liData?.qty || 0;
+    const totalShipped = parseInt(get('SELECT COALESCE(SUM(qty_shipped),0) as t FROM shipment_items WHERE order_item_id=?', [item.order_item_id])?.t || 0);
+    const newLineStatus = orderedQty > 0 && totalShipped >= orderedQty ? 'shipped' : 'partial_shipped';
+    run('UPDATE order_items SET line_status=? WHERE id=?', [newLineStatus, item.order_item_id]);
+  });
+
+  run('INSERT OR REPLACE INTO customer_shipping(order_id,status,shipper_id,tracking_no,delivery_date,comments) VALUES(?,?,?,?,?,?)', [
+    req.params.id,
+    'shipped',
+    d.shipper_id,
+    d.tracking_no,
+    '',
+    d.notes || '',
+  ]);
+
+  const refreshedItems = all('SELECT * FROM order_items WHERE order_id=?', [req.params.id]);
+  const allShipped = refreshedItems.length > 0 && refreshedItems.every(li => ['shipped', 'delivered'].includes(li.line_status));
+  const nextOrderStatus = allShipped ? 'transit_customer' : 'partial_dispatched';
+  run('UPDATE orders SET status=? WHERE id=?', [nextOrderStatus, req.params.id]);
+
+  try {
+    run('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [
+      uuid(),
+      req.params.id,
+      `Shipment ${shipmentNo} dispatched via ${d.shipper_id} | AWB: ${d.tracking_no}`,
+      req.session.user.name,
+      d.notes || '',
+      now,
+    ]);
+  } catch (_) {}
+
+  saveNow();
+  res.json({ ok: true, id: shipmentId, shipment_no: shipmentNo, order_status: nextOrderStatus });
+});
+
+// PUT /api/shipments/:id — update shipment delivery status
+app.put('/api/shipments/:id', auth, (req, res) => {
+  const d = req.body || {};
+  const shipment = get('SELECT * FROM shipments WHERE id=?', [req.params.id]);
+  if (!shipment) return res.status(404).json({ error: 'Shipment not found' });
+  const now = nowStr();
+  const nextStatus = d.status || shipment.status || 'dispatched';
+  const deliveredAt = d.delivered_at || shipment.delivered_at || '';
+
+  run('UPDATE shipments SET status=?, pod_ref=?, notes=?, delivered_at=? WHERE id=?', [
+    nextStatus,
+    d.pod_ref || shipment.pod_ref || '',
+    d.notes || shipment.notes || '',
+    deliveredAt,
+    req.params.id,
+  ]);
+
+  if (nextStatus === 'delivered') {
+    const shipItems = all('SELECT order_item_id FROM shipment_items WHERE shipment_id=?', [req.params.id]);
+    shipItems.forEach(row => {
+      run("UPDATE order_items SET line_status='delivered' WHERE id=?", [row.order_item_id]);
+    });
+
+    const orderId = shipment.order_id;
+    const allShipments = all('SELECT status FROM shipments WHERE order_id=?', [orderId]);
+    const allDelivered = allShipments.length > 0 && allShipments.every(s => s.status === 'delivered');
+    run('INSERT OR REPLACE INTO customer_shipping(order_id,status,shipper_id,tracking_no,delivery_date,comments) VALUES(?,?,?,?,?,?)', [
+      orderId,
+      allDelivered ? 'delivered' : 'partial_delivered',
+      shipment.shipper_id || '',
+      shipment.tracking_no || '',
+      deliveredAt || now.slice(0,10),
+      d.notes || '',
+    ]);
+    run('UPDATE orders SET status=? WHERE id=?', [allDelivered ? 'closed' : 'partial_dispatched', orderId]);
+
+    try {
+      run('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [
+        uuid(),
+        orderId,
+        `Shipment ${shipment.shipment_no} delivered${d.pod_ref ? ' | POD: ' + d.pod_ref : ''}`,
+        req.session.user.name,
+        d.notes || '',
+        now,
+      ]);
+    } catch (_) {}
+  }
+
+  saveNow();
+  res.json({ ok: true });
 });
 
 // POST /api/orders/:id/escalate — mark order as overdue / escalated
@@ -1696,8 +2259,28 @@ app.delete('/api/finance/history', auth, (req, res) => {
 
 // GET /api/finance/history
 app.get('/api/finance/history', auth, (req, res) => {
-  let custPmts = []; try { custPmts = all('SELECT cp.*, o.po_number FROM customer_payments cp LEFT JOIN orders o ON o.id=cp.order_id ORDER BY cp.recorded_at DESC'); } catch(_) {}
-  let supPmts  = []; try { supPmts  = all("SELECT fq.*, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='paid' ORDER BY fq.paid_at DESC"); } catch(_) {}
+  let custPmts = [];
+  try {
+    custPmts = all(`SELECT cp.*, COALESCE(cp.customer_po_no, o.po_number) AS po_number,
+                           COALESCE(cp.finance_po_no, o.finance_po_no) AS finance_po_no,
+                           o.customer_id, c.name AS customer_name
+                    FROM customer_payments cp
+                    LEFT JOIN orders o ON o.id=cp.order_id
+                    LEFT JOIN customers c ON c.id=o.customer_id
+                    ORDER BY cp.recorded_at DESC`);
+  } catch(_) {}
+
+  let supPmts  = [];
+  try {
+    supPmts  = all(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
+                           so.confirmed_currency, so.confirmed_price,
+                           so.order_id AS linked_order_id, s.name AS supplier_name
+                    FROM finance_queue fq
+                    LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
+                    LEFT JOIN suppliers s ON s.id=so.supplier_id
+                    WHERE fq.status='paid'
+                    ORDER BY fq.paid_at DESC`);
+  } catch(_) {}
   res.json({ customer: custPmts, supplier: supPmts });
 });
 
@@ -1710,9 +2293,6 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log('═'.repeat(52));
     console.log(`  Local  →  http://localhost:${PORT}`);
     console.log(`  LAN    →  http://${ip}:${PORT}`);
-    console.log('═'.repeat(52));
-    console.log('  admin/admin123  ·  sales1/pass123');
-    console.log('  sourcing1/pass123  ·  procure1/pass123');
     console.log('═'.repeat(52) + '\n');
   });
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────

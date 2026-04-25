@@ -3,47 +3,17 @@ import React, { useState, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
+import { fmtDateTime } from '../utils/helpers';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import { AddressForm, PhoneField, CountrySelect } from '../components/AddressForm';
+import { State } from 'country-state-city';
+import { ALL_CURRENCIES } from '../utils/currencies';
 
-// ── Geo Data ──────────────────────────────────────────────────────────────────
-const COUNTRIES = ['Afghanistan','Albania','Algeria','Andorra','Angola','Argentina','Armenia',
-  'Australia','Austria','Azerbaijan','Bahrain','Bangladesh','Belarus','Belgium','Bolivia',
-  'Bosnia','Brazil','Bulgaria','Cambodia','Canada','Chile','China','Colombia','Croatia',
-  'Cyprus','Czech Republic','Denmark','Egypt','Estonia','Ethiopia','Finland','France',
-  'Germany','Ghana','Greece','Guatemala','Hong Kong','Hungary','India','Indonesia','Iran',
-  'Iraq','Ireland','Israel','Italy','Japan','Jordan','Kazakhstan','Kenya','Kuwait','Latvia',
-  'Lebanon','Lithuania','Luxembourg','Malaysia','Mexico','Morocco','Myanmar','Nepal',
-  'Netherlands','New Zealand','Nigeria','Norway','Oman','Pakistan','Philippines','Poland',
-  'Portugal','Qatar','Romania','Russia','Saudi Arabia','Serbia','Singapore','Slovakia',
-  'South Africa','South Korea','Spain','Sri Lanka','Sweden','Switzerland','Taiwan',
-  'Thailand','Turkey','Ukraine','United Arab Emirates','United Kingdom','United States',
-  'Uruguay','Uzbekistan','Venezuela','Vietnam','Yemen','Zimbabwe'];
+// ── India states (for Place of Supply dropdown) ───────────────────────────────
+const _IN = State.getStatesOfCountry('IN');
+const INDIA_STATES = _IN.map(s => s.name);
 
-const STATE_MAP = {
-  'India': ['Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
-    'Haryana','Himachal Pradesh','Jharkhand','Karnataka','Kerala','Madhya Pradesh','Maharashtra',
-    'Manipur','Meghalaya','Mizoram','Nagaland','Odisha','Punjab','Rajasthan','Sikkim',
-    'Tamil Nadu','Telangana','Tripura','Uttar Pradesh','Uttarakhand','West Bengal',
-    'Andaman and Nicobar Islands','Chandigarh','Dadra and Nagar Haveli','Daman and Diu',
-    'Delhi','Jammu and Kashmir','Ladakh','Lakshadweep','Puducherry'],
-  'United States': ['Alabama','Alaska','Arizona','Arkansas','California','Colorado','Connecticut',
-    'Delaware','Florida','Georgia','Hawaii','Idaho','Illinois','Indiana','Iowa','Kansas',
-    'Kentucky','Louisiana','Maine','Maryland','Massachusetts','Michigan','Minnesota',
-    'Mississippi','Missouri','Montana','Nebraska','Nevada','New Hampshire','New Jersey',
-    'New Mexico','New York','North Carolina','North Dakota','Ohio','Oklahoma','Oregon',
-    'Pennsylvania','Rhode Island','South Carolina','South Dakota','Tennessee','Texas',
-    'Utah','Vermont','Virginia','Washington','West Virginia','Wisconsin','Wyoming'],
-  'Australia': ['New South Wales','Victoria','Queensland','Western Australia','South Australia','Tasmania','ACT','Northern Territory'],
-  'Canada': ['Ontario','Quebec','British Columbia','Alberta','Manitoba','Saskatchewan','Nova Scotia','New Brunswick','Newfoundland','PEI','Northwest Territories','Nunavut','Yukon'],
-  'United Arab Emirates': ['Abu Dhabi','Dubai','Sharjah','Ajman','Umm Al Quwain','Ras Al Khaimah','Fujairah'],
-  'United Kingdom': ['England','Scotland','Wales','Northern Ireland'],
-  'Germany': ['Bavaria','Berlin','Brandenburg','Bremen','Hamburg','Hesse','Lower Saxony','Mecklenburg-Vorpommern','North Rhine-Westphalia','Rhineland-Palatinate','Saarland','Saxony','Saxony-Anhalt','Schleswig-Holstein','Thuringia'],
-  'China': ['Beijing','Shanghai','Guangdong','Zhejiang','Jiangsu','Shandong','Sichuan','Hubei','Hunan','Fujian','Liaoning','Henan','Hebei','Anhui','Shanxi','Shaanxi','Jilin','Heilongjiang','Yunnan','Guizhou','Guangxi','Inner Mongolia','Xinjiang','Tibet','Chongqing','Tianjin'],
-  'Japan': ['Tokyo','Osaka','Kanagawa','Aichi','Saitama','Chiba','Hyogo','Hokkaido','Fukuoka','Shizuoka'],
-  'Malaysia': ['Johor','Kedah','Kelantan','Melaka','Negeri Sembilan','Pahang','Penang','Perak','Perlis','Sabah','Sarawak','Selangor','Terengganu','Kuala Lumpur','Labuan','Putrajaya'],
-  'Singapore': ['Central Region','East Region','North Region','North-East Region','West Region'],
-};
 
-const CURRENCIES = ['INR','USD','EUR','GBP','AED','SGD','JPY','CNY','AUD','CAD','CHF','HKD','MYR','NZD','QAR','SAR','THB','TWD'];
 // ── Payment Terms — grouped by category ──────────────────────────────────────
 const PAYMENT_TERMS_GROUPS = [
   {
@@ -133,172 +103,6 @@ const PAYMENT_TERMS_GROUPS = [
 const PAYMENT_TERMS = PAYMENT_TERMS_GROUPS.flatMap(g => g.terms);
 const SALUTATIONS = ['Mr.','Ms.','Mrs.','Dr.','Prof.'];
 const GST_TREATMENTS = ['Registered Business – Regular','Registered Business – Composition','Unregistered Business','Consumer','Overseas','Special Economic Zone'];
-const INDIA_STATES = STATE_MAP['India'];
-
-// ── City data (major cities per country) ──────────────────────────────────────
-const CITY_MAP = {
-  'India': ['Agra','Ahmedabad','Amritsar','Aurangabad','Bangalore','Bhopal','Bhubaneswar',
-    'Chandigarh','Chennai','Coimbatore','Delhi','Dehradun','Faridabad','Ghaziabad',
-    'Gurgaon','Guwahati','Hyderabad','Indore','Jaipur','Jalandhar','Jammu','Jamshedpur',
-    'Jodhpur','Kanpur','Kochi','Kolkata','Kozhikode','Lucknow','Ludhiana','Madurai',
-    'Mangalore','Mumbai','Mysore','Nagpur','Nashik','Navi Mumbai','Noida','Patna',
-    'Pune','Raipur','Rajkot','Ranchi','Srinagar','Surat','Thiruvananthapuram',
-    'Thrissur','Tiruppur','Vadodara','Varanasi','Vijayawada','Visakhapatnam'],
-  'United States': ['Atlanta','Austin','Boston','Charlotte','Chicago','Columbus','Dallas',
-    'Denver','Detroit','El Paso','Fort Worth','Houston','Indianapolis','Jacksonville',
-    'Las Vegas','Los Angeles','Memphis','Miami','Milwaukee','Minneapolis','Nashville',
-    'New York','Oklahoma City','Philadelphia','Phoenix','Portland','San Antonio',
-    'San Diego','San Francisco','San Jose','Seattle','Washington DC'],
-  'United Kingdom': ['Birmingham','Bradford','Bristol','Edinburgh','Glasgow','Leeds',
-    'Leicester','Liverpool','London','Manchester','Newcastle','Nottingham','Sheffield'],
-  'Australia': ['Adelaide','Brisbane','Canberra','Darwin','Gold Coast','Hobart',
-    'Melbourne','Newcastle','Perth','Sydney','Wollongong'],
-  'Canada': ['Calgary','Edmonton','Halifax','Hamilton','Laval','Mississauga',
-    'Montreal','Ottawa','Quebec City','Toronto','Vancouver','Winnipeg'],
-  'Germany': ['Berlin','Bremen','Cologne','Dortmund','Dresden','Düsseldorf',
-    'Essen','Frankfurt','Hamburg','Hanover','Leipzig','Munich','Nuremberg','Stuttgart'],
-  'China': ['Beijing','Chengdu','Chongqing','Guangzhou','Hangzhou','Nanjing',
-    'Shanghai','Shenzhen','Tianjin','Wuhan','Xi\'an','Zhengzhou'],
-  'Japan': ['Fukuoka','Hiroshima','Kyoto','Nagoya','Osaka','Sapporo','Sendai',
-    'Tokyo','Yokohama'],
-  'Singapore': ['Ang Mo Kio','Bedok','Clementi','Jurong','Orchard','Tampines','Woodlands'],
-  'United Arab Emirates': ['Abu Dhabi','Al Ain','Dubai','Fujairah','Ras Al Khaimah','Sharjah'],
-  'Malaysia': ['George Town','Ipoh','Johor Bahru','Kota Kinabalu','Kuala Lumpur',
-    'Kuching','Petaling Jaya','Shah Alam'],
-  'France': ['Bordeaux','Grenoble','Lille','Lyon','Marseille','Montpellier',
-    'Nantes','Nice','Paris','Strasbourg','Toulouse'],
-  'Spain': ['Barcelona','Bilbao','Madrid','Málaga','Seville','Valencia','Zaragoza'],
-  'Italy': ['Bologna','Florence','Genoa','Milan','Naples','Palermo','Rome','Turin','Venice'],
-  'Netherlands': ['Amsterdam','Eindhoven','Rotterdam','The Hague','Utrecht'],
-  'Sweden': ['Gothenburg','Malmö','Stockholm','Uppsala'],
-  'Switzerland': ['Basel','Bern','Geneva','Lausanne','Zurich'],
-  'Saudi Arabia': ['Dammam','Jeddah','Medina','Mecca','Riyadh'],
-  'Qatar': ['Al Rayyan','Al Wakrah','Doha','Lusail'],
-  'Bahrain': ['Manama','Muharraq','Riffa'],
-  'Kuwait': ['Al Ahmadi','Kuwait City','Salmiya'],
-  'Oman': ['Muscat','Salalah','Sohar'],
-  'Pakistan': ['Faisalabad','Islamabad','Karachi','Lahore','Peshawar','Rawalpindi'],
-  'Bangladesh': ['Chittagong','Dhaka','Khulna','Sylhet'],
-  'Sri Lanka': ['Colombo','Galle','Jaffna','Kandy'],
-  'Thailand': ['Bangkok','Chiang Mai','Pattaya','Phuket'],
-  'Vietnam': ['Da Nang','Hanoi','Ho Chi Minh City','Hue'],
-  'Indonesia': ['Bandung','Jakarta','Medan','Surabaya','Yogyakarta'],
-  'Philippines': ['Cebu','Davao','Manila','Quezon City'],
-  'South Korea': ['Busan','Daegu','Daejeon','Gwangju','Incheon','Seoul'],
-  'Taiwan': ['Kaohsiung','New Taipei','Taichung','Taipei'],
-  'Hong Kong': ['Central','Kowloon','Mong Kok','Tsim Sha Tsui','Wan Chai'],
-  'Brazil': ['Brasília','Belo Horizonte','Curitiba','Fortaleza','Manaus',
-    'Porto Alegre','Recife','Rio de Janeiro','Salvador','São Paulo'],
-  'South Africa': ['Cape Town','Durban','Johannesburg','Port Elizabeth','Pretoria'],
-  'Nigeria': ['Abuja','Ibadan','Kano','Lagos','Port Harcourt'],
-  'Egypt': ['Alexandria','Cairo','Giza','Luxor','Sharm El Sheikh'],
-  'Kenya': ['Mombasa','Nairobi'],
-  'Israel': ['Haifa','Jerusalem','Tel Aviv'],
-  'Turkey': ['Ankara','Antalya','Bursa','Istanbul','Izmir'],
-  'Russia': ['Ekaterinburg','Kazan','Moscow','Novosibirsk','Saint Petersburg'],
-  'Poland': ['Cracow','Gdańsk','Łódź','Poznań','Warsaw','Wrocław'],
-  'Czech Republic': ['Brno','Ostrava','Prague'],
-  'Romania': ['Bucharest','Cluj-Napoca','Timișoara'],
-  'Ukraine': ['Dnipro','Kharkiv','Kyiv','Lviv','Odessa'],
-  'Mexico': ['Guadalajara','Mexico City','Monterrey','Puebla','Tijuana'],
-  'Argentina': ['Buenos Aires','Córdoba','Mendoza','Rosario'],
-  'Colombia': ['Barranquilla','Bogotá','Cali','Medellín'],
-  'Chile': ['Concepción','Santiago','Valparaíso'],
-  'New Zealand': ['Auckland','Christchurch','Hamilton','Wellington'],
-  'Ireland': ['Cork','Dublin','Galway','Limerick'],
-  'Portugal': ['Coimbra','Lisbon','Porto'],
-  'Belgium': ['Antwerp','Brussels','Ghent','Liège'],
-  'Austria': ['Graz','Innsbruck','Linz','Salzburg','Vienna'],
-  'Denmark': ['Aarhus','Copenhagen','Odense'],
-  'Finland': ['Espoo','Helsinki','Tampere'],
-  'Norway': ['Bergen','Oslo','Stavanger','Trondheim'],
-  'Greece': ['Athens','Heraklion','Thessaloniki'],
-};
-
-// ── Phone country codes with flags ────────────────────────────────────────────
-const PHONE_CODES = [
-  {code:'+91',  flag:'🇮🇳', name:'India'},
-  {code:'+1',   flag:'🇺🇸', name:'USA / Canada'},
-  {code:'+44',  flag:'🇬🇧', name:'United Kingdom'},
-  {code:'+61',  flag:'🇦🇺', name:'Australia'},
-  {code:'+971', flag:'🇦🇪', name:'UAE'},
-  {code:'+65',  flag:'🇸🇬', name:'Singapore'},
-  {code:'+60',  flag:'🇲🇾', name:'Malaysia'},
-  {code:'+81',  flag:'🇯🇵', name:'Japan'},
-  {code:'+82',  flag:'🇰🇷', name:'South Korea'},
-  {code:'+86',  flag:'🇨🇳', name:'China'},
-  {code:'+852', flag:'🇭🇰', name:'Hong Kong'},
-  {code:'+886', flag:'🇹🇼', name:'Taiwan'},
-  {code:'+49',  flag:'🇩🇪', name:'Germany'},
-  {code:'+33',  flag:'🇫🇷', name:'France'},
-  {code:'+39',  flag:'🇮🇹', name:'Italy'},
-  {code:'+34',  flag:'🇪🇸', name:'Spain'},
-  {code:'+31',  flag:'🇳🇱', name:'Netherlands'},
-  {code:'+46',  flag:'🇸🇪', name:'Sweden'},
-  {code:'+41',  flag:'🇨🇭', name:'Switzerland'},
-  {code:'+32',  flag:'🇧🇪', name:'Belgium'},
-  {code:'+43',  flag:'🇦🇹', name:'Austria'},
-  {code:'+45',  flag:'🇩🇰', name:'Denmark'},
-  {code:'+47',  flag:'🇳🇴', name:'Norway'},
-  {code:'+358', flag:'🇫🇮', name:'Finland'},
-  {code:'+353', flag:'🇮🇪', name:'Ireland'},
-  {code:'+351', flag:'🇵🇹', name:'Portugal'},
-  {code:'+30',  flag:'🇬🇷', name:'Greece'},
-  {code:'+48',  flag:'🇵🇱', name:'Poland'},
-  {code:'+420', flag:'🇨🇿', name:'Czech Republic'},
-  {code:'+40',  flag:'🇷🇴', name:'Romania'},
-  {code:'+380', flag:'🇺🇦', name:'Ukraine'},
-  {code:'+7',   flag:'🇷🇺', name:'Russia'},
-  {code:'+966', flag:'🇸🇦', name:'Saudi Arabia'},
-  {code:'+974', flag:'🇶🇦', name:'Qatar'},
-  {code:'+973', flag:'🇧🇭', name:'Bahrain'},
-  {code:'+965', flag:'🇰🇼', name:'Kuwait'},
-  {code:'+968', flag:'🇴🇲', name:'Oman'},
-  {code:'+972', flag:'🇮🇱', name:'Israel'},
-  {code:'+90',  flag:'🇹🇷', name:'Turkey'},
-  {code:'+92',  flag:'🇵🇰', name:'Pakistan'},
-  {code:'+880', flag:'🇧🇩', name:'Bangladesh'},
-  {code:'+94',  flag:'🇱🇰', name:'Sri Lanka'},
-  {code:'+66',  flag:'🇹🇭', name:'Thailand'},
-  {code:'+84',  flag:'🇻🇳', name:'Vietnam'},
-  {code:'+62',  flag:'🇮🇩', name:'Indonesia'},
-  {code:'+63',  flag:'🇵🇭', name:'Philippines'},
-  {code:'+55',  flag:'🇧🇷', name:'Brazil'},
-  {code:'+27',  flag:'🇿🇦', name:'South Africa'},
-  {code:'+234', flag:'🇳🇬', name:'Nigeria'},
-  {code:'+20',  flag:'🇪🇬', name:'Egypt'},
-  {code:'+254', flag:'🇰🇪', name:'Kenya'},
-  {code:'+52',  flag:'🇲🇽', name:'Mexico'},
-  {code:'+54',  flag:'🇦🇷', name:'Argentina'},
-  {code:'+56',  flag:'🇨🇱', name:'Chile'},
-  {code:'+57',  flag:'🇨🇴', name:'Colombia'},
-  {code:'+64',  flag:'🇳🇿', name:'New Zealand'},
-  {code:'+36',  flag:'🇭🇺', name:'Hungary'},
-  {code:'+380', flag:'🇺🇦', name:'Ukraine'},
-];
-
-// Auto-detect dialing code from country name
-function dialCodeForCountry(country) {
-  const m = {
-    'India':'+91','United States':'+1','Canada':'+1','United Kingdom':'+44',
-    'Australia':'+61','United Arab Emirates':'+971','Singapore':'+65',
-    'Malaysia':'+60','Japan':'+81','South Korea':'+82','China':'+86',
-    'Hong Kong':'+852','Taiwan':'+886','Germany':'+49','France':'+33',
-    'Italy':'+39','Spain':'+34','Netherlands':'+31','Sweden':'+46',
-    'Switzerland':'+41','Belgium':'+32','Austria':'+43','Denmark':'+45',
-    'Norway':'+47','Finland':'+358','Ireland':'+353','Portugal':'+351',
-    'Greece':'+30','Poland':'+48','Czech Republic':'+420','Romania':'+40',
-    'Ukraine':'+380','Russia':'+7','Saudi Arabia':'+966','Qatar':'+974',
-    'Bahrain':'+973','Kuwait':'+965','Oman':'+968','Israel':'+972',
-    'Turkey':'+90','Pakistan':'+92','Bangladesh':'+880','Sri Lanka':'+94',
-    'Thailand':'+66','Vietnam':'+84','Indonesia':'+62','Philippines':'+63',
-    'Brazil':'+55','South Africa':'+27','Nigeria':'+234','Egypt':'+20',
-    'Kenya':'+254','Mexico':'+52','Argentina':'+54','Chile':'+56',
-    'Colombia':'+57','New Zealand':'+64',
-  };
-  return m[country] || '';
-}
-
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const Tab = ({ label, active, onClick }) => (
@@ -309,139 +113,52 @@ const Tab = ({ label, active, onClick }) => (
   }}>{label}</button>
 );
 
-function StateField({ country, value, onChange, placeholder }) {
-  const states = STATE_MAP[country] || [];
-  return states.length > 0
-    ? <select className="input" value={value} onChange={e=>onChange(e.target.value)}>
-        <option value="">— Select {country==='United States'?'State':country==='United Kingdom'?'Country':'State / Region'} —</option>
-        {states.map(s=><option key={s}>{s}</option>)}
-      </select>
-    : <input className="input" value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder||'State / Province / County'} />;
-}
-
-// ── CityField — dropdown if cities known, free text otherwise ──────────────────
-function CityField({ country, value, onChange }) {
-  const cities = CITY_MAP[country] || [];
-  if (cities.length === 0) {
-    return <input className="input" value={value||''} onChange={e=>onChange(e.target.value)} placeholder="City" />;
-  }
-  // Combo: dropdown + allow typing custom
-  const [custom, setCustom] = React.useState(!cities.includes(value) && value ? value : '');
-  const [useCustom, setUseCustom] = React.useState(!cities.includes(value) && !!value);
-  if (useCustom) {
-    return (
-      <div style={{display:'flex',gap:6}}>
-        <input className="input" value={custom} placeholder="Type city name"
-          onChange={e=>{ setCustom(e.target.value); onChange(e.target.value); }} style={{flex:1}}/>
-        <button type="button" className="btn btn-xs" style={{whiteSpace:'nowrap'}}
-          onClick={()=>{ setUseCustom(false); setCustom(''); onChange(''); }}>↩ List</button>
-      </div>
-    );
-  }
-  return (
-    <div style={{display:'flex',gap:6}}>
-      <select className="input" value={cities.includes(value)?value:''} onChange={e=>onChange(e.target.value)} style={{flex:1}}>
-        <option value="">— Select City —</option>
-        {cities.map(c=><option key={c}>{c}</option>)}
-      </select>
-      <button type="button" className="btn btn-xs" style={{whiteSpace:'nowrap'}}
-        onClick={()=>setUseCustom(true)}>+ Other</button>
-    </div>
-  );
-}
-
-// ── PhoneField — country code flag dropdown + number input ────────────────────
-function PhoneField({ value, onChange, country }) {
-  // value format stored: "+91 98400 00000" — split on first space
-  const parts = (value||'').match(/^(\+\d{1,4})\s?(.*)$/) || [];
-  const storedCode = parts[1] || dialCodeForCountry(country) || '+91';
-  const storedNum  = parts[2] || (value && !value.startsWith('+') ? value : '');
-  const [dialCode, setDialCode] = React.useState(storedCode);
-  const [num, setNum] = React.useState(storedNum);
-
-  // Sync when country changes (auto-switch code)
-  React.useEffect(() => {
-    const detected = dialCodeForCountry(country);
-    if (detected && detected !== dialCode) {
-      setDialCode(detected);
-      onChange(detected + ' ' + num);
-    }
-  }, [country]);
-
-  const update = (code, n) => { setDialCode(code); setNum(n); onChange(code + ' ' + n); };
-
-  return (
-    <div style={{display:'flex',gap:0,border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'hidden',background:'var(--surface)'}}>
-      <select
-        value={dialCode}
-        onChange={e=>update(e.target.value,num)}
-        style={{border:'none',background:'var(--surface2)',padding:'6px 4px',fontSize:12,fontWeight:600,
-          cursor:'pointer',outline:'none',minWidth:92,borderRight:'1px solid var(--border-md)'}}>
-        {PHONE_CODES.map(p=>(
-          <option key={p.code+p.name} value={p.code}>{p.flag} {p.code} {p.name}</option>
-        ))}
-        {/* fallback if code not in list */}
-        {!PHONE_CODES.find(p=>p.code===dialCode) && <option value={dialCode}>{dialCode}</option>}
-      </select>
-      <input
-        className="input"
-        value={num}
-        onChange={e=>update(dialCode,e.target.value)}
-        placeholder="Phone number"
-        style={{border:'none',borderRadius:0,flex:1,boxShadow:'none'}}
-      />
-    </div>
-  );
-}
-
 
 // ── Shipping Address Block ────────────────────────────────────────────────────
-function ShippingAddressBlock({ addr, idx, onChange, onRemove, defaultOpen }) {
-  const [open, setOpen] = useState(defaultOpen || idx === 0);
+function ShippingAddressBlock({ addr, idx, onChange, onRemove, canDelete, editMode, onSave, onAskDelete, domestic, excludeIndia }) {
+  const [tried, setTried] = useState(false);
   const set = (k,v) => onChange({...addr,[k]:v});
   const label = addr.attention || addr.city || `Shipping Address ${idx+1}`;
+  const addrLine = [addr.street1, addr.street2, addr.city, addr.state, addr.country, addr.pincode].filter(Boolean).join(', ');
+  const isNew = !!addr._isNew;
+  const req = k => tried && !addr[k];
+  const handleSave = () => {
+    setTried(true);
+    if (!addr.street1 || !addr.city || !addr.state || !addr.country || !addr.pincode) {
+      toast.error('Fill all required fields');
+      return;
+    }
+    setTried(false);
+    onSave();
+  };
   return (
-    <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',marginBottom:10,overflow:'hidden'}}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface2)',cursor:'pointer'}} onClick={()=>setOpen(o=>!o)}>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <span style={{fontSize:16}}>{open?'▾':'▸'}</span>
-          <span style={{fontWeight:600,fontSize:13}}>{label}</span>
-          {addr.city && <span style={{fontSize:11,color:'var(--text3)'}}>{[addr.city,addr.state,addr.country].filter(Boolean).join(', ')}</span>}
+    <div style={{border:`1px solid ${isNew?'var(--accent)':'var(--border)'}`,borderRadius:'var(--r)',marginBottom:10,overflow:'hidden'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface2)'}}>
+        <div style={{minWidth:0,flex:1}}>
+          <div style={{fontWeight:600,fontSize:13}}>{isNew ? <span style={{color:'var(--accent)',fontStyle:'italic',fontSize:12}}>New address — fill & save</span> : label}</div>
+          {!editMode && !isNew && addrLine && <div style={{fontSize:11,color:'var(--text3)',marginTop:2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{addrLine}</div>}
         </div>
-        <button onClick={e=>{e.stopPropagation();onRemove();}} style={{background:'none',border:'none',cursor:'pointer',color:'var(--red)',fontSize:18,lineHeight:1}}>×</button>
+        <div style={{display:'flex',gap:6,flexShrink:0,marginLeft:10}}>
+          {editMode
+            ? <button className="btn btn-xs btn-primary" onClick={handleSave}>💾 Save</button>
+            : <button className="btn btn-xs" onClick={onSave}>✏ Edit</button>
+          }
+          {isNew
+            ? <button className="btn btn-xs" style={{color:'var(--red)',borderColor:'var(--red)',background:'transparent'}} onClick={e=>{e.stopPropagation();onRemove();}}>✕ Discard</button>
+            : canDelete && <button className="btn btn-xs" style={{color:'var(--red)',borderColor:'var(--red)',background:'transparent'}} onClick={e=>{e.stopPropagation();onAskDelete();}}>Delete</button>
+          }
+        </div>
       </div>
-      {open && (
+      {editMode && (
         <div style={{padding:'14px'}}>
-          <div className="form-group"><label className="label">Attention / Name</label>
-            <input className="input" value={addr.attention||''} onChange={e=>set('attention',e.target.value)} />
-          </div>
-          <div className="form-grid-2">
-            <div className="form-group"><label className="label">Country</label>
-              <select className="input" value={addr.country||'India'} onChange={e=>set('country',e.target.value)}>
-                {COUNTRIES.map(c=><option key={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="form-group"><label className="label">Pin / Zip Code</label>
-              <input className="input" value={addr.pincode||''} onChange={e=>set('pincode',e.target.value)} />
-            </div>
-          </div>
-          <div className="form-group"><label className="label">Street 1</label>
-            <input className="input" value={addr.street1||''} onChange={e=>set('street1',e.target.value)} placeholder="Street 1" />
-          </div>
-          <div className="form-group"><label className="label">Street 2</label>
-            <input className="input" value={addr.street2||''} onChange={e=>set('street2',e.target.value)} placeholder="Street 2" />
-          </div>
-          <div className="form-grid-2">
-            <div className="form-group"><label className="label">City</label>
-              <CityField country={addr.country||'India'} value={addr.city||''} onChange={v=>set('city',v)} />
-            </div>
-            <div className="form-group"><label className="label">State / Province</label>
-              <StateField country={addr.country||'India'} value={addr.state||''} onChange={v=>set('state',v)} />
-            </div>
-          </div>
-          <div className="form-group"><label className="label">Phone</label>
-            <PhoneField value={addr.phone||''} country={addr.country||'India'} onChange={v=>set('phone',v)} />
-          </div>
+          <AddressForm
+            value={addr}
+            onChange={onChange}
+            required={['street1','city','state','country','pincode']}
+            tried={tried}
+            domestic={domestic}
+            excludeIndia={excludeIndia}
+          />
         </div>
       )}
     </div>
@@ -570,7 +287,7 @@ function BulkUpload({ onClose, onDone }) {
 }
 
 // ── Customer Modal ─────────────────────────────────────────────────────────────
-function CustomerModal({ customer, onClose }) {
+export function CustomerModal({ customer, onClose, onSaved }) {
   const qc  = useQueryClient();
   const isNew = !customer;
   const isIntl = (f) => f.customer_scope === 'international';
@@ -595,29 +312,68 @@ function CustomerModal({ customer, onClose }) {
     if (!customer) return blank;
     let cp=[], sa=[];
     try { cp = JSON.parse(customer.contact_persons||'[]'); } catch(_){}
-    try { sa = JSON.parse(customer.shipping_addresses||'[]'); } catch(_){}
+    try {
+      let p = JSON.parse(customer.shipping_addresses||'[]');
+      if (typeof p === 'string') p = JSON.parse(p);
+      sa = Array.isArray(p) ? p : [];
+    } catch(_){}
     return {...blank,...customer, contact_persons:cp, shipping_addresses:sa};
   });
+
+  // Safety: always keep shipping_addresses as array in form
+  const safeAddresses = (f) => {
+    if (Array.isArray(f.shipping_addresses)) return f.shipping_addresses;
+    try { return JSON.parse(f.shipping_addresses||'[]'); } catch(_){ return []; }
+  };
+
+  const set = (k,v) => setForm(f => {
+    const next = {...f, [k]:v};
+    if (k === 'shipping_addresses' && !Array.isArray(v)) {
+      try { next.shipping_addresses = JSON.parse(v||'[]'); } catch(_){ next.shipping_addresses = []; }
+    }
+    return next;
+  });
+
   const [tab, setTab] = useState('details');
-  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const [billingEditMode, setBillingEditMode] = useState(() => !(customer?.billing_city || customer?.billing_street1));
+  const [shippingEditModes, setShippingEditModes] = useState({});
 
   // Shipping addresses helpers
-  const addShipping = () => set('shipping_addresses',[...form.shipping_addresses,{attention:'',street1:'',street2:'',city:'',state:'',country:'India',pincode:'',phone:''}]);
-  const updShipping = (i,addr) => set('shipping_addresses', form.shipping_addresses.map((a,j)=>j===i?addr:a));
-  const delShipping = i => set('shipping_addresses', form.shipping_addresses.filter((_,j)=>j!==i));
-  const copyBilling = () => addShippingFromBilling();
+  const addShipping = () => {
+    const sa = safeAddresses(form);
+    const newIdx = sa.length;
+    set('shipping_addresses',[...sa,{_isNew:true,attention:'',street1:'',street2:'',city:'',state:'',country:'India',pincode:'',phone:''}]);
+    setShippingEditModes(m => ({...m, [newIdx]: true}));
+  };
+  const updShipping = (i,addr) => set('shipping_addresses', safeAddresses(form).map((a,j)=>j===i?addr:a));
+  const delShipping = i => set('shipping_addresses', safeAddresses(form).filter((_,j)=>j!==i));
   const addShippingFromBilling = () => {
+    const sa = safeAddresses(form);
     const newAddr = {
       attention:form.billing_attention, street1:form.billing_street1, street2:form.billing_street2,
       city:form.billing_city, state:form.billing_state, country:form.billing_country,
       pincode:form.billing_pincode, phone:form.billing_phone,
     };
-    const key = [a.attention,a.street1,a.city,a.state,a.country,a.pincode].map(v=>(v||'').trim()).filter(Boolean).join('|')
-    const exists = form.shipping_addresses.some(a =>
-      [a.attention,a.street1,a.city,a.state,a.country,a.pincode].filter(Boolean).join('|') === key
+    const key = [newAddr.attention,newAddr.street1,newAddr.city,newAddr.state,newAddr.country,newAddr.pincode].map(v=>(v||'').trim()).filter(Boolean).join('|');
+    const exists = sa.some(a =>
+      [a.attention,a.street1,a.city,a.state,a.country,a.pincode].map(v=>(v||'').trim()).filter(Boolean).join('|') === key
     );
     if (exists) { toast('This address is already in the list'); return; }
-    set('shipping_addresses',[...form.shipping_addresses, newAddr]);
+    const newIdx = sa.length;
+    set('shipping_addresses',[...sa, {...newAddr, _isNew:true}]);
+    setShippingEditModes(m => ({...m, [newIdx]: true}));
+  };
+  const copyShippingToBilling = () => {
+    const sa = safeAddresses(form);
+    const src = sa[0];
+    if (!src) return;
+    setForm(f => ({...f,
+      billing_attention: src.attention||'', billing_street1: src.street1||'', billing_street2: src.street2||'',
+      billing_city: src.city||'', billing_state: src.state||'', billing_country: src.country||'India',
+      billing_pincode: src.pincode||'', billing_phone: src.phone||'',
+    }));
+    setBillingEditMode(false);
+    toast.success('Billing address copied from shipping');
   };
 
   // Contact persons
@@ -627,18 +383,53 @@ function CustomerModal({ customer, onClose }) {
 
   const mutation = useMutation({
     mutationFn: d => isNew ? api.post('/customers',d) : api.put('/customers/'+customer.id,d),
-    onSuccess: () => { qc.invalidateQueries(['customers']); toast.success('Customer saved'); onClose(); },
+    onSuccess: (res) => {
+      qc.invalidateQueries(['customers']);
+      toast.success('Customer saved');
+      onSaved && onSaved(res?.data);
+      onClose();
+    },
     onError: e => toast.error(e.response?.data?.error||'Save failed'),
   });
   const deleteMutation = useMutation({
     mutationFn: () => api.delete('/customers/'+customer.id),
     onSuccess: () => { qc.invalidateQueries(['customers']); toast.success('Deleted'); onClose(); },
   });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const [confirmShipDel, setConfirmShipDel] = useState(null);
+
+  const shippingMutation = useMutation({
+    mutationFn: (addresses) => api.put('/customers/'+customer.id, {
+      ...form,
+      shipping_addresses: addresses,
+      name: form.name || [form.first_name, form.last_name].filter(Boolean).join(' '),
+    }),
+    onSuccess: () => { qc.invalidateQueries(['customers']); toast.success('Address saved'); },
+    onError: e => toast.error(e.response?.data?.error||'Save failed'),
+  });
+
+  const saveShipping = (i) => {
+    const sa = safeAddresses(form);
+    const cleaned = sa.map(({_isNew,...rest})=>rest);
+    const updated = sa.map((a,j) => j===i ? {...a, _isNew:false} : a);
+    setForm(f => ({...f, shipping_addresses: updated}));
+    setShippingEditModes(m => ({...m, [i]: false}));
+    if (!isNew) {
+      shippingMutation.mutate(cleaned);
+    }
+  };
+
+  const toggleShippingEdit = (i) => {
+    setShippingEditModes(m => ({...m, [i]: !m[i]}));
+  };
 
   const save = () => {
     if (!form.name && !form.first_name) { toast.error('Company name or first name required'); return; }
+    const cleanAddresses = safeAddresses(form).map(({_isNew, ...rest}) => rest);
     mutation.mutate({
       ...form,
+      shipping_addresses: cleanAddresses,
       name: form.name || [form.first_name, form.last_name].filter(Boolean).join(' '),
       contact: [form.salutation,form.first_name,form.last_name].filter(Boolean).join(' ')||form.contact,
       city: form.billing_city||form.city, state: form.billing_state||form.state,
@@ -646,12 +437,15 @@ function CustomerModal({ customer, onClose }) {
     });
   };
 
+  const billingHasData = !!(form.billing_street1 || form.billing_city || form.billing_pincode);
+  const shippingList = safeAddresses(form);
+  const totalAddresses = (billingHasData ? 1 : 0) + shippingList.length;
   const intl = isIntl(form);
-  const billingStates = STATE_MAP[form.billing_country]||[];
 
   return (
+    <>
     <div className="overlay">
-      <div className="modal" style={{maxWidth:900,maxHeight:'96vh'}}>
+      <div className="modal" style={{maxWidth:'98vw',width:'98vw',maxHeight:'98vh',padding:0}}>
         <div className="modal-header">
           <div>
             <h2>{isNew?'New Customer':'Edit Customer'}</h2>
@@ -663,7 +457,7 @@ function CustomerModal({ customer, onClose }) {
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
-        <div className="modal-body" style={{paddingBottom:0}}>
+        <div className="modal-body" style={{paddingBottom:0, padding:'20px 28px 0 28px'}}>
 
           {/* ── Top always-visible fields ── */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:13}}>
@@ -682,7 +476,7 @@ function CustomerModal({ customer, onClose }) {
               <div style={{display:'flex',gap:20,paddingTop:8}}>
                 {['domestic','international'].map(t=>(
                   <label key={t} style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                    <input type="radio" checked={form.customer_scope===t} onChange={()=>set('customer_scope',t)} style={{accentColor:'var(--accent)'}}/>{t==='domestic'?'🇮🇳 Domestic':'🌐 International'}
+                    <input type="radio" checked={form.customer_scope===t} onChange={()=>{set('customer_scope',t);if(t==='domestic')set('currency','INR');}} style={{accentColor:'var(--accent)'}}/>{t==='domestic'?'🇮🇳 Domestic':'🌐 International'}
                   </label>
                 ))}
               </div>
@@ -717,17 +511,22 @@ function CustomerModal({ customer, onClose }) {
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:13,marginBottom:13}}>
             <div className="form-group"><label className="label">Email</label><input className="input" type="email" value={form.email} onChange={e=>set('email',e.target.value)}/></div>
             <div className="form-group"><label className="label">Work Phone</label>
-              <PhoneField value={form.phone} country={form.billing_country||form.country||'India'} onChange={v=>set('phone',v)} />
+              <PhoneField value={form.phone} onChange={v=>set('phone',v)} domestic={!intl} excludeIndia={intl} />
             </div>
             <div className="form-group"><label className="label">Mobile</label>
-              <PhoneField value={form.mobile} country={form.billing_country||form.country||'India'} onChange={v=>set('mobile',v)} />
+              <PhoneField value={form.mobile} onChange={v=>set('mobile',v)} domestic={!intl} excludeIndia={intl} />
             </div>
           </div>
+
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:4}}>
             <div className="form-group"><label className="label">Currency</label>
-              <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}>
-                {CURRENCIES.map(c=><option key={c}>{c}</option>)}
-              </select>
+              {intl ? (
+                <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}>
+                  {ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}
+                </select>
+              ) : (
+                <input className="input" value="INR" readOnly style={{background:'var(--surface2)',cursor:'not-allowed',color:'var(--text2)'}} />
+              )}
             </div>
             <div className="form-group"><label className="label">Status</label>
               <select className="input" value={form.status} onChange={e=>set('status',e.target.value)}>
@@ -797,53 +596,92 @@ function CustomerModal({ customer, onClose }) {
           {/* ── Tab: Address ── */}
           {tab==='address' && (
             <div style={{paddingTop:16}}>
-              {/* Billing */}
-              <div style={{fontWeight:700,fontSize:13,marginBottom:12,color:'var(--text)'}}>🏢 Billing Address</div>
-              <div className="form-group"><label className="label">Attention</label>
-                <input className="input" value={form.billing_attention} onChange={e=>set('billing_attention',e.target.value)}/>
+              {/* ── Billing Address ── */}
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+                <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>🏢 Billing Address</div>
+                {billingHasData && !billingEditMode && (
+                  <button className="btn btn-xs" onClick={() => setBillingEditMode(true)}>✏ Edit</button>
+                )}
               </div>
-              <div className="form-grid-2">
-                <div className="form-group"><label className="label">Country</label>
-                  <select className="input" value={form.billing_country} onChange={e=>set('billing_country',e.target.value)}>
-                    {COUNTRIES.map(c=><option key={c}>{c}</option>)}
-                  </select>
+              {!billingHasData && !billingEditMode ? (
+                <button className="btn btn-sm" style={{marginBottom:16}} onClick={() => setBillingEditMode(true)}>
+                  + Add Billing Address
+                </button>
+              ) : billingEditMode ? (
+                <div>
+                  <AddressForm
+                    value={{
+                      attention: form.billing_attention,
+                      phone: form.billing_phone,
+                      street1: form.billing_street1,
+                      street2: form.billing_street2,
+                      country: form.billing_country,
+                      state: form.billing_state,
+                      city: form.billing_city,
+                      pincode: form.billing_pincode,
+                    }}
+                    onChange={a => setForm(f => ({...f,
+                      billing_attention: a.attention || '',
+                      billing_phone: a.phone || '',
+                      billing_street1: a.street1 || '',
+                      billing_street2: a.street2 || '',
+                      billing_country: a.country || 'India',
+                      billing_state: a.state || '',
+                      billing_city: a.city || '',
+                      billing_pincode: a.pincode || '',
+                    }))}
+                    domestic={!intl}
+                    excludeIndia={intl}
+                  />
+                  <div style={{marginTop:12,marginBottom:16}}>
+                    <button className="btn btn-xs btn-primary" onClick={() => setBillingEditMode(false)}>✓ Done</button>
+                  </div>
                 </div>
-                <div className="form-group"><label className="label">Pin / Zip Code</label>
-                  <input className="input" value={form.billing_pincode} onChange={e=>set('billing_pincode',e.target.value)}/>
+              ) : (
+                <div style={{padding:'10px 14px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)',marginBottom:16,fontSize:13}}>
+                  <div style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                    {[form.billing_attention,form.billing_street1,form.billing_street2,form.billing_city,form.billing_state,form.billing_country,form.billing_pincode].filter(Boolean).join(', ')}
+                    {form.billing_phone && <span style={{fontSize:11,color:'var(--text3)',marginLeft:10}}>📞 {form.billing_phone}</span>}
+                  </div>
                 </div>
-              </div>
-              <div className="form-group"><label className="label">Street 1</label><input className="input" value={form.billing_street1} onChange={e=>set('billing_street1',e.target.value)} placeholder="Street 1"/></div>
-              <div className="form-group"><label className="label">Street 2</label><input className="input" value={form.billing_street2} onChange={e=>set('billing_street2',e.target.value)} placeholder="Street 2"/></div>
-              <div className="form-grid-2">
-                <div className="form-group"><label className="label">City</label>
-                  <CityField country={form.billing_country} value={form.billing_city} onChange={v=>set('billing_city',v)} />
-                </div>
-                <div className="form-group"><label className="label">State / Province</label>
-                  <StateField country={form.billing_country} value={form.billing_state} onChange={v=>set('billing_state',v)}/>
-                </div>
-              </div>
-              <div className="form-group"><label className="label">Phone</label>
-                <PhoneField value={form.billing_phone} country={form.billing_country} onChange={v=>set('billing_phone',v)} />
-              </div>
+              )}
 
-              {/* Shipping Addresses */}
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:20,marginBottom:12}}>
+              {/* ── Shipping Addresses ── */}
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:4,marginBottom:12}}>
                 <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>🚚 Shipping Addresses</div>
                 <div style={{display:'flex',gap:8}}>
-                  <button className="btn btn-xs" onClick={addShippingFromBilling} style={{fontSize:11}}>⇒ Add from Billing</button>
+                  {billingHasData && (
+                    <button className="btn btn-xs" onClick={addShippingFromBilling} style={{fontSize:11}}>⇒ Copy from Billing</button>
+                  )}
                   <button className="btn btn-xs btn-primary" onClick={addShipping}>+ Add Shipping Address</button>
                 </div>
               </div>
-              {form.shipping_addresses.length===0 && (
+              {shippingList.length === 0 ? (
                 <div style={{textAlign:'center',padding:'16px',color:'var(--text3)',fontSize:12,background:'var(--surface2)',borderRadius:'var(--r-sm)',border:'1px dashed var(--border-md)'}}>
-                  No shipping addresses added — click "+ Add Shipping Address" above
+                  No shipping addresses — click "+ Add Shipping Address" above
                 </div>
+              ) : (
+                shippingList.map((addr,i) => (
+                  <ShippingAddressBlock key={i} addr={addr} idx={i}
+                    onChange={a => updShipping(i,a)}
+                    onRemove={() => delShipping(i)}
+                    canDelete={shippingList.filter(a=>!a._isNew).length > 1}
+                    editMode={!!(shippingEditModes[i])}
+                    onSave={() => shippingEditModes[i] ? saveShipping(i) : toggleShippingEdit(i)}
+                    onAskDelete={() => setConfirmShipDel(i)}
+                    domestic={!intl}
+                    excludeIndia={intl}
+                  />
+                ))
               )}
-              {form.shipping_addresses.map((addr,i)=>(
-                <ShippingAddressBlock key={i} addr={addr} idx={i}
-                  onChange={a=>updShipping(i,a)} onRemove={()=>delShipping(i)} defaultOpen={i===0}/>
-              ))}
             </div>
+          )}
+          {confirmShipDel !== null && (
+            <ConfirmDeleteModal
+              label={shippingList[confirmShipDel]?.attention || shippingList[confirmShipDel]?.city || `Shipping Address ${confirmShipDel+1}`}
+              onConfirm={() => { delShipping(confirmShipDel); setConfirmShipDel(null); }}
+              onCancel={() => setConfirmShipDel(null)}
+            />
           )}
 
           {/* ── Tab: Contact Persons ── */}
@@ -860,8 +698,8 @@ function CustomerModal({ customer, onClose }) {
                         <td><input className="input" style={{fontSize:12}} value={cp.first_name||''} onChange={e=>updContact(i,'first_name',e.target.value)}/></td>
                         <td><input className="input" style={{fontSize:12}} value={cp.last_name||''} onChange={e=>updContact(i,'last_name',e.target.value)}/></td>
                         <td><input className="input" style={{fontSize:12}} type="email" value={cp.email||''} onChange={e=>updContact(i,'email',e.target.value)}/></td>
-                        <td><PhoneField value={cp.work_phone||''} country={'India'} onChange={v=>updContact(i,'work_phone',v)} /></td>
-                        <td><PhoneField value={cp.mobile||''} country={'India'} onChange={v=>updContact(i,'mobile',v)} /></td>
+                        <td><PhoneField value={cp.work_phone||''} onChange={v=>updContact(i,'work_phone',v)} domestic={!intl} excludeIndia={intl} /></td>
+                        <td><PhoneField value={cp.mobile||''} onChange={v=>updContact(i,'mobile',v)} domestic={!intl} excludeIndia={intl} /></td>
                         <td style={{textAlign:'center'}}><input type="checkbox" checked={!!cp.email_notify} onChange={e=>updContact(i,'email_notify',e.target.checked)} style={{accentColor:'var(--accent)'}}/></td>
                         <td style={{textAlign:'center'}}><input type="checkbox" checked={!!cp.sms_notify} onChange={e=>updContact(i,'sms_notify',e.target.checked)} style={{accentColor:'var(--accent)'}}/></td>
                         <td><button onClick={()=>delContact(i)} style={{background:'none',border:'none',cursor:'pointer',color:'var(--red)',fontSize:16}}>×</button></td>
@@ -886,10 +724,10 @@ function CustomerModal({ customer, onClose }) {
                 {!intl && <div className="form-group"><label className="label">IFSC Code <span className="req">*</span></label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
                 <div className="form-grid-2">
                   <div className="form-group"><label className="label">Currency</label>
-                    <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>{CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
+                    <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>{ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
                   </div>
                   <div className="form-group"><label className="label">Bank Country</label>
-                    <select className="input" value={form.bank_country} onChange={e=>set('bank_country',e.target.value)}>{COUNTRIES.map(c=><option key={c}>{c}</option>)}</select>
+                    <CountrySelect value={form.bank_country} onChange={v=>set('bank_country',v)}/>
                   </div>
                 </div>
               </div>
@@ -947,12 +785,21 @@ function CustomerModal({ customer, onClose }) {
 
         </div>
         <div className="modal-footer">
-          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>{if(window.confirm('Delete this customer?'))deleteMutation.mutate()}}>Delete</button>}
+          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>{mutation.isPending?'Saving…':'Save Customer'}</button>
         </div>
       </div>
     </div>
+    {confirmDelete && (
+      <ConfirmDeleteModal
+        label={customer?.name || customer?.company_name}
+        onConfirm={() => { setConfirmDelete(false); deleteMutation.mutate(); }}
+        onCancel={() => setConfirmDelete(false)}
+        loading={deleteMutation.isPending}
+      />
+    )}
+    </>
   );
 }
 
@@ -971,7 +818,7 @@ export default function CustomersPage() {
     (c.email||'').toLowerCase().includes(search.toLowerCase()) ||
     (c.gstin||'').toLowerCase().includes(search.toLowerCase()) ||
     (c.customer_no||'').toLowerCase().includes(search.toLowerCase())
-  );
+  ).sort((a,b)=>(b.created||b.created_at||'').localeCompare(a.created||a.created_at||''));
 
   return (
     <div>
@@ -994,11 +841,11 @@ export default function CustomersPage() {
           <thead><tr>
             <th>Cust. No.</th><th>Company / Name</th><th>Scope</th>
             <th>Contact</th><th>Email</th><th>Location</th>
-            <th>GSTIN / VAT</th><th>Cur.</th><th>Orders</th><th>Status</th>
+            <th>GSTIN / VAT</th><th>Cur.</th><th>Orders</th><th>Status</th><th>Created</th>
             <th style={{textAlign:'right'}}>Actions</th>
           </tr></thead>
           <tbody>
-            {filtered.length===0&&<tr><td colSpan={11}><div className="empty-state"><div className="empty-icon">👤</div><div>No customers yet</div></div></td></tr>}
+            {filtered.length===0&&<tr><td colSpan={12}><div className="empty-state"><div className="empty-icon">👤</div><div>No customers yet</div></div></td></tr>}
             {filtered.map(c=>(
               <tr key={c.id}>
                 <td>
@@ -1020,6 +867,7 @@ export default function CustomersPage() {
                 <td style={{fontSize:12}}>{c.currency||'INR'}</td>
                 <td><span className="badge badge-blue">{c.orders||0}</span></td>
                 <td>{c.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
+                <td style={{fontSize:11,color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(c.created||c.created_at)}</td>
                 <td style={{textAlign:'right'}}>
                   <button className="btn btn-xs btn-primary" onClick={()=>setModal(c)}>✏ Manage</button>
                 </td>

@@ -1,26 +1,32 @@
 // client/src/pages/DeliveryHubPage.js
 // Stage 7 — Inbound Delivery Hub: receive goods, GRN, move to Logistics
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, StatusBadge } from '../utils/helpers';
+import { fmt, fmtCur, StatusBadge, DaysBadge } from '../utils/helpers';
+import { printDoc, generateDeliverySlipPDF, generatePackingListPDF } from '../utils/pdfUtils';
+import { ISO3_COUNTRIES } from '../utils/isoCountryCodes';
 import { useAuth } from '../context/AuthContext';
 
 function fmtM(n,c='INR'){const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'};return(s[c]||c+' ')+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
 
 // ── GRN Modal — confirm quantities, flag shortages ───────────────────────────
-function GRNModal({ order, suppliers, onClose, onSaved }) {
+function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
   const qc = useQueryClient();
   const supName = id => suppliers.find(s=>s.id===id)?.name||id;
   const today = new Date().toISOString().slice(0,10);
+  const cooNameByCode = useMemo(
+    () => Object.fromEntries(ISO3_COUNTRIES.map(c => [c.code, c.name])),
+    []
+  );
 
   const [grn, setGrn] = useState(() => {
     const g = {};
     (order.lineItems||[]).forEach(li => {
       const po = (order.supplierOrders||[]).find(so=>(so.items||[]).includes(li.id));
       g[li.id] = {
-        qty_received: String(li.qty),
+        qty_received: '0',
         condition:    'good',
         notes:        '',
         supplier_id:  po?.supplier_id || '',
@@ -34,9 +40,36 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
     return g;
   });
   const [saving, setSaving] = useState(false);
+  const [cooOpenFor, setCooOpenFor] = useState(null);
+  const [cooQueryByItem, setCooQueryByItem] = useState({});
+  const cooWrapRefs = useRef({});
   const setG = (id,k,v) => setGrn(g=>({...g,[id]:{...g[id],[k]:v}}));
 
-  const items = order.lineItems||[];
+  useEffect(() => {
+    if (!cooOpenFor) return;
+    const onDocMouseDown = (e) => {
+      const wrap = cooWrapRefs.current[cooOpenFor];
+      if (wrap && !wrap.contains(e.target)) setCooOpenFor(null);
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [cooOpenFor]);
+
+  const items = filterPoId
+    ? (order.lineItems||[]).filter(li => {
+        const targetPo = (order.supplierOrders||[]).find(so => so.id === filterPoId);
+        return targetPo ? (targetPo.items||[]).includes(li.id) : true;
+      })
+    : (order.lineItems||[]);
+  const poSummary = filterPoId
+    ? (order.supplierOrders||[]).filter(so => so.id === filterPoId)
+    : (order.supplierOrders||[]);
+
+  // ── Previously received (cumulative from all past GRN records) ─────────
+  const prevRcvdMap = (order.grnRecords||[]).reduce((m,r)=>{
+    m[r.order_item_id]=(m[r.order_item_id]||0)+(parseInt(r.qty_received)||0);
+    return m;
+  },{});
 
   // ── Summary calculations ──────────────────────────────────────────────────
   const summary = items.reduce((acc, li) => {
@@ -106,9 +139,9 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
         </div>
         <div className="modal-body">
           {/* PO summary */}
-          {(order.supplierOrders||[]).length>0 && (
+          {poSummary.length>0 && (
             <div style={{marginBottom:14,display:'flex',gap:8,flexWrap:'wrap'}}>
-              {(order.supplierOrders||[]).map(so=>(
+              {poSummary.map(so=>(
                 <div key={so.id} style={{padding:'5px 12px',borderRadius:'var(--r-sm)',
                   background:'var(--accent-lt)',border:'1px solid var(--accent)33',fontSize:12,fontWeight:600}}>
                   {so.internal_po_no||so.id} · {supName(so.supplier_id)}
@@ -124,9 +157,10 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
               <tr>
                 <th style={{width:20}}></th>
                 <th>Part / Description</th>
-                <th style={{textAlign:'right'}}>Ordered</th>
-                <th style={{textAlign:'right'}}>Received</th>
-                <th style={{width:100}}>Receipt %</th>
+                <th style={{textAlign:'center',color:'var(--text2)'}}>Ordered</th>
+                <th style={{textAlign:'center',color:'var(--green)'}}>Prev Rcvd</th>
+                <th style={{textAlign:'center',color:'var(--purple,#7c3aed)'}}>Pending</th>
+                <th style={{textAlign:'center',color:'var(--accent)',fontWeight:800}}>Receiving Now</th>
                 <th>Condition</th>
                 <th style={{color:'var(--teal,#0d9488)'}}>COO</th>
                 <th style={{color:'var(--teal,#0d9488)'}}>Date Code</th>
@@ -136,15 +170,15 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
             </thead>
             <tbody>
               {items.map((li,i) => {
-                const row    = grn[li.id]||{};
-                const qty    = parseInt(row.qty_received)||0;
-                const pct    = li.qty > 0 ? Math.round((qty/li.qty)*100) : 0;
-                const isFull = qty >= li.qty && li.qty > 0;
-                const isPartial = qty > 0 && !isFull;
-                const shortage  = qty < li.qty;
+                const row      = grn[li.id]||{};
+                const qty      = parseInt(row.qty_received)||0;
+                const prevRcvd = prevRcvdMap[li.id]||0;
+                const pending  = Math.max(0, li.qty - prevRcvd);
+                const isFull   = (prevRcvd + qty) >= li.qty && li.qty > 0;
+                const isPartial= qty > 0 && !isFull;
+                const shortage  = qty < pending;
                 const dotColor  = isFull ? '#1D9E75' : isPartial ? '#BA7517' : 'var(--border)';
                 const inputBorderColor = isFull ? '#1D9E75' : isPartial ? '#BA7517' : 'var(--border)';
-                const barColor  = isFull ? '#1D9E75' : '#BA7517';
                 return (
                   <tr key={li.id} style={{background:
                     row.condition==='rejected'?'var(--red-lt,#fef2f2)':
@@ -160,30 +194,37 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
                       {li.component}
                       {li.manufacturer&&<div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div>}
                     </td>
-                    {/* Ordered qty */}
-                    <td style={{textAlign:'right',fontWeight:600}}>{li.qty}</td>
-                    {/* Received qty input */}
-                    <td style={{textAlign:'right'}}>
-                      <input className="input" type="number" min="0" max={li.qty*2}
+                    {/* Ordered */}
+                    <td style={{textAlign:'center',fontWeight:600,color:'var(--text2)'}}>{li.qty}</td>
+                    {/* Previously received */}
+                    <td style={{textAlign:'center',fontWeight:700,color:prevRcvd>0?'var(--green)':'var(--text3)'}}>
+                      {prevRcvd>0 ? prevRcvd : <span style={{opacity:.4}}>—</span>}
+                    </td>
+                    {/* Still pending */}
+                    <td style={{textAlign:'center',fontWeight:700,
+                      color:pending>0?'var(--purple,#7c3aed)':'var(--green)'}}>
+                      {pending>0
+                        ? <span style={{padding:'1px 7px',borderRadius:999,background:'#f5f3ff',border:'1px solid #c4b5fd'}}>{pending}</span>
+                        : <span style={{color:'var(--green)',fontSize:13}}>✓</span>}
+                    </td>
+                    {/* Receiving now (input) */}
+                    <td style={{textAlign:'center'}}>
+                      <input className="input" type="number" min="0" max={pending*2||li.qty*2}
                         value={row.qty_received}
                         onChange={e=>setG(li.id,'qty_received',e.target.value)}
-                        style={{width:72,textAlign:'center',fontWeight:700,
-                          borderColor: inputBorderColor}}/>
-                      {shortage && qty>0 && (
+                        style={{width:72,textAlign:'center',fontWeight:800,fontSize:14,
+                          borderColor: inputBorderColor,
+                          background: qty>0?'#f0fdf4':undefined}}/>
+                      {qty>0&&qty<pending&&(
                         <div style={{fontSize:10,color:'#BA7517',fontWeight:600,marginTop:2}}>
-                          ⚠ Short by {li.qty - qty}
+                          ⚠ {pending-qty} short
                         </div>
                       )}
-                    </td>
-                    {/* Progress bar */}
-                    <td>
-                      <div style={{width:80,height:4,background:'var(--surface2)',borderRadius:2}}>
-                        <div style={{width:pct+'%',height:4,borderRadius:2,
-                          background:qty>0?barColor:'transparent',transition:'width .2s'}}/>
-                      </div>
-                      <div style={{fontSize:10,color:'var(--text3)',marginTop:3,fontFamily:'monospace'}}>
-                        {qty>0?pct+'%':'—'}
-                      </div>
+                      {qty>0&&qty>=pending&&pending>0&&(
+                        <div style={{fontSize:10,color:'var(--green)',fontWeight:600,marginTop:2}}>
+                          ✅ Full
+                        </div>
+                      )}
                     </td>
                     {/* Condition */}
                     <td>
@@ -199,9 +240,83 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
                       </select>
                     </td>
                     {/* COO */}
-                    <td><input className="input" value={row.coo||''}
-                      onChange={e=>setG(li.id,'coo',e.target.value)}
-                      placeholder="CN" style={{fontSize:11,width:55}}/></td>
+                    <td>
+                      <div
+                        ref={el => { cooWrapRefs.current[li.id] = el; }}
+                        style={{position:'relative',width:220}}
+                      >
+                        <input
+                          className="input"
+                          value={cooQueryByItem[li.id] ?? row.coo ?? ''}
+                          onFocus={() => {
+                            setCooOpenFor(li.id);
+                            setCooQueryByItem(prev => ({ ...prev, [li.id]: row.coo || '' }));
+                          }}
+                          onChange={e => {
+                            const raw = e.target.value || '';
+                            setCooQueryByItem(prev => ({ ...prev, [li.id]: raw }));
+                            const code = raw.trim().toUpperCase().slice(0,3);
+                            setG(li.id, 'coo', code);
+                            setCooOpenFor(li.id);
+                          }}
+                          placeholder="IND"
+                          title={row.coo && cooNameByCode[row.coo] ? `${row.coo} - ${cooNameByCode[row.coo]}` : ''}
+                          style={{fontSize:11,width:'100%',textTransform:'uppercase'}}
+                        />
+                        {cooOpenFor === li.id && (
+                          <div style={{
+                            position:'absolute',
+                            top:'calc(100% + 4px)',
+                            left:0,
+                            minWidth:'100%',
+                            width:380,
+                            maxWidth:'min(70vw, 520px)',
+                            zIndex:60,
+                            maxHeight:260,
+                            overflowY:'auto',
+                            overflowX:'auto',
+                            overscrollBehavior:'contain',
+                            WebkitOverflowScrolling:'touch',
+                            border:'1px solid var(--border)',
+                            borderRadius:8,
+                            background:'var(--surface,#fff)',
+                            boxShadow:'0 8px 20px rgba(0,0,0,0.12)',
+                            scrollbarColor:'#111827 #e5e7eb'
+                          }}
+                          onWheel={e => e.stopPropagation()}>
+                            {ISO3_COUNTRIES
+                              .filter(c => {
+                                const q = (cooQueryByItem[li.id] || '').trim().toLowerCase();
+                                if (!q) return true;
+                                return c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q);
+                              })
+                              .map(c => (
+                                <div
+                                  key={c.code}
+                                  onMouseDown={e => {
+                                    e.preventDefault();
+                                    setG(li.id, 'coo', c.code);
+                                    setCooQueryByItem(prev => ({ ...prev, [li.id]: c.code }));
+                                    setCooOpenFor(null);
+                                  }}
+                                  style={{
+                                    padding:'7px 9px',
+                                    fontSize:11,
+                                    cursor:'pointer',
+                                    whiteSpace:'nowrap',
+                                    textOverflow:'clip',
+                                    overflow:'visible',
+                                    borderBottom:'1px solid var(--border)'
+                                  }}
+                                  title={`${c.code} - ${c.name}`}
+                                >
+                                  <strong>{c.code}</strong> - {c.name}
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </div>
+                    </td>
                     {/* Date Code */}
                     <td><input className="input" value={row.date_code||''}
                       onChange={e=>setG(li.id,'date_code',e.target.value)}
@@ -220,21 +335,25 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
               })}
             </tbody>
           </table>
-
           {/* ── Summary bar ── */}
           <div style={{display:'flex',alignItems:'center',gap:20,
             background:'var(--surface2)',border:'1px solid var(--border)',
             borderRadius:8,padding:'12px 18px',margin:'14px 0'}}>
-            {[
-              {label:'Line Items',        val:items.length,       color:'var(--text)'},
-              {label:'Fully Received',    val:summary.full,       color:'#1D9E75'},
-              {label:'Partially Received',val:summary.partial,    color:'#BA7517'},
-              {label:'Not Yet Received',  val:summary.pending,    color:'var(--text3)'},
-              {label:'Overall Receipt',   val:overallPct+'%',     color:overallPct===100?'#1D9E75':overallPct>0?'#BA7517':'var(--text3)'},
-            ].map((s,i,arr)=>(
+            {(()=>{
+              const totPrevRcvd = items.reduce((s,li)=>s+(prevRcvdMap[li.id]||0),0);
+              const totPending  = items.reduce((s,li)=>s+Math.max(0,li.qty-(prevRcvdMap[li.id]||0)),0);
+              const totNow      = items.reduce((s,li)=>s+(parseInt(grn[li.id]?.qty_received)||0),0);
+              return [
+                {label:'Ordered',       val:summary.totalOrdered, color:'var(--text2)'},
+                {label:'Prev Received', val:totPrevRcvd,          color:'var(--green)'},
+                {label:'Pending', val:totPending,           color:'var(--purple,#7c3aed)'},
+                {label:'Receiving Now', val:totNow,               color:'var(--accent)', bold:true},
+              ];
+            })().map((s,i,arr)=>(
+
               <React.Fragment key={s.label}>
                 <div style={{textAlign:'center'}}>
-                  <div style={{fontFamily:'monospace',fontSize:20,fontWeight:500,color:s.color}}>{s.val}</div>
+                  <div style={{fontFamily:'monospace',fontSize:20,fontWeight:s.bold?800:500,color:s.color}}>{s.val}</div>
                   <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:.5,marginTop:2}}>{s.label}</div>
                 </div>
                 {i<arr.length-1&&<div style={{width:1,height:36,background:'var(--border)'}}/>}
@@ -278,58 +397,6 @@ function GRNModal({ order, suppliers, onClose, onSaved }) {
 
 // ── Main Delivery Hub Page ────────────────────────────────────────────────────
 
-
-// ── DS / PL HTML generators ───────────────────────────────────────────────────
-function generateDSHtml(order, selectedItems, shipmentNo, shipperName, awb, custName) {
-  const today = new Date().toLocaleDateString('en-IN');
-  const rows = selectedItems.map(li =>
-    `<tr><td>${li.component}</td><td>${li.manufacturer||'—'}</td><td>${li.ipn||'—'}</td><td style="text-align:center">${li.qty}</td><td></td></tr>`
-  ).join('');
-  return `<!DOCTYPE html><html><head><title>Delivery Slip — ${order.id}</title>
-  <style>body{font-family:Arial,sans-serif;padding:32px;font-size:13px}h2{margin:0}
-  table{width:100%;border-collapse:collapse;margin-top:16px}
-  th{background:#f3f4f6;padding:8px;border:1px solid #d1d5db;text-align:left}
-  td{padding:7px 8px;border:1px solid #d1d5db}
-  .sig{margin-top:40px;display:flex;gap:60px}.sig-box{border-top:1px solid #000;padding-top:6px;min-width:160px;font-size:11px}
-  @media print{.no-print{display:none}}</style></head><body>
-  <div class="no-print" style="background:#3b82f6;color:#fff;padding:10px 16px;margin-bottom:20px;border-radius:6px;display:flex;align-items:center;justify-content:space-between">
-    <span>📄 Delivery Slip Preview — Shipment ${shipmentNo}</span>
-    <button onclick="window.print()" style="background:#fff;color:#3b82f6;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-weight:700">🖨 Print / Save PDF</button>
-  </div>
-  <h2>DELIVERY CHALLAN — Shipment ${shipmentNo}</h2>
-  <p>Date: ${today} | Order: ${order.id} | Customer PO: ${order.po_number||'—'} | Carrier: ${shipperName||'—'} | AWB: ${awb||'TBD'}</p>
-  <p><strong>Ship To:</strong> ${custName} — ${order.delivery_address||''}</p>
-  <table><thead><tr><th>Component / Description</th><th>Manufacturer</th><th>IPN</th><th style="text-align:center">Qty</th><th>Remarks</th></tr></thead>
-  <tbody>${rows}</tbody></table>
-  <div class="sig"><div class="sig-box">Prepared By</div><div class="sig-box">Authorised Signatory</div><div class="sig-box">Received By (Customer)</div></div>
-  </body></html>`;
-}
-
-function generatePLHtml(order, selectedItems, grnRecords, shipmentNo, custName) {
-  const today = new Date().toLocaleDateString('en-IN');
-  const rows = selectedItems.map(li => {
-    const grn = (grnRecords||[]).find(g=>g.order_item_id===li.id)||{};
-    return `<tr><td>${li.component}</td><td>${li.manufacturer||'—'}</td><td>${li.ipn||'—'}</td>
-    <td style="text-align:center">${li.qty}</td><td>${grn.date_code||'—'}</td>
-    <td>${grn.lot_number||'—'}</td><td>${grn.coo||'—'}</td><td>${grn.weight_kg||'—'}</td></tr>`;
-  }).join('');
-  return `<!DOCTYPE html><html><head><title>Packing List — ${order.id}</title>
-  <style>body{font-family:Arial,sans-serif;padding:32px;font-size:12px}h2{margin:0}
-  table{width:100%;border-collapse:collapse;margin-top:16px}
-  th{background:#f3f4f6;padding:7px;border:1px solid #d1d5db;text-align:left;font-size:11px}
-  td{padding:6px 7px;border:1px solid #d1d5db}
-  @media print{.no-print{display:none}}</style></head><body>
-  <div class="no-print" style="background:#0d9488;color:#fff;padding:10px 16px;margin-bottom:20px;border-radius:6px;display:flex;align-items:center;justify-content:space-between">
-    <span>📦 Packing List Preview — Shipment ${shipmentNo}</span>
-    <button onclick="window.print()" style="background:#fff;color:#0d9488;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-weight:700">🖨 Print / Save PDF</button>
-  </div>
-  <h2>PACKING LIST — Shipment ${shipmentNo} · ${today}</h2>
-  <p>Order: ${order.id} | Customer PO: ${order.po_number||'—'} | Ship To: ${custName} — ${order.delivery_address||''}</p>
-  <table><thead><tr><th>Component</th><th>Manufacturer</th><th>IPN</th><th>Qty</th><th>Date Code</th><th>LOT</th><th>COO</th><th>Weight(kg)</th></tr></thead>
-  <tbody>${rows}</tbody></table>
-  </body></html>`;
-}
-
 // ── CreateShipmentModal ───────────────────────────────────────────────────────
 function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const qc = useQueryClient();
@@ -340,6 +407,8 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const [step, setStep]         = useState(1);
   const [saving, setSaving]     = useState(false);
   const [selected, setSelected] = useState(()=>{ const s={}; allItems.forEach(li=>{s[li.id]=true;}); return s; });
+  const [dsPreviewed, setDsPreviewed] = useState(false);
+  const [plPreviewed, setPlPreviewed] = useState(false);
   const [dsReviewed, setDsReviewed] = useState(false);
   const [plReviewed, setPlReviewed] = useState(false);
   const [invoiceRef, setInvoiceRef] = useState('');
@@ -347,15 +416,49 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const [invoiceB64, setInvoiceB64]   = useState('');
   const [ewayBill, setEwayBill]   = useState('');
   const [shipperId, setShipperId] = useState('');
+  const [otherCarrierName, setOtherCarrierName] = useState('');
   const [awb,       setAwb]       = useState('');
   const [notes,     setNotes]     = useState('');
   const selectedItems  = allItems.filter(li=>selected[li.id]);
   const shipNo         = existingShipNos + 1;
-  const shipperName    = shippers.find(s=>s.id===shipperId)?.name||'';
-  const orderValINR    = selectedItems.reduce((s,li)=>li.currency==='INR'?s+(li.qty||0)*(li.unit_price||0):s,0);
+  // GRN received qty per line item (cumulative across all GRN records)
+  const grnQtyMap = (order.grnRecords||[]).reduce((m,r)=>{
+    m[r.order_item_id] = (m[r.order_item_id]||0) + (parseInt(r.qty_received)||0);
+    return m;
+  }, {});
+  // Already shipped qty per line item (cumulative across all past shipments)
+  const shippedQtyMap = (order.shipments||[]).flatMap(s=>s.items||[]).reduce((m,si)=>{
+    m[si.order_item_id] = (m[si.order_item_id]||0) + (parseInt(si.qty_shipped)||0);
+    return m;
+  }, {});
+  // Available at hub = received - already shipped (what's ready to dispatch NOW)
+  const availableQty = (li) => Math.max(0, (grnQtyMap[li.id]||0) - (shippedQtyMap[li.id]||0));
+  const BUILTIN_CARRIERS = [
+    'DHL', 'UPS', 'FedEx', 'Aramex', 'TNT Express', 'Maersk',
+    'MSC (Mediterranean Shipping Company)', 'CMA CGM', 'COSCO Shipping', 'Hapag-Lloyd',
+    'Kuehne + Nagel', 'DB Schenker', 'DSV', 'Expeditors', 'Nippon Express',
+    'Delhivery', 'Blue Dart', 'DTDC', 'Ecom Express', 'XpressBees', 'India Post',
+    'Porter', 'Dunzo', 'Borzo', 'Shadowfax', 'Swiggy Genie',
+    'TCI (Transport Corporation of India)', 'Safexpress', 'Mahindra Logistics',
+    'Allcargo Logistics', 'Gati'
+  ];
+  const toId = (name='') => name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const builtinOptions = BUILTIN_CARRIERS.map(name => ({ id: toId(name), name }));
+  const customOptions = (shippers || []).map(s => ({ id: s.id || toId(s.name || ''), name: s.name || s.id || '' })).filter(s => s.name);
+  const mergedByName = {};
+  [...builtinOptions, ...customOptions].forEach(s => {
+    const k = (s.name || '').toLowerCase();
+    if (!mergedByName[k]) mergedByName[k] = s;
+  });
+  const carrierOptions = Object.values(mergedByName).sort((a,b) => a.name.localeCompare(b.name));
+  const shipperName = shipperId === 'others'
+    ? otherCarrierName.trim()
+    : (carrierOptions.find(s=>s.id===shipperId)?.name || '');
+  const selectedCarrierForSave = shipperId === 'others' ? otherCarrierName.trim() : shipperName;
+  const orderValINR    = selectedItems.reduce((s,li)=>li.currency==='INR'?s+availableQty(li)*(li.unit_price||0):s,0);
   const ewayRequired   = custObj.country==='India' && orderValINR>50000;
-  const subtotal       = selectedItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
-  const taxTotal       = selectedItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100),0);
+  const subtotal       = selectedItems.reduce((s,li)=>s+availableQty(li)*(li.unit_price||0),0);
+  const taxTotal       = selectedItems.reduce((s,li)=>s+availableQty(li)*(li.unit_price||0)*((li.tax_rate||0)/100),0);
   const grandTotal     = subtotal+taxTotal;
   const handleInvoiceFile = (e) => {
     const file = e.target.files[0]; if(!file) return;
@@ -364,25 +467,35 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
     reader.onload = (ev) => setInvoiceB64(ev.target.result.split(',')[1]);
     reader.readAsDataURL(file);
   };
-  const previewDS = () => { const w=window.open('','_blank'); w.document.write(generateDSHtml(order,selectedItems,shipNo,shipperName,awb,custName)); w.document.close(); };
-  const previewPL = () => { const w=window.open('','_blank'); w.document.write(generatePLHtml(order,selectedItems,order.grnRecords||[],shipNo,custName)); w.document.close(); };
-  const canProceed2 = dsReviewed && plReviewed && invoiceRef.trim() && (!ewayRequired||ewayBill.trim());
-  const canProceed3 = awb.trim() && shipperId;
+  const previewDS = () => {
+    if (!invoiceRef.trim()) {
+      toast.error('Enter invoice number first');
+      return;
+    }
+    printDoc(generateDeliverySlipPDF(order, selectedItems, shipNo, shipperName, awb, invoiceRef, custName));
+    setDsPreviewed(true);
+  };
+  const previewPL = () => {
+    printDoc(generatePackingListPDF(order, selectedItems, order.grnRecords||[], shipNo, custName));
+    setPlPreviewed(true);
+  };
+  const canProceedShipping = awb.trim() && shipperId && (shipperId !== 'others' || otherCarrierName.trim());
+  const canProceedDocuments = dsReviewed && plReviewed && invoiceRef.trim() && (!ewayRequired||ewayBill.trim());
   const handleDispatch = async () => {
     setSaving(true);
     try {
       await api.post('/orders/'+order.id+'/shipments', {
         type: selectedItems.length===allItems.length?'full':'partial',
-        shipper_id:shipperId, tracking_no:awb, invoice_ref:invoiceRef,
+        shipper_id:selectedCarrierForSave, tracking_no:awb, invoice_ref:invoiceRef,
         invoice_file:invoiceB64, eway_bill:ewayBill, delivery_slip:'generated', packing_list:'generated', notes,
-        items: selectedItems.map(li=>({order_item_id:li.id,qty_shipped:li.qty})),
+        items: selectedItems.map(li=>({order_item_id:li.id,qty_shipped:availableQty(li)})),
       });
       toast.success(`✅ Shipment ${shipNo} dispatched!`);
       qc.invalidateQueries(['orders']); onSaved();
     } catch(e) { toast.error(e.response?.data?.error||'Dispatch failed'); }
     finally { setSaving(false); }
   };
-  const STEPS = ['Select Items','Documents','Shipping','Confirm'];
+  const STEPS = ['Select Items','Shipping','Documents','Confirm'];
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl">
@@ -403,12 +516,14 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
         <div className="modal-body">
           {step===1&&(<div>
             <div style={{fontWeight:700,marginBottom:12}}>Select items for this shipment:</div>
-            <table className="li-table"><thead><tr><th>✓</th><th>Component</th><th>Manufacturer</th><th>IPN</th><th>Qty</th><th>Status</th></tr></thead>
+            <table className="li-table"><thead><tr><th>✓</th><th>Component</th><th>Manufacturer</th><th>IPN</th><th>Ordered</th><th>GRN Recv'd</th><th>Status</th></tr></thead>
             <tbody>{allItems.map(li=>(
               <tr key={li.id} style={{background:selected[li.id]?'var(--accent-lt)':undefined}}>
                 <td><input type="checkbox" checked={!!selected[li.id]} onChange={e=>setSelected(p=>({...p,[li.id]:e.target.checked}))}/></td>
                 <td style={{fontWeight:600}}>{li.component}</td><td>{li.manufacturer||'—'}</td>
-                <td className="mono" style={{fontSize:11}}>{li.ipn||'—'}</td><td>{li.qty}</td>
+                <td className="mono" style={{fontSize:11}}>{li.ipn||'—'}</td>
+                <td style={{color:'var(--text3)'}}>{li.qty}</td>
+                <td style={{fontWeight:700,color:availableQty(li)<li.qty?'var(--amber,#d97706)':'var(--green)'}}>{availableQty(li)}{availableQty(li)<li.qty?<span style={{fontSize:10,marginLeft:4}}>⚠ short</span>:null}</td>
                 <td><span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:li.line_status==='ready_to_ship'?'var(--green-lt)':'var(--amber-lt,#fffbeb)',color:li.line_status==='ready_to_ship'?'var(--green)':'var(--amber,#d97706)',fontWeight:600}}>{li.line_status==='ready_to_ship'?'✅ Ready':'⚠ Partial'}</span></td>
               </tr>
             ))}</tbody></table>
@@ -417,61 +532,39 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
                 <div style={{fontWeight:700,marginBottom:8,color:'var(--text2)'}}>💰 Shipment Value (for your reference — not printed on documents)</div>
                 <table style={{width:'100%',borderCollapse:'collapse'}}>
                   <thead><tr style={{borderBottom:'1px solid var(--border)'}}><th style={{padding:'4px 8px',textAlign:'left',fontSize:11}}>Component</th><th style={{padding:'4px 8px',textAlign:'right',fontSize:11}}>Qty</th><th style={{padding:'4px 8px',textAlign:'right',fontSize:11}}>Unit Price</th><th style={{padding:'4px 8px',textAlign:'right',fontSize:11}}>Tax%</th><th style={{padding:'4px 8px',textAlign:'right',fontSize:11}}>Tax Amt</th><th style={{padding:'4px 8px',textAlign:'right',fontSize:11}}>Line Total</th></tr></thead>
-                  <tbody>{selectedItems.map(li=>{const base=(li.qty||0)*(li.unit_price||0);const tax=base*((li.tax_rate||0)/100);return(<tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}><td style={{padding:'4px 8px'}}>{li.component}</td><td style={{padding:'4px 8px',textAlign:'right'}}>{li.qty}</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace'}}>{fmtM(li.unit_price,li.currency)}</td><td style={{padding:'4px 8px',textAlign:'right'}}>{li.tax_rate||0}%</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace'}}>{fmtM(tax,li.currency)}</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(base+tax,li.currency)}</td></tr>);})}</tbody>
+                  <tbody>{selectedItems.map(li=>{const qty=availableQty(li);const base=qty*(li.unit_price||0);const tax=base*((li.tax_rate||0)/100);return(<tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}><td style={{padding:'4px 8px'}}>{li.component}</td><td style={{padding:'4px 8px',textAlign:'right'}}>{qty}</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace'}}>{fmtM(li.unit_price,li.currency)}</td><td style={{padding:'4px 8px',textAlign:'right'}}>{li.tax_rate||0}%</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace'}}>{fmtM(tax,li.currency)}</td><td style={{padding:'4px 8px',textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(base+tax,li.currency)}</td></tr>);})}</tbody>
                   <tfoot><tr style={{borderTop:'2px solid var(--border)'}}><td colSpan={4} style={{padding:'6px 8px',fontWeight:700,textAlign:'right'}}>Subtotal + Tax</td><td style={{padding:'6px 8px',textAlign:'right'}}>{fmtM(taxTotal)}</td><td style={{padding:'6px 8px',textAlign:'right',fontWeight:700}}>{fmtM(subtotal)}</td></tr>
                   <tr style={{background:'var(--accent-lt)'}}><td colSpan={5} style={{padding:'6px 8px',fontWeight:800,textAlign:'right',color:'var(--accent)'}}>Grand Total (incl. tax)</td><td style={{padding:'6px 8px',textAlign:'right',fontWeight:800,color:'var(--accent)',fontFamily:'monospace'}}>{fmtM(grandTotal)}</td></tr></tfoot>
                 </table>
               </div>
             )}
           </div>)}
-          {step===2&&(<div style={{display:'grid',gap:16}}>
-            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>📄 Delivery Slip</div>
-              <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-                <button className="btn btn-sm" onClick={previewDS}>👁 Preview DS</button>
-                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                  <input type="checkbox" checked={dsReviewed} onChange={e=>setDsReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
-                  ✅ DS reviewed and correct
-                </label>
-              </div>
-            </div>
-            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>📦 Packing List</div>
-              <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-                <button className="btn btn-sm" onClick={previewPL}>👁 Preview PL</button>
-                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                  <input type="checkbox" checked={plReviewed} onChange={e=>setPlReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
-                  ✅ PL reviewed and correct
-                </label>
-              </div>
-            </div>
-            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${invoiceRef?'var(--green)':'var(--amber,#d97706)'}`,background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>🧾 Invoice <span style={{color:'var(--red)'}}>*</span></div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Zoho Invoice Number *</label>
-                  <input className="input" value={invoiceRef} onChange={e=>setInvoiceRef(e.target.value)} placeholder="e.g. INV-2026-00123" style={{borderColor:invoiceRef?'var(--green)':'var(--amber,#d97706)'}}/>
-                </div>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Upload Invoice PDF (optional)</label>
-                  <input type="file" accept=".pdf,.PDF" className="input" onChange={handleInvoiceFile} style={{padding:'6px'}}/>
-                  {invoiceFile&&<div style={{fontSize:11,color:'var(--green)',marginTop:2}}>✅ {invoiceFile.name}</div>}
-                </div>
-              </div>
-            </div>
-            {ewayRequired&&(<div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${ewayBill?'var(--green)':'var(--red)'}`,background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>🚛 E-way Bill * <span style={{fontSize:11,color:'var(--red)',marginLeft:8}}>Required — India &gt; ₹50,000</span></div>
-              <input className="input" value={ewayBill} onChange={e=>setEwayBill(e.target.value)} placeholder="e.g. EWB-123456789012" style={{borderColor:ewayBill?'var(--green)':'var(--red)'}}/>
-            </div>)}
-          </div>)}
-          {step===3&&(<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          {step===2&&(<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Carrier *</label>
+              {(!shippers || shippers.length===0) && (
+                <div style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600,marginBottom:6}}>
+                  ⚠ No active shippers configured. Showing common carrier list fallback.
+                </div>
+              )}
               <select className="input" value={shipperId} onChange={e=>setShipperId(e.target.value)} style={{borderColor:shipperId?'var(--green)':'var(--amber,#d97706)'}}>
                 <option value="">— Select carrier —</option>
-                {shippers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                {carrierOptions.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                <option value="others">Others</option>
               </select>
             </div>
+            {shipperId === 'others' && (
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Enter Carrier Name *</label>
+                <input
+                  className="input"
+                  value={otherCarrierName}
+                  onChange={e=>setOtherCarrierName(e.target.value)}
+                  placeholder="Enter carrier manually"
+                  style={{borderColor:otherCarrierName.trim()?'var(--green)':'var(--amber,#d97706)'}}
+                />
+              </div>
+            )}
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">AWB / Tracking Number *</label>
               <input className="input" value={awb} onChange={e=>setAwb(e.target.value)} placeholder="Enter outbound AWB" style={{borderColor:awb?'var(--green)':'var(--amber,#d97706)'}}/>
@@ -480,6 +573,53 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
               <label className="label">Notes</label>
               <textarea className="input" rows={2} value={notes} onChange={e=>setNotes(e.target.value)}/>
             </div>
+          </div>)}
+          {step===3&&(<div style={{display:'grid',gap:16}}>
+            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${invoiceRef?'var(--green)':'var(--amber,#d97706)'}`,background:'var(--surface2)'}}>
+              <div style={{fontWeight:700,marginBottom:10}}>🧾 Invoice <span style={{color:'var(--red)'}}>*</span></div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Zoho Invoice Number *</label>
+                  <input className="input" value={invoiceRef} onChange={e=>{
+                    setInvoiceRef(e.target.value);
+                    // Delivery Slip includes invoice no, so force re-preview after invoice changes.
+                    setDsPreviewed(false);
+                    setDsReviewed(false);
+                  }} placeholder="e.g. INV-2026-00123" style={{borderColor:invoiceRef?'var(--green)':'var(--amber,#d97706)'}}/>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Upload Invoice PDF (optional)</label>
+                  <input type="file" accept=".pdf,.PDF" className="input" onChange={handleInvoiceFile} style={{padding:'6px'}}/>
+                  {invoiceFile&&<div style={{fontSize:11,color:'var(--green)',marginTop:2}}>✅ {invoiceFile.name}</div>}
+                </div>
+              </div>
+            </div>
+            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
+              <div style={{fontWeight:700,marginBottom:10}}>📄 Delivery Slip</div>
+              <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+                <button className="btn btn-sm" onClick={previewDS} disabled={!invoiceRef.trim()} title={!invoiceRef.trim() ? 'Enter invoice number first' : ''}>👁 Preview DS</button>
+                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
+                  <input type="checkbox" checked={dsReviewed} disabled={!dsPreviewed} onChange={e=>setDsReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
+                  ✅ DS reviewed and correct
+                </label>
+                {!dsPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
+              </div>
+            </div>
+            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
+              <div style={{fontWeight:700,marginBottom:10}}>📦 Packing List</div>
+              <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+                <button className="btn btn-sm" onClick={previewPL}>👁 Preview PL</button>
+                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
+                  <input type="checkbox" checked={plReviewed} disabled={!plPreviewed} onChange={e=>setPlReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
+                  ✅ PL reviewed and correct
+                </label>
+                {!plPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
+              </div>
+            </div>
+            {ewayRequired&&(<div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${ewayBill?'var(--green)':'var(--red)'}`,background:'var(--surface2)'}}>
+              <div style={{fontWeight:700,marginBottom:10}}>🚛 E-way Bill * <span style={{fontSize:11,color:'var(--red)',marginLeft:8}}>Required — India &gt; ₹50,000</span></div>
+              <input className="input" value={ewayBill} onChange={e=>setEwayBill(e.target.value)} placeholder="e.g. EWB-123456789012" style={{borderColor:ewayBill?'var(--green)':'var(--red)'}}/>
+            </div>)}
           </div>)}
           {step===4&&(<div>
             <div style={{fontWeight:700,fontSize:14,marginBottom:16,color:'var(--accent)'}}>Review and confirm dispatch</div>
@@ -499,7 +639,7 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
         <div className="modal-footer" style={{justifyContent:'space-between'}}>
           <button className="btn" onClick={step===1?onClose:()=>setStep(s=>s-1)}>{step===1?'Cancel':'← Back'}</button>
           {step<4?(
-            <button className="btn btn-primary" disabled={(step===1&&selectedItems.length===0)||(step===2&&!canProceed2)||(step===3&&!canProceed3)} onClick={()=>setStep(s=>s+1)}>Next →</button>
+            <button className="btn btn-primary" disabled={(step===1&&selectedItems.length===0)||(step===2&&!canProceedShipping)||(step===3&&!canProceedDocuments)} onClick={()=>setStep(s=>s+1)}>Next →</button>
           ):(
             <button className="btn btn-primary" style={{background:'var(--teal,#0d9488)',borderColor:'var(--teal,#0d9488)',fontWeight:700}} disabled={saving} onClick={handleDispatch}>{saving?'Dispatching…':'🚚 Confirm Dispatch'}</button>
           )}
@@ -613,12 +753,13 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
 export default function DeliveryHubPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const [selected,   setSelected]   = useState(null);
-  const [escalating, setEscalating] = useState(null); // { order, newDate }
-  const [search,     setSearch]     = useState('');
-  const [filter,     setFilter]     = useState('all');
-  const [dispatch,   setDispatch]   = useState(null);
-  const [confirming, setConfirming] = useState(null);
+  const [selected,     setSelected]     = useState(null);
+  const [selectedPoId, setSelectedPoId] = useState(null);
+  const [escalating,   setEscalating]   = useState(null); // { order, newDate }
+  const [search,       setSearch]       = useState('');
+  const [filter,       setFilter]       = useState('all');
+  const [dispatch,     setDispatch]     = useState(null);
+  const [confirming,   setConfirming]   = useState(null);
 
   const { data: orders    = [], isLoading } = useQuery({ queryKey:['orders'],    queryFn:()=>api.get('/orders').then(r=>r.data).catch(()=>[]),    refetchInterval:20000 });
   const { data: suppliers = [] }            = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data).catch(()=>[]) });
@@ -626,6 +767,29 @@ export default function DeliveryHubPage() {
   const { data: shippers  = [] }            = useQuery({ queryKey:['shippers'],  queryFn:()=>api.get('/shippers').then(r=>r.data).catch(()=>[]) });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
+
+  // Auto-open order from URL param ?order=<id> (e.g. navigated from Procurement Send to Hub)
+  useEffect(() => {
+    if (!orders.length) return;
+    const params = new URLSearchParams(window.location.search);
+    const orderId = params.get('order');
+    const poId    = params.get('po');
+    if (!orderId) return;
+    const target = orders.find(o => o.id === orderId);
+    if (target) {
+      setSelected(target);
+      if (poId) setSelectedPoId(poId);
+      // Clean the URL so refreshing doesn't re-open
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [orders]);
+  const isInTransitToCustomer = (o) => ['partial_dispatched','transit_customer'].includes(o.status);
+  const hasGRNProgress = (o) => {
+    const items = o.lineItems || [];
+    const byLine = items.some(li => ['ready_to_ship','grn_partial','grn_rejected'].includes(li.line_status));
+    const byStatus = ['in_hub','partial_hub'].includes(o.status);
+    return byLine || byStatus;
+  };
 
   // Delivery Hub = orders where ALL POs are received (line items at delivered_hub or ready_to_ship)
   // OR orders with status='delivery_hub'
@@ -655,16 +819,16 @@ export default function DeliveryHubPage() {
              custName(o.customer_id).toLowerCase().includes(q) ||
              (o.lineItems||[]).some(li=>(li.component||'').toLowerCase().includes(q));
     });
-    if (filter==='pending-grn')   list=list.filter(o=>!['delivery_hub','in_hub','partial_hub','partial_dispatched','transit_customer'].includes(o.status));
-    if (filter==='ready')         list=list.filter(o=>['delivery_hub','in_hub','partial_hub'].includes(o.status));
-    if (filter==='in-transit')    list=list.filter(o=>['partial_dispatched','transit_customer'].includes(o.status));
-    return list;
+    if (filter==='pending-grn')   list=list.filter(o=>!hasGRNProgress(o)&&!isInTransitToCustomer(o));
+    if (filter==='ready')         list=list.filter(o=>hasGRNProgress(o)&&!isInTransitToCustomer(o));
+    if (filter==='in-transit')    list=list.filter(o=>isInTransitToCustomer(o));
+    return list.sort((a,b)=>(b.created_at||b.updated_at||'').localeCompare(a.created_at||a.updated_at||''));
   }, [hubOrders, search, filter]);
 
   // Stats
-  const pendingGRN     = hubOrders.filter(o=>!['delivery_hub','in_hub','partial_hub','partial_dispatched','transit_customer'].includes(o.status)).length;
-  const readyToShip    = hubOrders.filter(o=>['delivery_hub','in_hub','partial_hub'].includes(o.status)).length;
-  const inTransitCust  = hubOrders.filter(o=>['partial_dispatched','transit_customer'].includes(o.status)).length;
+  const pendingGRN     = hubOrders.filter(o=>!hasGRNProgress(o)&&!isInTransitToCustomer(o)).length;
+  const readyToShip    = hubOrders.filter(o=>hasGRNProgress(o)&&!isInTransitToCustomer(o)).length;
+  const inTransitCust  = hubOrders.filter(o=>isInTransitToCustomer(o)).length;
   const totalItems  = hubOrders.flatMap(o=>o.lineItems||[]).filter(li=>['delivered_hub','ready_to_ship'].includes(li.line_status)).length;
 
   return (
@@ -719,12 +883,18 @@ export default function DeliveryHubPage() {
         {filtered.map(order => {
           const allItems   = order.lineItems||[];
           const soList     = order.supplierOrders||[];
-          const grnDone        = ['delivery_hub','in_hub','partial_hub'].includes(order.status);
-          const isInTransit    = ['partial_dispatched','transit_customer'].includes(order.status);
+          const grnDone        = hasGRNProgress(order);
+          const isInTransit    = isInTransitToCustomer(order);
           const shipmentList   = order.shipments||[];
           const orderVal   = allItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
           const hasPartial = allItems.some(li=>li.line_status==='grn_partial');
           const hasReject  = allItems.some(li=>li.line_status==='grn_rejected');
+          // Balance tracking
+          const grnQtyByItem = (order.grnRecords||[]).reduce((m,r)=>{m[r.order_item_id]=(m[r.order_item_id]||0)+(parseInt(r.qty_received)||0);return m;},{});
+          const partialShippedItems = allItems.filter(li=>li.line_status==='partial_shipped');
+          const readyToShipItems    = allItems.filter(li=>['ready_to_ship','grn_partial','delivered_hub'].includes(li.line_status));
+          const hasBalance     = partialShippedItems.length > 0;
+          const hasReadyItems  = readyToShipItems.length > 0;
 
           return (
             <div key={order.id} className="card" style={{
@@ -736,10 +906,12 @@ export default function DeliveryHubPage() {
                   <span className="mono bold" style={{fontSize:14}}>{order.id}</span>
                   <StatusBadge s={order.status}/>
                   {isInTransit && <span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)'}}>🚚 In Transit to Customer</span>}
-                  {grnDone && !isInTransit && <span className="badge badge-green">✅ GRN Done — Ready for Outbound</span>}
-                  {!grnDone && !isInTransit && <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⏳ Pending GRN</span>}
+                  {grnDone && !isInTransit && !hasBalance && <span className="badge badge-green">✅ GRN Done — Ready for Outbound</span>}
+                  {!grnDone && !isInTransit && !hasBalance && <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⏳ Pending GRN</span>}
+                  {hasBalance && <span style={{fontSize:11,color:'var(--purple,#7c3aed)',fontWeight:700,padding:'2px 8px',borderRadius:999,background:'#f5f3ff'}}>⏳ Balance Pending from Supplier</span>}
                   {hasPartial && <span className="badge" style={{background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)'}}>⚠ Short Shipment</span>}
                   {hasReject  && <span className="badge badge-red">❌ Rejected Items</span>}
+                  <DaysBadge updatedAt={order.updated_at||order.created_at} />
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
                   {/* P3: Overdue detection + escalation */}
@@ -763,39 +935,34 @@ export default function DeliveryHubPage() {
                       </span>
                     );
                   })()}
-                  {isInTransit ? (
-                    <button className="btn btn-xs"
-                      style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
-                      onClick={()=>setConfirming(order)}>
-                      ✅ Mark Received by Customer
-                    </button>
-                  ) : !grnDone ? (
-                    <div style={{display:'flex',gap:6}}>
-                      <button className="btn btn-xs btn-primary" onClick={()=>setSelected(order)}>
-                        📋 Record GRN
+                  <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                    {/* Overdue escalation */}
+                    {(()=>{
+                      const today = new Date().toISOString().slice(0,10);
+                      const isOverdue = order.tentative_date && order.tentative_date < today && !isInTransit;
+                      if (!isOverdue) return null;
+                      const level = order.escalation_level || 0;
+                      return (
+                        <button className="btn btn-xs"
+                          style={{color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontSize:11}}
+                          onClick={()=>setEscalating({order, newDate:''})}>
+                          {level>=1?'🔴 Re-escalate':'⚠ Escalate'}
+                        </button>
+                      );
+                    })()}
+                    {/* Mark Received: for dispatched shipments awaiting customer */}
+                    {isInTransit && (
+                      <button className="btn btn-xs"
+                        style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                        onClick={()=>{
+                          const activeShipment = (shipmentList||[]).find(s=>s.status!=='delivered') || shipmentList[0] || null;
+                          if (!activeShipment) { toast.error('No shipment found for this order'); return; }
+                          setConfirming({ order, shipment: activeShipment });
+                        }}>
+                        ✅ Mark Received by Customer
                       </button>
-                      {/* P3: Escalation button — shown when overdue */}
-                      {(()=>{
-                        const today = new Date().toISOString().slice(0,10);
-                        const isOverdue = order.tentative_date && order.tentative_date < today;
-                        if (!isOverdue) return null;
-                        const level = order.escalation_level || 0;
-                        return (
-                          <button className="btn btn-xs"
-                            style={{color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontSize:11}}
-                            onClick={()=>setEscalating({order, newDate:''})}>
-                            {level>=1?'🔴 Re-escalate':'⚠ Escalate'}
-                          </button>
-                        );
-                      })()}
-                    </div>
-                  ) : (
-                    <button className="btn btn-xs btn-primary"
-                      style={{background:'var(--teal,#0d9488)',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
-                      onClick={()=>setDispatch(order)}>
-                      📦 Create Shipment →
-                    </button>
-                  )}
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -842,42 +1009,162 @@ export default function DeliveryHubPage() {
                   </div>
                 </div>
               )}
-              {/* Line items summary — shown for non-transit orders */}
-              {!isInTransit && (
-              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-                {allItems.map(li=>{
-                  const statusColor = {
-                    delivered_hub:  'var(--teal,#0d9488)',
-                    ready_to_ship:  'var(--green)',
-                    grn_partial:    'var(--amber,#d97706)',
-                    grn_rejected:   'var(--red)',
-                  }[li.line_status] || 'var(--text3)';
-                  const statusLabel = {
-                    delivered_hub: '📦 At Hub',
-                    ready_to_ship: '✅ Ready',
-                    grn_partial:   '⚠ Partial',
-                    grn_rejected:  '❌ Rejected',
-                  }[li.line_status] || li.line_status;
-                  return (
-                    <div key={li.id} style={{padding:'4px 10px',borderRadius:'var(--r-sm)',fontSize:11,
-                      background:'var(--surface2)',border:`1px solid ${statusColor}33`,fontWeight:600}}>
-                      <span style={{color:statusColor}}>{statusLabel}</span>
-                      <span style={{marginLeft:5}}>{li.component}</span>
-                      <span style={{color:'var(--text3)',marginLeft:4}}>×{li.qty}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              )}
+              {/* ── Per-supplier PO breakdown ── */}
+              {(()=>{
+                const shippedQtyMap = (order.shipments||[]).flatMap(s=>s.items||[]).reduce((m,si)=>{
+                  m[si.order_item_id]=(m[si.order_item_id]||0)+(parseInt(si.qty_shipped)||0);
+                  return m;
+                },{});
+                const HUB_PO_STATUSES = ['in_transit', 'partially_received', 'received'];
+                const HUB_LINE_STATUSES = ['delivered_hub', 'ready_to_ship', 'grn_partial', 'grn_rejected', 'partial_shipped', 'shipped'];
+                const visibleSoList = soList.filter(so => {
+                  if (HUB_PO_STATUSES.includes(so.status)) return true;
+                  const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+                  return soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status));
+                });
+                const LINE_ICON = {
+                  delivered_hub:   {ic:'📦',l:'At Hub',       c:'var(--teal,#0d9488)'},
+                  ready_to_ship:   {ic:'✅',l:'Ready',         c:'var(--green)'},
+                  grn_partial:     {ic:'⚠', l:'Partial GRN',  c:'var(--amber,#d97706)'},
+                  grn_rejected:    {ic:'❌',l:'Rejected',      c:'var(--red)'},
+                  partial_shipped: {ic:'🔄',l:'Bal. Pending',  c:'var(--purple,#7c3aed)'},
+                  shipped:         {ic:'🚚',l:'Shipped Out',   c:'var(--text3)'},
+                  procurement:     {ic:'🛒',l:'Procurement',   c:'var(--text3)'},
+                };
+
+                // Only show standalone items that have actually reached hub-side statuses.
+                const unPoedItems = allItems.filter(li =>
+                  HUB_LINE_STATUSES.includes(li.line_status) &&
+                  !visibleSoList.some(so => (so.items||[]).includes(li.id))
+                );
+
+                return (
+                  <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:4}}>
+                    {visibleSoList.map(so=>{
+                      const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+                      if (!soItems.length) return null;
+                      const totOrdered  = soItems.reduce((s,li)=>s+(li.qty||0),0);
+                      const totRcvd     = soItems.reduce((s,li)=>s+(grnQtyByItem[li.id]||0),0);
+                      const totPending  = totOrdered - totRcvd;
+                      const totShipped  = soItems.reduce((s,li)=>s+(shippedQtyMap[li.id]||0),0);
+                      const totBalShip  = Math.max(0, totRcvd - totShipped); // received but not yet shipped to customer
+                      const supName     = suppliers.find(s=>s.id===so.supplier_id)?.name||'—';
+                      const poStatus    = so.status;
+                      const headerBg    = poStatus==='received'?'var(--green-lt)':totPending>0?'#f5f3ff':'var(--surface2)';
+                      const headerBord  = poStatus==='received'?'var(--green)':totPending>0?'#c4b5fd':'var(--border)';
+                      const headerCol   = poStatus==='received'?'var(--green)':totPending>0?'var(--purple,#7c3aed)':'var(--text2)';
+                      return (
+                        <div key={so.id} style={{borderRadius:'var(--r-sm)',border:`1.5px solid ${headerBord}`,overflow:'hidden'}}>
+                          {/* Supplier header row */}
+                          <div style={{padding:'7px 12px',background:headerBg,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:6}}>
+                            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                              <span style={{fontWeight:700,fontSize:12,color:headerCol}}>
+                                {poStatus==='received'?'✅':'⏳'} {supName}
+                              </span>
+                              <span className="mono" style={{fontSize:11,color:'var(--text3)'}}>
+                                {so.internal_po_no||so.id}
+                              </span>
+                              {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>🚚 {so.tracking_no}</span>}
+                            </div>
+                            <div style={{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>
+                              <span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--surface)',border:'1px solid var(--border)',color:'var(--text2)',fontWeight:600}}>Ordered: {totOrdered}</span>
+                              {totRcvd>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--green-lt)',color:'var(--green)',fontWeight:700,border:'1px solid var(--green)44'}}>✅ Rcvd: {totRcvd}</span>}
+                              {totPending>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'#f5f3ff',color:'var(--purple,#7c3aed)',fontWeight:700,border:'1px solid #c4b5fd'}}>⏳ Pending: {totPending}</span>}
+                              {totBalShip>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700,border:'1px solid var(--amber,#d97706)44'}}>📦 At Hub: {totBalShip}</span>}
+                              {totShipped>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700,border:'1px solid var(--teal,#0d9488)44'}}>🚚 Shipped: {totShipped}</span>}
+                              {/* Per-supplier action buttons */}
+                              {(()=>{
+                                const needsGRN = totPending > 0 || soItems.some(li=>['delivered_hub','grn_partial','partial_shipped'].includes(li.line_status));
+                                const canShip  = totBalShip > 0;
+                                return (
+                                  <div style={{display:'flex',gap:4,marginLeft:4}}>
+                                    {needsGRN && (
+                                      <button className="btn btn-xs btn-primary"
+                                        style={{fontSize:10,padding:'2px 8px'}}
+                                        onClick={()=>{ setSelected(order); setSelectedPoId(so.id); }}>
+                                        📋 {totRcvd>0&&totPending>0 ? 'Balance GRN' : 'Record GRN'}
+                                      </button>
+                                    )}
+                                    {canShip && (
+                                      <button className="btn btn-xs"
+                                        style={{fontSize:10,padding:'2px 8px',
+                                          background:'var(--teal,#0d9488)',color:'#fff',
+                                          borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                                        onClick={()=>setDispatch(order)}>
+                                        📦 Ship Now →
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          </div>
+                          {/* Per-item detail rows */}
+                          <div style={{background:'var(--surface)'}}>
+                            {soItems.map((li,idx)=>{
+                              const rcvd    = grnQtyByItem[li.id]||0;
+                              const shipped = shippedQtyMap[li.id]||0;
+                              const pending = (li.qty||0) - rcvd;
+                              const atHub   = Math.max(0, rcvd - shipped);
+                              const li_info = LINE_ICON[li.line_status]||{ic:'·',l:li.line_status||'—',c:'var(--text3)'};
+                              return (
+                                <div key={li.id} style={{
+                                  display:'grid',
+                                  gridTemplateColumns:'1fr 60px 60px 60px 60px 80px',
+                                  gap:0,fontSize:11,padding:'5px 12px',
+                                  borderTop: idx===0?'none':'0.5px solid var(--border)',
+                                  alignItems:'center'}}>
+                                  <span style={{fontWeight:600,color:'var(--accent)'}}>{li.component}</span>
+                                  <span style={{textAlign:'center',color:'var(--text2)',fontWeight:600}}>×{li.qty}</span>
+                                  <span style={{textAlign:'center',fontWeight:700,color:rcvd>0?'var(--green)':'var(--text3)'}}>{rcvd>0?rcvd:'—'}</span>
+                                  <span style={{textAlign:'center',fontWeight:700,color:pending>0?'var(--purple,#7c3aed)':'var(--text3)'}}>{pending>0?pending:'✓'}</span>
+                                  <span style={{textAlign:'center',fontWeight:700,color:atHub>0?'var(--amber,#d97706)':'var(--text3)'}}>{atHub>0?atHub:'—'}</span>
+                                  <span style={{textAlign:'right',fontWeight:600,color:li_info.c,fontSize:10}}>{li_info.ic} {li_info.l}</span>
+                                </div>
+                              );
+                            })}
+                            {/* Column label row */}
+                            <div style={{display:'grid',gridTemplateColumns:'1fr 60px 60px 60px 60px 80px',
+                              gap:0,padding:'3px 12px',background:'var(--surface2)',
+                              borderTop:'0.5px solid var(--border)',fontSize:9,fontWeight:700,color:'var(--text3)',letterSpacing:.4}}>
+                              <span>COMPONENT</span>
+                              <span style={{textAlign:'center'}}>ORDERED</span>
+                              <span style={{textAlign:'center',color:'var(--green)'}}>RCVD</span>
+                              <span style={{textAlign:'center',color:'var(--purple,#7c3aed)'}}>PENDING</span>
+                              <span style={{textAlign:'center',color:'var(--amber,#d97706)'}}>AT HUB</span>
+                              <span style={{textAlign:'right'}}>STATUS</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {/* Items with no PO */}
+                    {unPoedItems.length>0&&(
+                      <div style={{borderRadius:'var(--r-sm)',border:'1.5px solid var(--border)',overflow:'hidden'}}>
+                        <div style={{padding:'6px 12px',background:'var(--surface2)',fontSize:11,fontWeight:700,color:'var(--text3)'}}>
+                          ⚠ Items not yet assigned to a supplier PO
+                        </div>
+                        {unPoedItems.map((li,idx)=>(
+                          <div key={li.id} style={{display:'flex',gap:10,fontSize:11,padding:'5px 12px',
+                            borderTop:idx===0?'none':'0.5px solid var(--border)',alignItems:'center'}}>
+                            <span style={{fontWeight:600}}>{li.component}</span>
+                            <span style={{color:'var(--text3)'}}>×{li.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           );
         })}
       </div>
 
       {selected && (
-        <GRNModal order={selected} suppliers={suppliers}
-          onClose={()=>setSelected(null)}
-          onSaved={()=>{ setSelected(null); qc.invalidateQueries(['orders']); }}/>
+        <GRNModal order={selected} suppliers={suppliers} filterPoId={selectedPoId}
+          onClose={()=>{ setSelected(null); setSelectedPoId(null); }}
+          onSaved={()=>{ setSelected(null); setSelectedPoId(null); qc.invalidateQueries(['orders']); }}/>
       )}
 
       {/* P3: Escalation modal */}

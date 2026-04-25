@@ -24,6 +24,10 @@ export default function DashboardPage() {
   const searchRef = useRef(null);
   const debounceRef = useRef(null);
 
+  // ── Financial Dashboard State ──────────────────────────────────────────────
+  const [finExpanded, setFinExpanded] = useState(true);
+  const [exchangeRate, setExchangeRate] = useState(83); // 1 USD = 83 INR (default)
+
   const doSearch = useCallback(async (q) => {
     if (!q || q.length < 2) { setSearchRes(null); setSearchOpen(false); return; }
     setSearchLoading(true);
@@ -91,7 +95,7 @@ export default function DashboardPage() {
             onChange={handleSearchChange}
             onFocus={()=>{ if(searchRes&&searchQ.length>=2) setSearchOpen(true); }}
             placeholder="Search by MPN, Component, Manufacturer, Order ID, Customer, Supplier…"
-            style={{flex:1,border:'none',background:'transparent',outline:'none',
+            style={{flex:1,border:'none',background:'transparent',
               fontSize:14,color:'var(--text)',fontFamily:'inherit'}}
           />
           {searchLoading && <span style={{fontSize:11,color:'var(--text3)'}}>Searching…</span>}
@@ -286,47 +290,82 @@ export default function DashboardPage() {
 
       {isAdmin && fin && (
         <div className="card" style={{marginBottom:14,border:'1px solid rgba(27,79,158,.2)'}}>
-          <div className="card-title">
-            <div style={{display:'flex',alignItems:'center',gap:9}}>
+          <div className="card-title" style={{cursor:'pointer'}} onClick={()=>setFinExpanded(!finExpanded)}>
+            <div style={{display:'flex',alignItems:'center',gap:9,flex:1}}>
               <span style={{background:'var(--accent)',color:'#fff',fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:999}}>ADMIN</span>
               <span>📊 Financial Dashboard</span>
+              <span style={{marginLeft:'auto',fontSize:16,transition:'transform .2s',transform:finExpanded?'rotate(0deg)':'rotate(-90deg)'}}>▼</span>
             </div>
             <span style={{fontSize:11,color:'var(--text3)'}}>Order values by period</span>
           </div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
-            {[{label:'Today',key:'today',icon:'📅',color:'var(--teal)'},{label:'This Month',key:'month',icon:'🗓️',color:'var(--accent)'},{label:'This Year',key:'year',icon:'📆',color:'var(--purple)'},{label:'All Time',key:'all',icon:'🏆',color:'var(--green)'}].map(({label,key,icon,color})=>(
-              <div key={key} style={{background:'var(--surface2)',borderRadius:'var(--r)',padding:'14px 16px',borderLeft:`3px solid ${color}`}}>
-                <div style={{fontSize:12,color:'var(--text2)',marginBottom:6,fontWeight:600}}>{icon} {label}</div>
-                <div style={{fontSize:20,fontWeight:700,color,marginBottom:4}}>{fin[key].orders.length}<span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:5}}>orders</span></div>
-                <ValuePills totals={fin[key].values} size={12}/>
+
+          {finExpanded && (
+            <>
+              {/* Exchange Rate Input */}
+              <div style={{marginBottom:14,padding:'12px 14px',background:'var(--surface2)',borderRadius:'var(--r)',display:'flex',alignItems:'center',gap:12}}>
+                <label style={{fontSize:12,fontWeight:600,color:'var(--text2)',whiteSpace:'nowrap'}}>Exchange Rate:</label>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <span style={{fontSize:11,color:'var(--text3)'}}>1 USD =</span>
+                  <input
+                    type="number"
+                    value={exchangeRate}
+                    onChange={(e)=>setExchangeRate(parseFloat(e.target.value)||0)}
+                    style={{width:70,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:6,background:'var(--surface)',color:'var(--text)',fontSize:12,fontFamily:'inherit'}}
+                  />
+                  <span style={{fontSize:11,color:'var(--text3)'}}>INR</span>
+                </div>
               </div>
-            ))}
-          </div>
-          <div style={{fontSize:12,fontWeight:600,color:'var(--text2)',marginBottom:8}}>All-time value by currency</div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>Currency</th><th>Total Value</th><th>Open</th><th>Delivered</th><th>Closed</th><th>Failed/Hold</th></tr></thead>
-              <tbody>
-                {(()=>{
-                  const curs=[...new Set(orders.flatMap(o=>(o.lineItems||[]).map(li=>li.currency||'INR')))].sort();
-                  if(!curs.length)return<tr><td colSpan={6} style={{textAlign:'center',color:'var(--text3)',padding:18}}>No data</td></tr>;
-                  return curs.map(cur=>{
-                    const val=grp=>grp.reduce((s,o)=>s+(o.lineItems||[]).filter(li=>(li.currency||'INR')===cur).reduce((ss,li)=>ss+(li.qty*li.unit_price),0),0);
-                    const total=val(orders);
-                    if(!total)return null;
-                    return<tr key={cur}>
-                      <td><span className="mono bold">{cur}</span></td>
-                      <td className="mono bold">{fmtVal(total,cur)}</td>
-                      <td className="mono" style={{color:'var(--amber)'}}>{fmtVal(val(orders.filter(o=>o.status==='open')),cur)}</td>
-                      <td className="mono" style={{color:'var(--green)'}}>{fmtVal(val(orders.filter(o=>o.status==='delivered')),cur)}</td>
-                      <td className="mono" style={{color:'var(--teal)'}}>{fmtVal(val(orders.filter(o=>o.status==='closed')),cur)}</td>
-                      <td className="mono" style={{color:'var(--red)'}}>{fmtVal(val(orders.filter(o=>['failed','hold'].includes(o.status))),cur)}</td>
-                    </tr>;
-                  }).filter(Boolean);
-                })()}
-              </tbody>
-            </table>
-          </div>
+
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
+                {[{label:'Today',key:'today',icon:'📅',color:'var(--teal)'},{label:'This Month',key:'month',icon:'🗓️',color:'var(--accent)'},{label:'This Year',key:'year',icon:'📆',color:'var(--purple)'},{label:'All Time',key:'all',icon:'🏆',color:'var(--green)'}].map(({label,key,icon,color})=>(
+                  <div key={key} style={{background:'var(--surface2)',borderRadius:'var(--r)',padding:'14px 16px',borderLeft:`3px solid ${color}`}}>
+                    <div style={{fontSize:12,color:'var(--text2)',marginBottom:6,fontWeight:600}}>{icon} {label}</div>
+                    <div style={{fontSize:20,fontWeight:700,color,marginBottom:4}}>{fin[key].orders.length}<span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:5}}>orders</span></div>
+                    <ValuePills totals={fin[key].values} size={12}/>
+                  </div>
+                ))}
+              </div>
+              <div style={{fontSize:12,fontWeight:600,color:'var(--text2)',marginBottom:8}}>All-time value by currency</div>
+              <div className="table-wrap">
+                <table>
+                  <thead><tr><th>Currency</th><th>Total Value</th><th>Open</th><th>Delivered</th><th>Closed</th><th>Failed/Hold</th></tr></thead>
+                  <tbody>
+                    {(()=>{
+                      const curs=[...new Set(orders.flatMap(o=>(o.lineItems||[]).map(li=>li.currency||'INR')))].sort();
+                      if(!curs.length)return<tr><td colSpan={6} style={{textAlign:'center',color:'var(--text3)',padding:18}}>No data</td></tr>;
+                      return curs.map(cur=>{
+                        const val=grp=>grp.reduce((s,o)=>s+(o.lineItems||[]).filter(li=>(li.currency||'INR')===cur).reduce((ss,li)=>ss+(li.qty*li.unit_price),0),0);
+                        const total=val(orders);
+                        if(!total)return null;
+
+                        // Calculate conversion for display
+                        const displayVal = (baseVal, baseCur) => {
+                          if (baseCur === 'INR') {
+                            const usd = baseVal / exchangeRate;
+                            return `${fmtVal(baseVal, 'INR')} ($${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(usd)})`;
+                          } else if (baseCur === 'USD') {
+                            const inr = baseVal * exchangeRate;
+                            return `${fmtVal(baseVal, 'USD')} (₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(inr)})`;
+                          } else {
+                            return fmtVal(baseVal, baseCur);
+                          }
+                        };
+
+                        return<tr key={cur}>
+                          <td><span className="mono bold">{cur}</span></td>
+                          <td className="mono bold" style={{fontSize:13}}>{displayVal(total,cur)}</td>
+                          <td className="mono" style={{color:'var(--amber)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='open')),cur)}</td>
+                          <td className="mono" style={{color:'var(--green)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='delivered')),cur)}</td>
+                          <td className="mono" style={{color:'var(--teal)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='closed')),cur)}</td>
+                          <td className="mono" style={{color:'var(--red)',fontSize:12}}>{displayVal(val(orders.filter(o=>['failed','hold'].includes(o.status))),cur)}</td>
+                        </tr>;
+                      }).filter(Boolean);
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
         </div>
       )}
 

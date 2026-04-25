@@ -7,52 +7,10 @@ import api from '../utils/api';
 import { today } from '../utils/helpers';
 import { ALL_MANUFACTURERS, MANUFACTURERS_BY_CAT, CATS } from './LineCardsPage';
 
-// ── Global Tax / VAT rates by country ────────────────────────────────────────
-const TAX_RATES = {
-  'India': [
-    {label:'GST 0%',   rate:0},
-    {label:'GST 5%',   rate:5},
-    {label:'GST 12%',  rate:12},
-    {label:'GST 18%',  rate:18},
-    {label:'GST 28%',  rate:28},
-    {label:'IGST 5%',  rate:5},
-    {label:'IGST 12%', rate:12},
-    {label:'IGST 18%', rate:18},
-    {label:'IGST 28%', rate:28},
-  ],
-  'Singapore': [{label:'GST 0%',rate:0},{label:'GST 9%',rate:9}],
-  'United Arab Emirates': [{label:'VAT 0%',rate:0},{label:'VAT 5%',rate:5}],
-  'United States': [{label:'No Tax (0%)',rate:0},{label:'Tax 5%',rate:5},{label:'Tax 8%',rate:8},{label:'Tax 10%',rate:10}],
-  'United Kingdom': [{label:'VAT 0%',rate:0},{label:'VAT 5%',rate:5},{label:'VAT 20%',rate:20}],
-  'Germany': [{label:'VAT 0%',rate:0},{label:'VAT 7%',rate:7},{label:'VAT 19%',rate:19}],
-  'France':  [{label:'VAT 0%',rate:0},{label:'VAT 5.5%',rate:5.5},{label:'VAT 10%',rate:10},{label:'VAT 20%',rate:20}],
-  'Netherlands':[{label:'VAT 0%',rate:0},{label:'VAT 9%',rate:9},{label:'VAT 21%',rate:21}],
-  'Italy':   [{label:'VAT 0%',rate:0},{label:'VAT 5%',rate:5},{label:'VAT 10%',rate:10},{label:'VAT 22%',rate:22}],
-  'Spain':   [{label:'VAT 0%',rate:0},{label:'VAT 4%',rate:4},{label:'VAT 10%',rate:10},{label:'VAT 21%',rate:21}],
-  'Sweden':  [{label:'VAT 0%',rate:0},{label:'VAT 6%',rate:6},{label:'VAT 12%',rate:12},{label:'VAT 25%',rate:25}],
-  'Malaysia':  [{label:'SST 0%',rate:0},{label:'SST 6%',rate:6},{label:'SST 10%',rate:10}],
-  'Australia': [{label:'GST 0%',rate:0},{label:'GST 10%',rate:10}],
-  'Canada':    [{label:'GST 0%',rate:0},{label:'GST 5%',rate:5},{label:'HST 13%',rate:13},{label:'HST 15%',rate:15}],
-  'Japan':     [{label:'Tax 0%',rate:0},{label:'Tax 8%',rate:8},{label:'Tax 10%',rate:10}],
-  'China':     [{label:'VAT 0%',rate:0},{label:'VAT 6%',rate:6},{label:'VAT 9%',rate:9},{label:'VAT 13%',rate:13}],
-  'South Korea':[{label:'VAT 0%',rate:0},{label:'VAT 10%',rate:10}],
-  'Taiwan':    [{label:'VAT 0%',rate:0},{label:'VAT 5%',rate:5}],
-  'Saudi Arabia':[{label:'VAT 0%',rate:0},{label:'VAT 15%',rate:15}],
-  'Qatar':   [{label:'No Tax (0%)',rate:0}],
-  'Bahrain': [{label:'VAT 0%',rate:0},{label:'VAT 10%',rate:10}],
-  'Kuwait':  [{label:'No Tax (0%)',rate:0}],
-  'Oman':    [{label:'VAT 0%',rate:0},{label:'VAT 5%',rate:5}],
-};
-const DEFAULT_TAX_RATES = [
-  {label:'No Tax (0%)',rate:0},{label:'Tax 5%',rate:5},{label:'Tax 10%',rate:10},
-  {label:'Tax 15%',rate:15},{label:'Tax 20%',rate:20},
-];
-const getTaxRates = (country) => TAX_RATES[country] || DEFAULT_TAX_RATES;
-
 const BUYING_TYPES = ['Shortage','Tactical','NPI','R&D','Production','Testing'];
 
 // ── Quick Add Line Card modal ─────────────────────────────────────────────────
-function AddLinecardModal({ prefillName, onClose, onSaved }) {
+export function AddLinecardModal({ prefillName, onClose, onSaved }) {
   const qc = useQueryClient();
   const [form, setForm] = React.useState({ name:prefillName||'', category:'Semiconductors', description:'' });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
@@ -107,7 +65,7 @@ function AddLinecardModal({ prefillName, onClose, onSaved }) {
 }
 
 // ── Manufacturer combo field ──────────────────────────────────────────────────
-function ManufacturerField({ value, onChange, linecards, onAddNew }) {
+export function ManufacturerField({ value, onChange, linecards, onAddNew }) {
   const [open,    setOpen]    = React.useState(false);
   const [search,  setSearch]  = React.useState('');
   const [cursor,  setCursor]  = React.useState(-1);
@@ -171,10 +129,10 @@ function ManufacturerField({ value, onChange, linecards, onAddNew }) {
   };
 
   return (
-    <div style={{position:'relative'}}>
+    <div className="field-wrap" style={{position:'relative'}}>
       <div style={{display:'flex',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'hidden',background:'var(--surface)'}}>
         <input ref={inputRef} className="input"
-          style={{border:'none',flex:1,borderRadius:0,boxShadow:'none'}}
+          style={{border:'none',flex:1,borderRadius:0}}
           value={open ? search : value}
           placeholder="Type or select manufacturer…"
           autoComplete="off"
@@ -344,7 +302,9 @@ function BulkUploadModal({ onClose, onImport }) {
 export default function NewEnquiryPage() {
   const navigate = useNavigate();
   const location  = useLocation();
-  const editEnq   = location.state?.editEnquiry || null;
+  const editEnq       = location.state?.editEnquiry || null;
+  const returnToOrder = location.state?.returnToOrder || false;
+  const existingOrder = location.state?.existingOrder || null;
   const qc = useQueryClient();
   const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data) });
   const { data: users=[] }     = useQuery({ queryKey:['users'],     queryFn:()=>api.get('/users').then(r=>r.data) });
@@ -372,16 +332,15 @@ export default function NewEnquiryPage() {
         quantity:               it.quantity || '',
         preferred_delivery_date:it.preferred_delivery_date || '',
         date_code:              it.date_code || '',
-        tax_rate:               it.tax_rate  || '',
       }));
     }
-    return [{ id:'i1', component:'', ipn:'', manufacturer:'', target_price:'', target_currency:'INR', quantity:'', preferred_delivery_date:'', date_code:'', tax_rate:'' }];
+    return [{ id:'i1', component:'', ipn:'', manufacturer:'', target_price:'', target_currency:'INR', quantity:'', preferred_delivery_date:'', date_code:'' }];
   });
 
   const addItem    = () => setItems(p=>[...p,{
     id:'i'+Date.now(), component:'', ipn:'', manufacturer:'',
     target_price:'', target_currency:'INR',
-    quantity:'', preferred_delivery_date:'', date_code:'', tax_rate:'',
+    quantity:'', preferred_delivery_date:'', date_code:'',
   }]);
   const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
   const updateItem = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
@@ -398,7 +357,6 @@ export default function NewEnquiryPage() {
       quantity:                r.quantity || '',
       preferred_delivery_date: r.preferred_delivery_date || '',
       date_code:               r.date_code || '',
-      tax_rate:                '',
     }));
     setItems(prev => {
       const hasData = prev.some(it=>it.component.trim());
@@ -410,10 +368,14 @@ export default function NewEnquiryPage() {
   const validate = (mode) => {
     if (!form.customer_id) { toast.error('Select a customer'); return null; }
     const valid = items.filter(i=>i.component.trim());
+    // Draft: allow saving with no items yet (just customer selected)
+    if (mode === 'draft') return valid.length ? valid : [];
     if (!valid.length) { toast.error('Add at least one component'); return null; }
     if (mode === 'submit') {
+      if (!form.buying_type) { toast.error('Buying Type is required'); return null; }
       for (let i = 0; i < valid.length; i++) {
         if (!valid[i].manufacturer.trim()) { toast.error('Item ' + (i+1) + ': Manufacturer is required'); return null; }
+        if (!valid[i].quantity || Number(valid[i].quantity) <= 0) { toast.error('Item ' + (i+1) + ': Quantity is required'); return null; }
         if (!valid[i].preferred_delivery_date) { toast.error('Item ' + (i+1) + ': Delivery Date is required'); return null; }
       }
     }
@@ -423,7 +385,11 @@ export default function NewEnquiryPage() {
   const mutation = useMutation({
     mutationFn: d => {
       if (editEnq?.id && d.status === 'draft') return api.put('/enquiries/' + editEnq.id, d);
-      if (editEnq?.id && d.status === 'sourcing') return api.put('/enquiries/' + editEnq.id, d);
+      if (editEnq?.id && d.status === 'sourcing') return api.put('/enquiries/' + editEnq.id, {
+        ...d,
+        existing_order_id: existingOrder?.id || null,
+        _action: returnToOrder ? 'Revised & Resubmitted to Sourcing (from Order)' : 'Revised & Sent to Sourcing',
+      });
       return api.post('/enquiries', d);
     },
     onSuccess: (_,vars) => {
@@ -431,6 +397,9 @@ export default function NewEnquiryPage() {
       qc.invalidateQueries(['summary']);
       if (vars._submitMode === 'draft') {
         toast.success('💾 Saved as draft');
+        navigate('/enquiries');
+      } else if (returnToOrder) {
+        toast.success('✅ Enquiry revised & sent to Sourcing. Once sourcing is done a new quote will appear — create the order from that quote.');
         navigate('/enquiries');
       } else {
         toast.success('✅ Enquiry submitted to Sourcing!');
@@ -440,13 +409,10 @@ export default function NewEnquiryPage() {
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
-  const handleDraft  = () => { const v = validate('draft');  if (v) mutation.mutate({ ...form, status:'draft',    items:v, _submitMode:'draft'  }); };
+  const handleDraft  = () => { const v = validate('draft');  if (v !== null) mutation.mutate({ ...form, status:'draft',    items:v, _submitMode:'draft'  }); };
   const handleSubmit = () => { const v = validate('submit'); if (v) mutation.mutate({ ...form, status:'sourcing', items:v, _submitMode:'submit' }); };
 
   const sourcingUsers = users.filter(u=>u.department==='sourcing'||['admin','manager'].includes(u.role));
-  const selectedCustomer = customers.find(c=>c.id===form.customer_id) || null;
-  const customerCountry  = selectedCustomer?.country || selectedCustomer?.billing_country || 'India';
-  const applicableTaxRates = getTaxRates(customerCountry);
   const busy = mutation.isPending;
 
   const cols = [
@@ -471,16 +437,7 @@ export default function NewEnquiryPage() {
       render:(li,idx)=><input className="input" value={li.date_code} placeholder="2023+" onChange={e=>updateItem(idx,'date_code',e.target.value)} /> },
     { key:'preferred_delivery_date', label:'Delivery Date *', flex:'1.1 1 110px',
       render:(li,idx)=><input className="input" type="date" value={li.preferred_delivery_date} onChange={e=>updateItem(idx,'preferred_delivery_date',e.target.value)} /> },
-    { key:'tax_rate', label:'Tax / VAT', flex:'1.1 1 95px',
-      render:(li,idx)=>(
-        <select className="input" value={li.tax_rate} onChange={e=>updateItem(idx,'tax_rate',e.target.value)}>
-          <option value="">— Tax —</option>
-          {applicableTaxRates.map(t=>(
-            <option key={t.label} value={t.rate}>{t.label}</option>
-          ))}
-        </select>
-      ),
-    },
+
     { key:'base_value', label:'Base Value', flex:'1 1 88px',
       render:(li)=>{
         const qty = Number(li.quantity)||0;
@@ -498,23 +455,20 @@ export default function NewEnquiryPage() {
         );
       },
     },
-    { key:'total_price', label:'Total Price', flex:'1.1 1 95px',
+    { key:'total_price', label:'Total Value', flex:'1.1 1 95px',
       render:(li)=>{
         const qty  = Number(li.quantity)||0;
         const up   = Number(li.target_price)||0;
-        const tax  = Number(li.tax_rate)||0;
         if (!qty || !up) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
         const sym  = {INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'};
         const s    = sym[li.target_currency]||li.target_currency+' ';
-        const base = qty * up;
-        const total= base + (base * tax / 100);
+        const total= qty * up;
         return (
-          <div style={{padding:'5px 8px',background:tax>0?'var(--green-lt)':'var(--surface2)',
+          <div style={{padding:'5px 8px',background:'var(--surface2)',
             borderRadius:'var(--r-sm)',fontWeight:700,fontSize:12,textAlign:'right',
-            whiteSpace:'nowrap',border:`1px solid ${tax>0?'var(--green)33':'var(--border)'}`,
+            whiteSpace:'nowrap',border:'1px solid var(--border)',
             color:'var(--text)'}}>
             {s}{total.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})}
-            {tax>0&&<div style={{fontSize:9,color:'var(--green)',fontWeight:600,marginTop:1}}>incl. {tax}% tax</div>}
           </div>
         );
       },
@@ -531,14 +485,39 @@ export default function NewEnquiryPage() {
     <>
     <div style={{maxWidth:1500}}>
       <div className="card">
-        <div className="card-title">{editEnq ? `✏ Edit Draft Enquiry — ${editEnq.id}` : 'New Customer Enquiry'}</div>
+        <div className="card-title">
+          {editEnq
+            ? returnToOrder
+              ? `🔄 Modify Enquiry — ${editEnq.id} (Revising for Order)`
+              : `✏ Edit Enquiry — ${editEnq.id}`
+            : 'New Customer Enquiry'}
+        </div>
+
+        {/* ── Return-to-Order banner ── */}
+        {returnToOrder && (
+          <div style={{padding:'10px 14px',borderRadius:'var(--r-sm)',marginBottom:14,
+            background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)44',
+            fontSize:13,display:'flex',alignItems:'flex-start',gap:10}}>
+            <span style={{fontSize:18,lineHeight:1.2,flexShrink:0}}>ℹ️</span>
+            <div>
+              <div style={{fontWeight:700,color:'var(--amber,#d97706)',marginBottom:3}}>Modifying from Order Creation</div>
+              <div style={{color:'var(--text2)',lineHeight:1.5}}>
+                You can add, remove, or update component requirements below.
+                After clicking <strong>Submit to Sourcing →</strong>, sourcing will re-price the items
+                and generate a new quote. Come back to <strong>Quotes</strong> to create the order from the updated quote.
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="section-divider">Customer Details</div>
 
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:13,marginBottom:13}}>
           <div className="form-group">
             <label className="label">Customer <span className="req">*</span></label>
-            <select className="input" value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}>
+            <select className="input" value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}
+              disabled={!!(editEnq?.customer_id)}
+              style={editEnq?.customer_id ? {opacity:0.7,cursor:'not-allowed',background:'var(--surface2)'} : {}}>
               <option value="">— Select Customer —</option>
               {customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
@@ -559,7 +538,7 @@ export default function NewEnquiryPage() {
             </select>
           </div>
           <div className="form-group">
-            <label className="label">Buying Type</label>
+            <label className="label">Buying Type <span className="req">*</span></label>
             <select className="input" value={form.buying_type} onChange={e=>setForm(f=>({...f,buying_type:e.target.value}))}>
               <option value="">— Select Type —</option>
               {BUYING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}

@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -16,6 +17,7 @@ export default function SettingsPage() {
   const [editTmpl, setEditTmpl] = useState(null);
   const [newTmpl, setNewTmpl] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [confirmDeleteTmpl, setConfirmDeleteTmpl] = useState(null); // template id to delete
 
   const effectiveMode = poMode ?? settings.po_mode ?? 'external';
 
@@ -43,7 +45,6 @@ export default function SettingsPage() {
   };
 
   const deleteTemplate = async (id) => {
-    
     try {
       await api.delete('/po-templates/'+id);
       qc.invalidateQueries(['po-templates']);
@@ -168,7 +169,7 @@ export default function SettingsPage() {
                 </div>
                 <div style={{display:'flex',gap:7}}>
                   <button className="btn btn-xs" onClick={()=>setEditTmpl(t)}>✏ Edit</button>
-                  {!t.is_default&&<button className="btn btn-xs btn-danger" onClick={()=>deleteTemplate(t.id)}>🗑</button>}
+                  {!t.is_default&&<button className="btn btn-xs btn-danger" onClick={()=>setConfirmDeleteTmpl(t.id)}>🗑</button>}
                 </div>
               </div>
             </div>
@@ -181,6 +182,13 @@ export default function SettingsPage() {
         tmpl={editTmpl||newTmpl}
         onClose={()=>{setEditTmpl(null);setNewTmpl(null);}}
         onSave={saveTemplate}/>}
+      {confirmDeleteTmpl && (
+        <ConfirmDeleteModal
+          message={"Are you sure you want to delete this PO template? This cannot be undone."}
+          onConfirm={() => { deleteTemplate(confirmDeleteTmpl); setConfirmDeleteTmpl(null); }}
+          onCancel={() => setConfirmDeleteTmpl(null)}
+        />
+      )}
     </div>
   );
 }

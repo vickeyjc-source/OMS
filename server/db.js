@@ -27,7 +27,7 @@ function convertQuery(sql, params) {
 
   // SQLite INSERT OR REPLACE → PostgreSQL upserts for the two tables that use it
   q = q.replace(
-    /INSERT OR REPLACE INTO customer_shipping VALUES\(\$1,\$2,\$3,\$4,\$5,\$6\)/i,
+    /INSERT OR REPLACE INTO customer_shipping(?:\(order_id,status,shipper_id,tracking_no,delivery_date,comments\))? VALUES\(\$1,\$2,\$3,\$4,\$5,\$6\)/i,
     `INSERT INTO customer_shipping(order_id,status,shipper_id,tracking_no,delivery_date,comments)
      VALUES($1,$2,$3,$4,$5,$6)
      ON CONFLICT(order_id) DO UPDATE SET
@@ -205,6 +205,8 @@ async function createSchema() {
     CREATE TABLE IF NOT EXISTS customer_payments (
       id TEXT PRIMARY KEY,
       order_id TEXT NOT NULL,
+      customer_po_no TEXT DEFAULT '',
+      finance_po_no TEXT DEFAULT '',
       pi_no TEXT DEFAULT '',
       pi_sent_at TEXT DEFAULT '',
       payment_type TEXT DEFAULT 'advance',
@@ -258,12 +260,15 @@ async function createSchema() {
       customer_response_date TEXT DEFAULT NULL,
       customer_response_notes TEXT DEFAULT NULL,
       customer_response_by TEXT DEFAULT NULL,
-      sales_revision_notes TEXT DEFAULT NULL
+      sales_revision_notes TEXT DEFAULT NULL,
+      sent_to_customer INTEGER DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS orders (
       id TEXT PRIMARY KEY, customer_ref TEXT, customer_id TEXT NOT NULL,
       enquiry_id TEXT, quote_id TEXT, po_number TEXT, po_file_ref TEXT,
       enquiry_no TEXT, quote_no TEXT, tentative_date TEXT,
+      finance_po_no TEXT DEFAULT '',
+      po_generated_at TEXT DEFAULT '',
       status TEXT DEFAULT 'open', created_by TEXT,
       created_at TEXT NOT NULL, closed_at TEXT, notes TEXT,
       delivery_address TEXT DEFAULT ''
@@ -346,89 +351,29 @@ async function createSchema() {
       id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL,
       order_item_id TEXT NOT NULL, qty_shipped INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS stock_inventory (
+      id TEXT PRIMARY KEY,
+      component TEXT NOT NULL,
+      ipn TEXT DEFAULT '',
+      manufacturer TEXT DEFAULT '',
+      linecard_id TEXT DEFAULT NULL,
+      date_code TEXT DEFAULT '',
+      quantity_total INTEGER DEFAULT 0,
+      quantity_available INTEGER DEFAULT 0,
+      target_currency TEXT DEFAULT 'INR',
+      target_price NUMERIC DEFAULT NULL,
+      holder_type TEXT DEFAULT 'warehouse',
+      holder_id TEXT DEFAULT '',
+      holder_name TEXT DEFAULT '',
+      reference_order_id TEXT DEFAULT '',
+      notes TEXT DEFAULT '',
+      added_by TEXT DEFAULT '',
+      added_at TEXT NOT NULL
+    );
   `);
 }
 
-// ── Seed data ─────────────────────────────────────────────────────────────────
-async function seedData() {
-  const today = new Date().toISOString().slice(0,10);
-  const now   = new Date().toISOString().slice(0,16).replace('T',' ');
 
-  for (const u of [
-    ['u1','Admin User','admin','admin@ciflux.com',bcrypt.hashSync('admin123',10),'management','admin','active',today],
-    ['u2','Priya Sharma','manager','priya@ciflux.com',bcrypt.hashSync('pass123',10),'management','manager','active',today],
-    ['u3','Ravi Kumar','sales1','ravi@ciflux.com',bcrypt.hashSync('pass123',10),'sales','user','active',today],
-    ['u4','Anita Patel','ops1','anita@ciflux.com',bcrypt.hashSync('pass123',10),'logistics','user','active',today],
-    ['u5','Vikram Singh','sourcing1','vikram@ciflux.com',bcrypt.hashSync('pass123',10),'sourcing','user','active',today],
-    ['u6','Meena Nair','procure1','meena@ciflux.com',bcrypt.hashSync('pass123',10),'procurement','user','active',today],
-    ['u7','Arjun Das','accounts1','arjun@ciflux.com',bcrypt.hashSync('pass123',10),'accounts','user','active',today],
-    ['u8','Sunita Rao','approver1','sunita@ciflux.com',bcrypt.hashSync('pass123',10),'approvers','user','active',today],
-  ]) await pool.query('INSERT INTO users VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)', u);
-
-  for (const c of [
-    ['C001','TechBridge Electronics','Suresh Nair','suresh@techbridge.in','+91 98400 12345','Bangalore','Karnataka','India','29ABCDE1234F1Z5','active',today],
-    ['C002','Microtek Solutions','Kavya Reddy','kavya@microtek.co.in','+91 98765 43210','Mumbai','Maharashtra','India','27FGHIJ5678K2L6','active',today],
-    ['C003','Precision Circuits Ltd','Ajay Mehta','ajay@precisionc.in','+91 97654 32109','Delhi','Delhi','India','07MNOPQ9012R3S7','active',today],
-  ]) await pool.query('INSERT INTO customers VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)', c);
-
-  for (const l of [
-    ['LC001','Texas Instruments','Semiconductors','Analog ICs, Embedded Processors',today],
-    ['LC002','STMicroelectronics','Semiconductors','MCUs, Power, Sensors',today],
-    ['LC003','Murata Manufacturing','Passive Components','Capacitors, Inductors, Filters',today],
-    ['LC004','Vishay','Passive Components','Resistors, Capacitors, Diodes',today],
-    ['LC005','Molex','Connectors','Connectors and Interconnect Solutions',today],
-    ['LC006','TE Connectivity','Connectors','Connectors, Sensors, Assemblies',today],
-    ['LC007','NXP Semiconductors','Semiconductors','Automotive, IoT, Security ICs',today],
-    ['LC008','Infineon Technologies','Power','Power Semiconductors, MCUs',today],
-  ]) await pool.query('INSERT INTO linecards VALUES($1,$2,$3,$4,$5)', l);
-
-  for (const s of [
-    ['S001','Arrow Electronics India','domestic','Kiran Bhat','kiran@arrow.in','+91 80 4567 8901','arrow.com','Bangalore','Karnataka','India','29AAAAA0000A1Z5','Net 30','INR','active','',today],
-    ['S002','Avnet Asia Pacific','international','James Lee','james@avnet.com.sg','+65 6222 3333','avnet.com','Singapore','','Singapore','','Net 45','USD','active','',today],
-    ['S003','Future Electronics','international','Mike Chan','mike@future.com','+1 514 694 7710','futureelectronics.com','Montreal','','USA','','Net 30','USD','active','',today],
-    ['S004','Ruchika Distributors','domestic','Ramesh Gupta','ramesh@ruchika.co.in','+91 11 2345 6789','','Delhi','Delhi','India','07BBBBB1111B2Z6','Net 15','INR','active','',today],
-  ]) await pool.query(
-    'INSERT INTO suppliers(id,name,type,contact,email,phone,website,city,state,country,gstin,payment_terms,currency,status,notes,created) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)',
-    s
-  );
-
-  for (const [s,l] of [['S001','LC001'],['S001','LC002'],['S002','LC003'],['S002','LC005'],['S003','LC007'],['S003','LC008']])
-    await pool.query('INSERT INTO supplier_linecards VALUES($1,$2)', [s,l]);
-
-  for (const s of [
-    [uuid(),'DHL Express','international','https://www.dhl.com/track?id=','active',today],
-    [uuid(),'FedEx','international','https://www.fedex.com/track?tracknumbers=','active',today],
-    [uuid(),'UPS','international','https://www.ups.com/track?tracknum=','active',today],
-    [uuid(),'TNT','international','https://www.tnt.com/go/en_/site/home/tracking.html?cons=','active',today],
-    [uuid(),'Aramex','international','https://www.aramex.com/us/en/track/shipments?id=','active',today],
-    [uuid(),'Blue Dart','domestic','https://www.bluedart.com/tracking','active',today],
-    [uuid(),'DTDC','domestic','https://www.dtdc.in/trace-tracking.asp','active',today],
-    [uuid(),'Delhivery','domestic','https://www.delhivery.com/track/package/','active',today],
-    [uuid(),'India Post','domestic','https://www.indiapost.gov.in/track','active',today],
-    [uuid(),'Ecom Express','domestic','https://ecomexpress.in/tracking/','active',today],
-  ]) await pool.query('INSERT INTO shippers VALUES($1,$2,$3,$4,$5,$6)', s);
-
-  const enqId = 'ENQ-001';
-  await pool.query('INSERT INTO enquiries VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-    [enqId,'C001','u3','u5','sourcing','normal','Urgent requirement for production',now,now]);
-  await pool.query('INSERT INTO enquiry_items VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
-    [uuid(),enqId,'STM32F103C8T6','LC002','IPN-001','STMicroelectronics',180,'INR',500,'2024-06-01','2023+',1]);
-  await pool.query('INSERT INTO enquiry_history VALUES($1,$2,$3,$4,$5)',
-    [uuid(),enqId,'Enquiry created','Ravi Kumar',now]);
-
-  await pool.query('INSERT INTO orders VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)',
-    ['CFX-001','TB-2024-001','C001',enqId,null,'PO-TB-001','po_tb_001.pdf','ENQ-001','QT-001','2024-04-30','open','u3','2024-04-01',null,'']);
-  await pool.query('INSERT INTO order_items VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
-    ['li1','CFX-001','STM32F103C8T6','STMicroelectronics','IPN-001',500,185,160,'INR','2024-04-02','2024-04-25','S001','procurement',1]);
-  await pool.query('INSERT INTO supplier_orders VALUES($1,$2,$3,$4,$5,$6,$7)',
-    ['so1','CFX-001','S001','PO-S001-001','pending',null,'']);
-  await pool.query('INSERT INTO supplier_order_items VALUES($1,$2)', ['so1','li1']);
-  await pool.query('INSERT INTO customer_shipping VALUES($1,$2,$3,$4,$5,$6)', ['CFX-001','pending',null,'','','']);
-  await pool.query('INSERT INTO order_documents VALUES($1,$2,$3,$4,$5,$6,$7)', ['CFX-001','','','','','po_tb_001.pdf','']);
-  await pool.query('INSERT INTO order_history VALUES($1,$2,$3,$4,$5,$6)', [uuid(),'CFX-001','Order created','Ravi Kumar','',now]);
-
-  console.log('  DB seeded  →  v2 demo data loaded');
-}
 
 // ── initDb ────────────────────────────────────────────────────────────────────
 async function initDb() {
@@ -541,6 +486,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN sourcing_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN buying_type TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN charges TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN tax_rate NUMERIC DEFAULT NULL"); } catch(_) {}
   // ── Migrate quotes — add approval tracking + revision columns ───────────────
   try { await pool.query("ALTER TABLE quotes ADD COLUMN parent_quote_id TEXT DEFAULT NULL"); } catch(_) {}
@@ -550,8 +496,28 @@ async function initDb() {
   try { await pool.query("ALTER TABLE quotes ADD COLUMN customer_response_notes TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE quotes ADD COLUMN customer_response_by TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE quotes ADD COLUMN sales_revision_notes TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE quotes ADD COLUMN sent_to_customer INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE quotes ADD COLUMN updated_at TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sourcing_revision_notes TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sales_comment TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN exchange_rate NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN src_price_foreign NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN hsn_code TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN freight_pct NUMERIC DEFAULT 20"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN insurance_pct NUMERIC DEFAULT 1.125"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN duty_pct NUMERIC DEFAULT 7.5"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN cess_pct NUMERIC DEFAULT 10"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN bank_fixed_usd NUMERIC DEFAULT 15"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN clearance_fixed_inr NUMERIC DEFAULT 1800"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN margin_pct NUMERIC DEFAULT 15"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN freight_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN insurance_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN duty_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN cess_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN bank_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN clearance_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN margin_inr NUMERIC DEFAULT NULL"); } catch(_) {}
   // ── Migrate supplier_orders — add PO workflow columns ─────────────────────
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN internal_po_no TEXT"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN status TEXT DEFAULT 'draft'"); } catch(_) {}
@@ -570,6 +536,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN zoho_po_number TEXT"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN payment_blocked INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN buying_price_per_unit NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN ship_load_date TEXT"); } catch(_) {}
   // ── Migrate orders — add delivery_address ────────────────────────────────────
   try { await pool.query("ALTER TABLE orders ADD COLUMN delivery_address TEXT DEFAULT ''"); } catch(_) {}
   // ── Ensure delivery_hub is a valid order status (no enum constraint in SQLite/PG, just docs) ──
@@ -662,6 +629,20 @@ async function initDb() {
       );
     }
   } catch(_) {}
+  // ── Migrate stock_inventory table ─────────────────────────────────────────────
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN linecard_id TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN ipn TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN date_code TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN quantity_total INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN quantity_available INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN target_currency TEXT DEFAULT 'INR'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN target_price NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN holder_type TEXT DEFAULT 'warehouse'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN holder_id TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN holder_name TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN reference_order_id TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN notes TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE stock_inventory ADD COLUMN added_by TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate enquiry_items — add tax_rate ────────────────────────────────────
   try { await pool.query("ALTER TABLE enquiry_items ADD COLUMN tax_rate NUMERIC DEFAULT 0"); } catch(_) {}
   // ── Migrate order_items — add tax_rate so it flows from sourcing through every stage ──
@@ -677,6 +658,10 @@ async function initDb() {
   // ── Finance: customer_payments table migration ──────────────────────────────
   try { await pool.query("ALTER TABLE orders ADD COLUMN pi_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN pi_sent_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN finance_po_no TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN po_generated_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customer_payments ADD COLUMN customer_po_no TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customer_payments ADD COLUMN finance_po_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN payment_due_date TEXT DEFAULT ''"); } catch(_) {}
   // ── Finance: supplier_orders Phase 2 fields ──────────────────────────────────
@@ -684,12 +669,6 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN expected_ship_date TEXT DEFAULT ''"); } catch(_) {}
   console.log('[DB] All migrations done');
-  const { rows } = await pool.query('SELECT COUNT(*) as n FROM users');
-  if (Number(rows[0].n) === 0) {
-    console.log('[DB] Seeding data...');
-    await seedData();
-    console.log('[DB] Seed done');
-  }
   return pool;
 }
 

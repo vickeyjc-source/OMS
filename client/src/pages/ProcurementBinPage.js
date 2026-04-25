@@ -4,8 +4,10 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, StatusBadge, isDelayed } from '../utils/helpers';
+import { fmt, fmtCur, StatusBadge, isDelayed, DaysBadge } from '../utils/helpers';
+import { printDoc, generateSupplierPOPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 
 const PO_STATUS = {
   draft:                { label:'Draft',                 color:'var(--text3)',          bg:'var(--surface2)',          icon:'📝', step:0 },
@@ -88,20 +90,169 @@ function POProgressTracker({ status, paymentTermsType }) {
   );
 }
 
-function fmtM(n,c='INR'){const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£',AED:'AED '};return(s[c]||c+' ')+(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function fmtM(n,c='INR'){
+  const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£',AED:'AED '};
+  const v=parseFloat(n);
+  if (!Number.isFinite(v)) return (s[c]||c+' ') + '0';
+
+  // Keep precision up to 4 decimals but strip trailing zeros (e.g. 90.0000 -> 90)
+  const normalized = v.toFixed(4).replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
+  const [ip, dp] = normalized.split('.');
+  const intFmt = Number(ip).toLocaleString('en-IN');
+  return (s[c]||c+' ') + (dp ? `${intFmt}.${dp}` : intFmt);
+}
+
+function getSourcedSupplierId(lineItem, enquiry) {
+  const enqItems = enquiry?.items || [];
+  const enqSourcing = enquiry?.sourcing || [];
+  const enqItem = enqItems.find(i => i.id === lineItem.id || i.component === lineItem.component);
+  const srcRow = enqSourcing.find(s => s.enquiry_item_id === lineItem.id)
+    || (enqItem ? enqSourcing.find(s => s.enquiry_item_id === enqItem.id) : null);
+  return srcRow?.supplier_id || lineItem.supplier_id || '';
+}
+
+function getInventoryLabel(inv) {
+  if (!inv) return 'Inventory Stock';
+  const icon = inv.holder_type === 'customer' ? '👤' : inv.holder_type === 'supplier' ? '🏢' : '📦';
+  return icon + ' ' + (inv.holder_display || inv.holder_name || inv.component || 'Inventory Stock');
+}
+
+function buildInventoryMap(inventoryItems) {
+  const map = {};
+  (inventoryItems || []).forEach(inv => {
+    if ((inv.quantity_available || 0) <= 0) return;
+    const comp = (inv.component || '').toLowerCase().trim();
+    const mfr = (inv.manufacturer || '').toLowerCase().trim();
+    if (!comp) return;
+    if (mfr) {
+      const keyed = comp + '|' + mfr;
+      if (!map[keyed]) map[keyed] = [];
+      map[keyed].push(inv);
+    }
+    const fallback = comp + '|';
+    if (!map[fallback]) map[fallback] = [];
+    map[fallback].push(inv);
+  });
+  return map;
+}
+
+function getInventoryHitsForLineItem(lineItem, inventoryMap) {
+  const comp = (lineItem.component || '').toLowerCase().trim();
+  const mfr = (lineItem.manufacturer || '').toLowerCase().trim();
+  if (!comp) return [];
+  return mfr ? (inventoryMap[comp + '|' + mfr] || []) : (inventoryMap[comp + '|'] || []);
+}
 const inputStyle = {
   fontSize:11,
   height:28,
   padding:'4px 6px'
 };
 // ── Allocation Matrix Modal ───────────────────────────────────────────────────
-function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }) {
+function AllocationModal({ order, suppliers, inventoryItems, customers=[], enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
+  const [poRequests, setPoRequests] = React.useState({}); // lineItemId → 'idle'|'sending'|'sent'
+  const allocRef = React.useRef({});
+  // Fulfilled PO requests for this order — fetched on mount so defaultAlloc can pre-fill
+  const [fulfilledPOReqs, setFulfilledPOReqs] = React.useState([]);
+
+  React.useEffect(() => {
+    api.get('/po-requests').then(resp => {
+      const rows = resp.data || [];
+      const forOrder = rows.filter(r => r.order_id === order.id);
+      // Pre-fill fulfilled PI values
+      setFulfilledPOReqs(forOrder.filter(r => r.status === 'fulfilled'));
+      // Restore "waiting" state for requests that were already sent but not yet fulfilled
+      const pending = forOrder.filter(r => r.status === 'pending');
+      if (pending.length) {
+        // We need alloc to map supplier_id → itemId — defer until alloc initialises
+        setTimeout(() => {
+          setAlloc(prev => {
+            setPoRequests(prq => {
+              const next = { ...prq };
+              Object.entries(prev).forEach(([itemId, a]) => {
+                if (!a.supplier_id) return;
+                const hasPending = pending.some(r => r.supplier_id === a.supplier_id);
+                if (hasPending && !a.supplier_ref) next[itemId] = 'sent';
+              });
+              return next;
+            });
+            return prev; // alloc unchanged
+          });
+        }, 500);
+      }
+    }).catch(()=>{});
+  }, [order.id]);
+
+  // Poll for PO requests: auto-fill alloc when Finance fulfills (only for THIS session's sent requests)
+  React.useEffect(() => {
+    const tick = async () => {
+      try {
+        const resp = await api.get('/po-requests');
+        const rows = resp.data || [];
+        const forOrder = rows.filter(r => r.order_id === order.id);
+
+        // Only auto-fill alloc from fulfilled requests — do NOT touch button state from old DB records
+        const fulfilled = forOrder.filter(r => r.status === 'fulfilled');
+        setFulfilledPOReqs(fulfilled);
+        if (fulfilled.length) {
+          setAlloc(prev => {
+            let changed = false;
+            const next = { ...prev };
+            Object.entries(next).forEach(([itemId, a]) => {
+              const fr = fulfilled.find(r => r.supplier_id === a.supplier_id);
+              if (fr && fr.supplier_ref && a.supplier_ref !== fr.supplier_ref) {
+                next[itemId] = { ...a, supplier_ref: fr.supplier_ref, zoho_po_number: fr.zoho_po_number || a.zoho_po_number };
+                // Clear the awaiting state — data is now here, button will hide
+                changed = true;
+              }
+            });
+            return changed ? next : prev;
+          });
+          // Clear awaiting state for items whose supplier_ref is now filled
+          setPoRequests(prev => {
+            const next = { ...prev };
+            let changed = false;
+            Object.entries(allocRef.current).forEach(([itemId, a]) => {
+              if (a.supplier_ref && next[itemId] === 'sent') {
+                delete next[itemId];
+                changed = true;
+              }
+            });
+            return changed ? next : prev;
+          });
+        }
+      } catch(_) {}
+    };
+    const t = setInterval(tick, 5000);
+    // Delay first tick — don't run on open (defaultAlloc not yet synced)
+    const init = setTimeout(tick, 3000);
+    return () => { clearInterval(t); clearTimeout(init); };
+  }, [order.id]);
   // alloc[item_id] = { supplier_id, zoho_po_number, confirmed_price, confirmed_currency,
   //                    promised_delivery_date, payment_terms_type, payment_net_days,
   //                    payment_advance_pct, supplier_ref, notes }
-  // Helper: get live payment terms from supplier record (always fresh, not from saved PO)
+  // Helper: get live payment terms from supplier or customer record (always fresh)
   const getSupplierTerms = (supplierId) => {
+    if (supplierId?.startsWith('__inv__')) {
+      const inv = (inventoryItems||[]).find(i=>i.id===supplierId.slice(7));
+      if (inv?.holder_type === 'customer') {
+        const cust = (customers||[]).find(c=>c.id===inv.holder_id);
+        if (cust) return {
+          payment_terms_type:  cust.payment_terms_type  || 'net',
+          payment_net_days:    cust.payment_net_days     || 30,
+          payment_advance_pct: cust.payment_advance_pct  || 0,
+        };
+      }
+      if (inv?.holder_type === 'supplier') {
+        const sup = suppliers.find(s=>s.id===inv.holder_id);
+        if (sup) return {
+          payment_terms_type:  sup.payment_terms_type  || 'net',
+          payment_net_days:    sup.payment_net_days     || 30,
+          payment_advance_pct: sup.payment_advance_pct  || 0,
+        };
+      }
+      return { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 };
+    }
     const sup = suppliers.find(s=>s.id===supplierId);
     if (!sup) return { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 };
     return {
@@ -120,6 +271,7 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
       const srcRow   = (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
                     || (enqItem ? (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id) : null);
       const resolvedSupplierId = existing?.supplier_id || srcRow?.supplier_id || '';
+      const systemPoRef = order?.finance_po_no || order?.po_number || '';
       // ALWAYS read payment terms from live supplier record
       const liveSup   = suppliers.find(s=>s.id===resolvedSupplierId);
       const liveTerms = {
@@ -127,9 +279,13 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
         payment_net_days:    liveSup?.payment_net_days     || 30,
         payment_advance_pct: liveSup?.payment_advance_pct  || 0,
       };
+      // Auto-fill from latest fulfilled PO request for this supplier
+      const prevFulfilled = fulfilledPOReqs
+        .filter(fr => fr.supplier_id === resolvedSupplierId)
+        .sort((a,b) => new Date(b.fulfilled_at||0) - new Date(a.fulfilled_at||0))[0];
       a[li.id] = {
         supplier_id:            resolvedSupplierId,
-        zoho_po_number:         existing?.zoho_po_number || '',
+        zoho_po_number:         existing?.zoho_po_number || prevFulfilled?.zoho_po_number || '',
         buying_price_per_unit:  existing?.buying_price_per_unit || srcRow?.sourced_price || '',
         confirmed_price:        existing?.confirmed_price ||
                                   (srcRow?.sourced_price && li.qty
@@ -138,8 +294,9 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
         confirmed_currency:     existing?.confirmed_currency || srcRow?.sourced_currency || 'INR',
         promised_delivery_date: existing?.promised_delivery_date || '',
         ...liveTerms,
-        supplier_ref:           existing?.supplier_ref || '',
+        supplier_ref:           existing?.supplier_ref || prevFulfilled?.supplier_ref || '',
         notes:                  existing?.notes || '',
+        _orig_payment_terms_type: liveTerms.payment_terms_type,
         _sourced_price:         srcRow?.sourced_price,
         _sourced_currency:      srcRow?.sourced_currency,
         _sourced_supplier_id:   srcRow?.supplier_id,
@@ -147,9 +304,12 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
       };
     });
     return a;
-  }, [suppliers, order, enquiry]);
+  }, [suppliers, order, enquiry, fulfilledPOReqs]);
 
   const [alloc, setAlloc] = useState({});
+
+  // Keep allocRef in sync so the polling effect can read current alloc without stale closure
+  React.useEffect(() => { allocRef.current = alloc; }, [alloc]);
 
   // Sync alloc when defaultAlloc updates (i.e. when suppliers loads/changes)
   // Only update items the user hasn't manually changed
@@ -166,9 +326,19 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
     });
   }, [defaultAlloc]);
   const [saving, setSaving] = useState(false);
-  const supName = id => suppliers.find(s=>s.id===id)?.name||id;
+  const inventoryMap = useMemo(() => buildInventoryMap(inventoryItems), [inventoryItems]);
+  const inventoryById = useMemo(() => {
+    const map = {};
+    (inventoryItems || []).forEach(inv => { map[inv.id] = inv; });
+    return map;
+  }, [inventoryItems]);
+  const supName = id => {
+    if (!id) return '—';
+    if (id.startsWith('__inv__')) return getInventoryLabel(inventoryById[id.slice(7)]);
+    return suppliers.find(s=>s.id===id)?.name || id;
+  };
 
-  const setA = (itemId, k, v) => setAlloc(a=>({...a,[itemId]:{...a[itemId],[k]:v}}));
+  const setA = (itemId, k, v) => setAlloc(a=>({...a,[itemId]:{...a[itemId],[k]:v,_userEdited:true}}));
 
   // Group items by supplier for preview
   const grouped = useMemo(() => {
@@ -182,6 +352,10 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
   }, [alloc]);
 
   const handleSave = async () => {
+    if (readOnly) {
+      onClose();
+      return;
+    }
     setSaving(true);
     try {
       // Group by supplier and create/update one PO per supplier
@@ -194,17 +368,20 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
       // ADDED: collect responses to check if any PO is advance-blocked
       let anyBlocked = false;
       for (const [supplierId, data] of Object.entries(bySupplier)) {
-        const r = await api.post('/orders/'+order.id+'/po', { ...data, supplier_id: supplierId });
+        const poNotes = data.payment_terms_change_reason
+          ? `[Payment terms changed: ${data.payment_terms_change_reason}]${data.notes ? '\n' + data.notes : ''}`
+          : data.notes || '';
+        const r = await api.post('/orders/'+order.id+'/po', { ...data, supplier_id: supplierId, notes: poNotes });
         if (r.data?.payment_blocked === 1) anyBlocked = true;
       }
       qc.invalidateQueries(['orders']);
+      onSaved();
       if (anyBlocked) {
         // ADDED: supplier advance terms → navigate to Finance (same pattern as customer advance in OrdersPage)
         toast.success('✅ PO raised — Advance payment required. Sending to Finance...');
         setTimeout(() => { window.location.href = '/finance?tab=sup-advance'; }, 1500);
       } else {
         toast.success(`✅ ${Object.keys(bySupplier).length} PO(s) raised!`);
-        onSaved();
       }
     } catch(e) { toast.error(e.response?.data?.error||'Failed'); }
     finally { setSaving(false); }
@@ -216,13 +393,14 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl">
         <div className="modal-header">
-          <div><h2>📋 PO Allocation — {order.id}</h2>
+          <div><h2>{readOnly ? '👁 PO Allocation (View) — ' : '📋 PO Allocation — '}{order.id}</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
               Assign each component to a supplier. One PO will be raised per supplier automatically.
             </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
+        <fieldset disabled={readOnly} style={{border:'none',margin:0,padding:0,minWidth:0}}>
         <div className="modal-body">
           {/* Preview of PO split */}
           {Object.keys(grouped).length > 0 && (
@@ -271,7 +449,7 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                 {items.map((li,i)=>{
                   const a = alloc[li.id]||{};
                   const srcSupplier = a._sourced_supplier_id;
-                  const sup = suppliers.find(s=>s.id===a.supplier_id);
+                  const stockHits = getInventoryHitsForLineItem(li, inventoryMap);
                   const custTotal = (li.qty||0)*(li.unit_price||0);
                   const cost = parseFloat(a.confirmed_price)||0;
                   const margin = custTotal - cost;
@@ -308,7 +486,9 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                       <td>
                         {srcSupplier
                           ? <div>
-                              <div style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>★ {supName(srcSupplier)}</div>
+                              <div style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>
+                                ★ {supName(srcSupplier)}
+                              </div>
                               <div style={{fontSize:10,color:'var(--text3)'}}>Originally sourced</div>
                             </div>
                           : <span style={{color:'var(--text3)',fontSize:11}}>—</span>
@@ -323,13 +503,25 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                           onChange={e=>{
                             const newSupId = e.target.value;
                             setAlloc(prev => {
-                              const liveTerms = getSupplierTerms(newSupId);
+                              const liveTerms = newSupId.startsWith('__inv__')
+                                ? { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 }
+                                : getSupplierTerms(newSupId);
                               return { ...prev, [li.id]: { ...prev[li.id],
                                 supplier_id: newSupId, ...liveTerms, _userEdited: true }};
                             });
                           }}
                           style={{fontSize:11,borderColor:!a.supplier_id?'var(--amber,#d97706)':undefined}}>
                           <option value="">— Select —</option>
+                          {stockHits.length > 0 && (
+                            <optgroup label="Available In Stock">
+                              {stockHits.map(inv => (
+                                <option key={'__inv__' + inv.id} value={'__inv__' + inv.id}>
+                                  {getInventoryLabel(inv)}
+                                </option>
+                              ))}
+                            </optgroup>
+                          )}
+                          {stockHits.length > 0 && suppliers.length > 0 && <option disabled>──────────</option>}
                           {suppliers.map(s=>(
                             <option key={s.id} value={s.id}>
                               {s.id===srcSupplier?'★ '+s.name+' (Sourced)':s.name}
@@ -342,89 +534,49 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                           </div>
                         )}
                       </td>
-                      {/* PI number (advance/split) or Zoho PO (net) + Buying Price */}
+                      {/* Supplier PI / PO request + Buying Price */}
                       <td style={{minWidth:160}}>
-                        {(a.payment_terms_type==='advance'||a.payment_terms_type==='split') ? (
-                          <div>
-                            <input className="input" value={a.supplier_ref||''}
-                              onChange={e=>setA(li.id,'supplier_ref',e.target.value)}
-                              placeholder="Supplier PI No. *"
-                              style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':undefined}}/>
-                            {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ PI required for advance payment</div>}
-                            {/* BUG1 FIX: show price input when supplier differs from sourced, even on advance terms */}
-                            {a.supplier_id && a.supplier_id !== a._sourced_supplier_id && (
-                              <div style={{marginTop:6}}>
-                                <div style={{fontSize:10,color:'var(--text3)',marginBottom:2}}>Negotiated Price / Unit</div>
-                                <input className="input" type="number" step="0.01"
-                                  value={a.buying_price_per_unit||''}
-                                  onChange={e=>{
-                                    const bpu = parseFloat(e.target.value)||0;
-                                    setA(li.id,'buying_price_per_unit',e.target.value);
-                                    setA(li.id,'confirmed_price', bpu*(li.qty||0)>0?(bpu*(li.qty||0)).toFixed(2):'');
-                                  }}
-                                  placeholder="0.00"
-                                  style={{fontSize:11,borderColor:'var(--amber,#d97706)'}}/>
-                                <div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2,fontWeight:600}}>✏ New supplier — enter negotiated price</div>
-                              </div>
-                            )}
-                          </div>
-                        ) : poMode==='external' ? (
-                          <input className="input" value={a.zoho_po_number||''}
-                            onChange={e=>setA(li.id,'zoho_po_number',e.target.value)}
-                            placeholder="Zoho PO ref" style={{fontSize:11}}/>
-                        ) : (
-                          <div>
-                            <div style={{fontSize:10,color:'var(--text3)',marginBottom:2}}>Buying Price / Unit</div>
-                            {/* CHANGE 2: locked when same as sourced supplier, editable when supplier changed */}
-                            {a.supplier_id && a.supplier_id === a._sourced_supplier_id ? (
-                              <div style={{display:'flex',gap:4,alignItems:'center'}}>
-                                <div style={{padding:'6px 10px',background:'var(--surface2)',borderRadius:'var(--r-sm)',
-                                  fontSize:12,fontWeight:600,flex:1,border:'1px solid var(--border)',color:'var(--text2)'}}>
-                                  🔒 {fmtM(a.buying_price_per_unit||0, a.confirmed_currency||'INR')}
-                                </div>
-                                <select className="input" style={{width:60,fontSize:10}} value={a.confirmed_currency||'INR'}
-                                  onChange={e=>setA(li.id,'confirmed_currency',e.target.value)}>
-                                  {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
-                                </select>
+                        <div>
+                          <input className="input" value={a.supplier_ref||''}
+                            onChange={e=>setA(li.id,'supplier_ref',e.target.value)}
+                            placeholder="Supplier PI No. *"
+                            style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':undefined}}/>
+                          {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
+                          {a.supplier_id && !a.supplier_ref && (
+                            poRequests[li.id]==='sent' ? (
+                              <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
+                                padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
+                                border:'1px solid var(--accent)33'}}>
+                                ⏳ Waiting for Finance…
                               </div>
                             ) : (
-                              <div>
-                                <div style={{display:'flex',gap:4}}>
-                                  <input className="input" type="number" step="0.01"
-                                    value={a.buying_price_per_unit||''}
-                                    onChange={e=>{
-                                      const bpu = parseFloat(e.target.value)||0;
-                                      const total = bpu * (li.qty||0);
-                                      setA(li.id,'buying_price_per_unit',e.target.value);
-                                      setA(li.id,'confirmed_price', total>0?total.toFixed(2):'');
-                                    }}
-                                    placeholder="0.00"
-                                    style={{fontSize:11,flex:1,borderColor:'var(--amber,#d97706)'}}/>
-                                  <select className="input" style={{width:60,fontSize:10}} value={a.confirmed_currency||'INR'}
-                                    onChange={e=>setA(li.id,'confirmed_currency',e.target.value)}>
-                                    {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
-                                  </select>
-                                </div>
-                                {a.supplier_id && <div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2,fontWeight:600}}>✏ New supplier — enter negotiated price</div>}
-                              </div>
-                            )}
-                            <div style={{display:'none'}}>
-                            </div>
-                            {a.buying_price_per_unit>0&&(
-                              <div style={{fontSize:10,marginTop:2,color:'var(--text2)'}}>
-                                Total: {fmtM((parseFloat(a.buying_price_per_unit)||0)*(li.qty||0), a.confirmed_currency||'INR')}
-                                {' '}({li.qty} × {fmtM(a.buying_price_per_unit,a.confirmed_currency||'INR')})
-                              </div>
-                            )}
-                            {parseFloat(a.confirmed_price)>0&&(()=>{
-                              const margin2 = (li.qty||0)*(li.unit_price||0) - parseFloat(a.confirmed_price);
-                              const rev = (li.qty||0)*(li.unit_price||0);
-                              return <div style={{fontSize:10,marginTop:1,fontWeight:600,color:margin2>=0?'var(--green)':'var(--red)'}}>
-                                {margin2>=0?'✅':'⚠'} Margin: {fmtM(margin2,a.confirmed_currency)} ({rev>0?(margin2/rev*100).toFixed(1):0}%)
-                              </div>;
-                            })()}
-                          </div>
-                        )}
+                              <button
+                                className="btn btn-xs"
+                                style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                disabled={poRequests[li.id]==='sending'}
+                                onClick={async()=>{
+                                  setPoRequests(r=>({...r,[li.id]:'sending'}));
+                                  try {
+                                    const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
+                                    await api.post('/po-requests', {
+                                      order_id: order.id,
+                                      supplier_id: a.supplier_id,
+                                      supplier_order_id: existingPO?.id || a._existing_po_id || '',
+                                      supplier_name: supName(a.supplier_id),
+                                      order_ref: order.po_number || order.id,
+                                    });
+                                    setPoRequests(r=>({...r,[li.id]:'sent'}));
+                                    toast.success('📋 Request sent to Finance team!');
+                                  } catch(e) {
+                                    setPoRequests(r=>({...r,[li.id]:'idle'}));
+                                    toast.error('Failed to send request');
+                                  }
+                                }}>
+                                {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request PO Info from Finance'}
+                              </button>
+                            )
+                          )}
+                        </div>
                       </td>
                       {/* Payment terms */}
                       <td style={{minWidth:140}}>
@@ -454,6 +606,14 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
                             <span style={{fontSize:11,color:'var(--text2)'}}>% advance</span>
                           </div>
                         )}
+                        {a.payment_terms_type !== a._orig_payment_terms_type && (
+                          <div style={{marginTop:4}}>
+                            <input className="input" value={a.payment_terms_change_reason||''}
+                              onChange={e=>setA(li.id,'payment_terms_change_reason',e.target.value)}
+                              placeholder="Reason for change…"
+                              style={{fontSize:11,borderLeft:'3px solid var(--amber,#d97706)',paddingLeft:6}}/>
+                          </div>
+                        )}
                       </td>
                       {/* Date */}
                       <td style={{minWidth:120}}>
@@ -468,6 +628,7 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
             </table>
           </div>
         </div>
+        </fieldset>
         <div className="modal-footer" style={{justifyContent:'space-between',alignItems:'center'}}>
           <div style={{fontSize:12,color:'var(--text2)'}}>
             {Object.keys(grouped).length > 0
@@ -481,11 +642,16 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
             )}
           </div>
           <div style={{display:'flex',gap:8}}>
-            <button className="btn" onClick={onClose}>Cancel</button>
-            {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
-            <button className="btn btn-primary" disabled={saving||Object.keys(grouped).length===0} onClick={handleSave}>
-              {saving?'Saving POs…':`📤 ${Object.keys(grouped).length>0?'Save':'Generate'} PO Allocation`}
+            <button className="btn" onClick={onClose}>{readOnly?'Close':'Cancel'}</button>
+            {/* Refresh — useful after Finance fills in PI/Zoho PO via PO Requests */}
+            <button className="btn btn-sm" title="Refresh data from Finance"
+              onClick={()=>qc.invalidateQueries(['orders'])}>
+              🔄 Refresh
             </button>
+            {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
+            {!readOnly && <button className="btn btn-primary" disabled={saving||Object.keys(grouped).length===0} onClick={handleSave}>
+              {saving?'Saving POs…':`📤 ${Object.keys(grouped).length>0?'Save':'Generate'} PO Allocation`}
+            </button>}
           </div>
         </div>
       </div>
@@ -494,12 +660,13 @@ function AllocationModal({ order, suppliers, enquiry, poMode, onClose, onSaved }
 }
 
 // ── Manage PO Modal ───────────────────────────────────────────────────────────
-function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClose, onSaved, poList=[], poIndex=0, onNavigate }) {
+function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers, poMode, onClose, onSaved, poList=[], poIndex=0, onNavigate, readOnly=false }) {
   const qc = useQueryClient();
+  const systemPoRef = order?.finance_po_no || order?.po_number || '';
   const [form, setForm] = useState({
     status:                 po.status||'draft',
     zoho_po_number:         po.zoho_po_number||'',
-    po_no:                  po.po_no||'',
+    po_no:                  po.po_no||systemPoRef,
     supplier_ref:           po.supplier_ref||'',
     buying_price_per_unit:  po.buying_price_per_unit || (() => {
                               // Auto-populate from sourcing price if not yet saved on PO
@@ -521,9 +688,11 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
     shipping_status:        po.shipping_status||'pending',
     shipper_id:             po.shipper_id||'',
     tracking_no:            po.tracking_no||'',
-    notes:                  po.notes||'',
+    ship_load_date:         po.ship_load_date||'',
+    notes:                  po.notes||''
   });
   const [saving,    setSaving]    = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [showPayForm, setShowPayForm] = useState(false);
   const [payForm, setPayForm]     = useState({
     payment_ref:'', payment_date:new Date().toISOString().slice(0,10),
@@ -535,13 +704,49 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
     (po.payment_blocked===0||po.payment_blocked===false) && (po.payment_terms_type==='advance'||po.payment_terms_type==='split')
   );
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const supName=id=>suppliers.find(s=>s.id===id)?.name||id;
+  const inventoryById = React.useMemo(() => {
+    const map = {};
+    (inventoryItems || []).forEach(inv => { map[inv.id] = inv; });
+    return map;
+  }, [inventoryItems]);
+  const supName=id=>{
+    if (!id) return '—';
+    if (id.startsWith('__inv__')) return getInventoryLabel(inventoryById[id.slice(7)]);
+    return suppliers.find(s=>s.id===id)?.name||id;
+  };
   const isAdvanceOrSplit = form.payment_terms_type==='advance'||form.payment_terms_type==='split';
   const poItems=(po.items||[]).map(id=>(order.lineItems||[]).find(li=>li.id===id)).filter(Boolean);
   const custTotal=poItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
   const cost=parseFloat(form.confirmed_price)||0;
   const margin=custTotal-cost;
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
+  const carrierOptions = (shippers && shippers.length)
+    ? shippers
+    : [
+        { id:'dhl', name:'DHL' },
+        { id:'fedex', name:'FedEx' },
+        { id:'ups', name:'UPS' },
+        { id:'bluedart', name:'Blue Dart' },
+        { id:'delhivery', name:'Delhivery' },
+      ];
+
+  const setStatusAndSave = async (nextStatus) => {
+    const prevStatus = form.status;
+    const nextForm = { ...form, status: nextStatus };
+    setForm(nextForm);
+    setSaving(true);
+    try {
+      await api.put('/supplier-orders/' + po.id, nextForm);
+      toast.success('Status updated: ' + (PO_STATUS[nextStatus]?.label || nextStatus));
+      qc.invalidateQueries(['orders']);
+      onSaved();
+    } catch (e) {
+      setForm(f => ({ ...f, status: prevStatus }));
+      toast.error(e.response?.data?.error || 'Failed to update status');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const save=async()=>{
     // Validate PI mandatory for advance/split
@@ -559,19 +764,25 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
     finally{setSaving(false);}
   };
   const del=async()=>{
-    if(!window.confirm('Delete this PO?'))return;
+    setConfirmDelete(true);
+  };
+  const doDelete=async()=>{
     try{await api.delete('/supplier-orders/'+po.id);toast.success('Deleted');qc.invalidateQueries(['orders']);onSaved();}
     catch(e){toast.error('Delete failed');}
   };
 
   return (
+    <>
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-md">
+      <div className="modal modal-lg">
         <div className="modal-header">
           <div><h2>🛒 {po.internal_po_no||po.id}</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>{supName(po.supplier_id)} · {order.id}</div>
           </div>
           <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            {readOnly&&<span style={{fontSize:11,fontWeight:700,color:'var(--accent)',
+              background:'var(--accent-lt)',padding:'2px 9px',borderRadius:999,
+              border:'1px solid var(--accent)44'}}>👁 View Only</span>}
             {isBlocked&&<span style={{fontSize:11,fontWeight:700,color:'var(--red)',
               background:'var(--red-lt,#fef2f2)',padding:'2px 9px',borderRadius:999,
               border:'1px solid var(--red)44'}}>🔒 Payment Blocked</span>}
@@ -599,6 +810,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
           </div>
         </div>
         <div className="modal-body">
+          <fieldset disabled={readOnly} style={{border:'none',margin:0,padding:0,minWidth:0}}>
           {(isBlocked||paymentConfirmed)&&(
             <div style={{padding:'12px 14px',borderRadius:'var(--r)',
               background: paymentConfirmed ? 'var(--green-lt)' : 'var(--red-lt,#fef2f2)',
@@ -607,7 +819,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
               {paymentConfirmed ? (
                 <div style={{display:'flex',alignItems:'center',gap:10}}>
                   <span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>✅ Advance Payment Confirmed</span>
-                  <button className="btn btn-xs" onClick={()=>setPaymentConfirmed(false)}>✏ Edit</button>
                 </div>
               ) : (
               <><div style={{fontSize:12,color:'var(--red)',fontWeight:600,marginBottom:10}}>
@@ -706,68 +917,16 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
               )}
             </div>
           )}
-          {/* PO Status — smart action buttons */}
+          {/* PO Status — progress tracker only, action buttons moved to footer */}
           <div className="form-group">
             <label className="label" style={{fontWeight:700}}>PO Status</label>
             <POProgressTracker status={form.status} paymentTermsType={form.payment_terms_type}/>
-            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12}}>
-              {/* Show only valid next actions based on current status */}
-              {form.status==='draft'&&(
-                <button type="button" className="btn btn-primary"
-                  onClick={()=>set('status','po_issued')}
-                  style={{fontSize:12,
-                    background: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,
-                    borderColor: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,
-                    fontWeight: isAdvanceOrSplit && form.supplier_ref?.trim() ? 700 : undefined,
-                    transform: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'scale(1.02)' : undefined,
-                  }}>
-                  {isAdvanceOrSplit && form.supplier_ref?.trim() ? '✅ PI Received — Next: Mark PO Issued →' : '📤 Mark as PO Issued (sent to supplier)'}
-                </button>
-              )}
-              {(form.status==='po_issued'||form.status==='sent')&&(
-                <button type="button" className="btn btn-primary"
-                  onClick={()=>set('status','awaiting_confirmation')}
-                  style={{fontSize:12}}>
-                  ⏳ Awaiting Supplier Confirmation
-                </button>
-              )}
-              {form.status==='awaiting_confirmation'&&(
-                <button type="button" className="btn btn-primary"
-                  onClick={()=>set('status','confirmed')}
-                  style={{background:'var(--teal,#0d9488)',borderColor:'var(--teal,#0d9488)',fontSize:12}}>
-                  ✅ Supplier Confirmed
-                </button>
-              )}
-              {form.status==='confirmed'&&(
-                <div style={{fontSize:11,color:'var(--text2)',fontStyle:'italic'}}>
-                  💡 Enter tracking number below to auto-advance to In Transit
-                </div>
-              )}
-              {/* REMOVED: Mark Fully/Partially Received moved to Delivery Hub page */}
-              {!['draft','cancelled','received','partially_received'].includes(form.status)&&(
-                <button type="button" className="btn btn-xs"
-                  onClick={()=>set('status','cancelled')}
-                  style={{fontSize:11,color:'var(--red)',borderColor:'var(--red)',marginLeft:'auto'}}>
-                  ❌ Cancel PO
-                </button>
-              )}
-              {['received','partially_received','cancelled'].includes(form.status)&&(
-                <div style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-sm)',
-                  background:form.status==='received'?'var(--green-lt)':form.status==='partially_received'?'var(--amber-lt,#fffbeb)':'var(--red-lt,#fef2f2)',
-                  fontWeight:600,
-                  color:form.status==='received'?'var(--green)':form.status==='partially_received'?'var(--amber,#d97706)':'var(--red)'}}>
-                  {PO_STATUS[form.status]?.icon} {PO_STATUS[form.status]?.label}
-                  {form.status==='partially_received'&&' — follow up with supplier for balance'}
-                </div>
-              )}
-            </div>
+            {form.status==='confirmed'&&(
+              <div style={{fontSize:11,color:'var(--text2)',fontStyle:'italic',marginTop:8}}>
+                💡 Enter tracking number below to auto-advance to In Transit
+              </div>
+            )}
           </div>
-          {form.status==='received'&&(
-            <div style={{padding:'8px 14px',borderRadius:'var(--r)',background:'var(--green-lt)',
-              border:'2px solid var(--green)',marginBottom:10,fontSize:12,fontWeight:600,color:'var(--green)'}}>
-              ✅ Saving as Received will update linked line items → Delivered Hub
-            </div>
-          )}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13}}>
             {/* PO reference fields */}
             {poMode==='external'?(
@@ -807,7 +966,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
               <label className="label">Buying Price Per Unit</label>
               <div style={{display:'flex',gap:6}}>
                 <input className="input" type="number" step="0.01"
-                  value={form.buying_price_per_unit||''}
+                  value={form.buying_price_per_unit !== '' && form.buying_price_per_unit != null ? parseFloat(form.buying_price_per_unit)||'' : ''}
+                  disabled
                   onChange={e=>{
                     const bpu = parseFloat(e.target.value)||0;
                     const totalQty = poItems.reduce((s,li)=>s+(li.qty||0),0);
@@ -815,8 +975,9 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
                     set('buying_price_per_unit', e.target.value);
                     set('confirmed_price', total>0?total.toFixed(2):'');
                   }}
-                  placeholder="0.00 per unit" style={{flex:1}}/>
+                  placeholder="0.00 per unit" style={{flex:1,background:'var(--surface2)',color:'var(--text2)'}}/>
                 <select className="input" style={{width:80}} value={form.confirmed_currency}
+                  disabled
                   onChange={e=>set('confirmed_currency',e.target.value)}>
                   {['INR','USD','EUR','SGD','GBP','AED'].map(c=><option key={c}>{c}</option>)}
                 </select>
@@ -851,25 +1012,21 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
                     background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)44',
                     fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>
                     ⚠ Supplier default has changed to <strong>{liveType==='advance'?'Advance':liveType==='split'?'Split':'Net '+liveSup?.payment_net_days}</strong>.
-                    <button className="btn btn-xs" style={{marginLeft:8}}
-                      onClick={()=>{ set('payment_terms_type',liveType); set('payment_net_days',liveSup?.payment_net_days||30); set('payment_advance_pct',liveSup?.payment_advance_pct||0); }}>
-                      Apply Update
-                    </button>
                   </div>
                 ) : null;
               })()}
-              <select className="input" value={form.payment_terms_type} onChange={e=>set('payment_terms_type',e.target.value)}>
+              <select className="input" value={form.payment_terms_type} disabled onChange={e=>set('payment_terms_type',e.target.value)} style={{background:'var(--surface2)',color:'var(--text2)'}}>
                 {PAYMENT_TERM_OPTIONS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
               </select>
               {form.payment_terms_type==='net'&&(
-                <select className="input" style={{marginTop:4}} value={form.payment_net_days}
+                <select className="input" style={{marginTop:4,background:'var(--surface2)',color:'var(--text2)'}} value={form.payment_net_days} disabled
                   onChange={e=>set('payment_net_days',parseInt(e.target.value))}>
                   {NET_DAYS_OPTIONS.map(d=><option key={d} value={d}>Net {d} days</option>)}
                 </select>
               )}
               {form.payment_terms_type==='split'&&(
                 <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
-                  <input className="input" type="number" min="0" max="100" value={form.payment_advance_pct}
+                  <input className="input" type="number" min="0" max="100" value={form.payment_advance_pct} disabled
                     onChange={e=>set('payment_advance_pct',parseInt(e.target.value))} style={{width:70}}/>
                   <span style={{fontSize:12,color:'var(--text2)'}}>% advance, rest on delivery</span>
                 </div>
@@ -882,10 +1039,15 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
               </div>
             )}
           </div>
-          {/* Shipping */}
-          {['sent','confirmed','partial','received'].includes(form.status)&&(
+          {/* Shipping — only show after supplier confirmed */}
+          {['confirmed','in_transit','partial','received'].includes(form.status)&&(
             <div style={{marginTop:13,padding:'12px 14px',background:'var(--surface2)',borderRadius:'var(--r-sm)'}}>
               <div style={{fontWeight:700,fontSize:12,marginBottom:10,color:'var(--text2)'}}>🚚 Shipping</div>
+              {(!shippers || shippers.length===0) && (
+                <div style={{fontSize:11,color:'var(--amber,#d97706)',marginBottom:8,fontWeight:600}}>
+                  ⚠ No active shippers configured. Showing common carrier list fallback.
+                </div>
+              )}
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                 <div className="form-group" style={{marginBottom:0}}><label className="label">Shipping Status</label>
                   <select className="input" value={form.shipping_status} onChange={e=>set('shipping_status',e.target.value)}>
@@ -894,8 +1056,15 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
                 <div className="form-group" style={{marginBottom:0}}><label className="label">Carrier</label>
                   <select className="input" value={form.shipper_id} onChange={e=>set('shipper_id',e.target.value)}>
                     <option value="">— Select —</option>
-                    {shippers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+                    {carrierOptions.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
                   </select></div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Ship Load Date <span style={{fontSize:10,color:'var(--text3)',fontWeight:400}}>(date supplier dispatched)</span></label>
+                  <input className="input" type="date" value={form.ship_load_date}
+                    onChange={e=>set('ship_load_date',e.target.value)}/>
+                </div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr',gap:10,marginTop:8}}>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Tracking / AWB</label>
                   <input className="input" value={form.tracking_no}
@@ -928,55 +1097,141 @@ function ManagePOModal({ po, order, enquiry, suppliers, shippers, poMode, onClos
 
           <div className="form-group" style={{marginTop:13,marginBottom:0}}><label className="label">Notes</label>
             <textarea className="input" rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)}/></div>
+          </fieldset>
         </div>
         <div className="modal-footer" style={{justifyContent:'space-between'}}>
-          <button className="btn btn-danger" onClick={del} style={{fontSize:12}}>🗑 Delete</button>
-          <div style={{display:'flex',gap:8}}>
+          {!readOnly ? <button className="btn btn-danger" onClick={del} style={{fontSize:12}}>🗑 Delete</button> : <span/>}
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
             <button className="btn" onClick={onClose}>Cancel</button>
-            <button className="btn btn-primary" disabled={saving} onClick={save}>{saving?'Saving…':'💾 Save PO'}</button>
-            {/* ADDED: Move to Delivery Hub — saves PO as received then navigates */}
-            {['confirmed','in_transit','sent','po_issued'].includes(form.status) && (
-              <button className="btn"
-                style={{background:'var(--teal,#0d9488)',color:'#fff',
-                  borderColor:'var(--teal,#0d9488)',fontWeight:600,fontSize:12}}
-                disabled={saving}
+
+            {/* Status action buttons — one at a time based on current status */}
+            {!readOnly && form.status==='draft' && (
+              <button type="button" className="btn btn-primary" disabled={saving}
+                style={{fontSize:12,
+                  background: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,
+                  borderColor: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,
+                  fontWeight:700}}
+                onClick={()=>setStatusAndSave('po_issued')}>
+                {isAdvanceOrSplit && form.supplier_ref?.trim() ? '✅ PI Received — Mark PO Issued →' : '📤 Mark as PO Issued'}
+              </button>
+            )}
+            {!readOnly && (form.status==='po_issued'||form.status==='sent') && (
+              <button type="button" className="btn btn-primary" disabled={saving}
+                style={{fontSize:12}}
+                onClick={()=>setStatusAndSave('awaiting_confirmation')}>
+                ⏳ Awaiting Supplier Confirmation
+              </button>
+            )}
+            {!readOnly && form.status==='awaiting_confirmation' && (
+              <button type="button" className="btn btn-primary" disabled={saving}
+                style={{background:'var(--teal,#0d9488)',borderColor:'var(--teal,#0d9488)',fontSize:12}}
+                onClick={()=>setStatusAndSave('confirmed')}>
+                ✅ Supplier Confirmed
+              </button>
+            )}
+            {/* Send to Delivery Hub — only when confirmed + shipping details filled, not after already sent */}
+            {!readOnly && po.status==='confirmed' && form.tracking_no?.trim() && form.shipper_id?.trim() && (
+              <button type="button" className="btn" disabled={saving}
+                style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700,fontSize:12}}
                 onClick={async()=>{
-                  set('status','received');
-                  await new Promise(r=>setTimeout(r,50));
+                  setSaving(true); // disables button immediately
+                  try {
+                    await api.put('/supplier-orders/'+po.id,{...form,status:'in_transit'});
+                    qc.invalidateQueries(['orders']);
+                    toast.success('📦 PO sent to Delivery Hub!');
+                    onSaved();
+                    window.location.href='/delivery-hub?order='+encodeURIComponent(order.id)+'&po='+encodeURIComponent(po.id);
+                  } catch(e){ toast.error(e.response?.data?.error||'Failed'); setSaving(false); }
+                }}>
+                📦 Send to Delivery Hub →
+              </button>
+            )}
+            {/* Already in transit — just show a label, no button */}
+            {po.status==='in_transit' && (
+              <span style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-sm)',
+                background:'var(--blue-lt,#eff6ff)',color:'var(--blue,#2563eb)',
+                fontWeight:700,border:'1px solid var(--blue,#2563eb)44'}}>
+                🚚 In Transit — awaiting GRN at Delivery Hub
+              </span>
+            )}
+            {/* Partially received — show status + allow re-sending balance to hub */}
+            {form.status==='partially_received' && (
+              <span style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-sm)',
+                background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',
+                fontWeight:700,border:'1px solid var(--amber,#d97706)44'}}>
+                ⚠ Partially Received — balance still at supplier
+              </span>
+            )}
+            {!readOnly && form.status==='partially_received' && form.tracking_no?.trim() && form.shipper_id?.trim() && (
+              <button type="button" className="btn" disabled={saving}
+                style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700,fontSize:12}}
+                onClick={async()=>{
                   setSaving(true);
                   try {
-                    await api.put('/supplier-orders/'+po.id,{...form,status:'received'});
+                    await api.put('/supplier-orders/'+po.id,{...form,status:'in_transit'});
                     qc.invalidateQueries(['orders']);
-                    toast.success('PO marked received — moving to Delivery Hub');
+                    toast.success('📦 Balance shipment sent to Delivery Hub!');
                     onSaved();
-                    window.location.href='/delivery-hub';
-                  } catch(e){ toast.error(e.response?.data?.error||'Failed'); }
-                  finally{ setSaving(false); }
+                    window.location.href='/delivery-hub?order='+encodeURIComponent(order.id)+'&po='+encodeURIComponent(po.id);
+                  } catch(e){ toast.error(e.response?.data?.error||'Failed'); setSaving(false); }
                 }}>
-                📦 Move to Delivery Hub →
+                📦 Send Balance to Delivery Hub →
+              </button>
+            )}
+            {/* Fully received */}
+            {form.status==='received' && (
+              <span style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-sm)',
+                background:'var(--green-lt)',color:'var(--green)',
+                fontWeight:700,border:'1px solid var(--green)44'}}>
+                ✅ Fully Received at Delivery Hub
+              </span>
+            )}
+            {/* Cancel PO — secondary danger action */}
+            {!readOnly && ['po_issued','sent','awaiting_confirmation','pending_payment'].includes(form.status) && (
+              <button type="button" className="btn" disabled={saving}
+                style={{fontSize:12,color:'var(--red)',borderColor:'var(--red)'}}
+                onClick={()=>setStatusAndSave('cancelled')}>
+                ❌ Cancel PO
               </button>
             )}
           </div>
         </div>
       </div>
     </div>
+    {confirmDelete && (
+      <ConfirmDeleteModal
+        label={po.internal_po_no || po.id}
+        onConfirm={() => { setConfirmDelete(false); doDelete(); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
+    )}
+    </>
   );
 }
 
 
 // ── Order Procurement Detail Modal ────────────────────────────────────────────
-function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry, poMode, onClose, onSaved }) {
+function OrderProcurementModal({ order, suppliers, inventoryItems, customers, shippers, enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [showAlloc,  setShowAlloc]  = useState(false);
   const [managingPO, setManagingPO] = useState(null);
   const custName=id=>customers.find(c=>c.id===id)?.name||id;
-  const supName=id=>suppliers.find(s=>s.id===id)?.name||id;
+  const inventoryById = useMemo(() => {
+    const map = {};
+    (inventoryItems || []).forEach(inv => { map[inv.id] = inv; });
+    return map;
+  }, [inventoryItems]);
+  const supName=id=>{
+    if (!id) return '—';
+    if (id.startsWith('__inv__')) return getInventoryLabel(inventoryById[id.slice(7)]);
+    return suppliers.find(s=>s.id===id)?.name||id;
+  };
   const today=new Date().toISOString().slice(0,10);
   const allItems=order.lineItems||[];
   const soList=order.supplierOrders||[];
   const poItemIds=soList.flatMap(so=>so.items||[]);
-  const unPOd=allItems.filter(li=>!poItemIds.includes(li.id));
+  const unPOd=allItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, enquiry));
   const orderVal=allItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
   // Use buying_price_per_unit × qty if available, else confirmed_price
   const procVal = soList.reduce((s,so) => {
@@ -993,6 +1248,7 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
   const hasConfirmedPrices = procVal > 0;
   const margin=orderVal-procVal;
   const blockedPOs=soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true);
+  const allocationLocked = readOnly || soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update';
 
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
@@ -1156,7 +1412,9 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
                               {(so.payment_blocked===1||so.payment_blocked===true)&&
                                 <span style={{fontSize:10,color:'var(--red)',marginLeft:4}}>🔒</span>}
                             </>
-                          : <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>
+                          : (srcSup
+                              ? <span style={{fontSize:11,color:'var(--accent)',fontWeight:600}}>Assigned: {supName(srcSup)}</span>
+                              : <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>)
                         }
                       </td>
                       <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status}</span></td>
@@ -1220,8 +1478,11 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
             })()}
             <div className="card-title">
               <span>🛒 Purchase Orders ({soList.length})</span>
-              <button className="btn btn-xs btn-primary" onClick={()=>setShowAlloc(true)}>
-                {soList.length>0?'✏ Manage':'📋 Manage'}
+              <button
+                className="btn btn-xs btn-primary"
+                onClick={()=>setShowAlloc(true)}
+                title={allocationLocked ? 'PO already allocated. View only.' : 'Manage PO allocation'}>
+                {allocationLocked ? '👁 View' : '📋 Manage'}
               </button>
             </div>
             {soList.length===0&&<div style={{color:'var(--text3)',fontSize:13,padding:'8px 0'}}>No POs raised. Click "Manage" to assign components to suppliers.</div>}
@@ -1244,7 +1505,7 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
                       </div>
                       <div style={{fontSize:12,color:'var(--text2)',marginTop:3}}>
                         {supName(so.supplier_id)}
-                        {so.zoho_po_number&&<> · Zoho: <strong>{so.zoho_po_number}</strong></>}
+                        {(so.zoho_po_number || so.po_no)&&<> · PO Ref: <strong>{so.zoho_po_number || so.po_no}</strong></>}
                         {so.supplier_ref&&<> · Ref: <strong>{so.supplier_ref}</strong></>}
                         {so.payment_terms_type==='net'&&<> · Net {so.payment_net_days} days{so.payment_due_date&&` (due ${so.payment_due_date})`}</>}
                         {so.payment_terms_type==='advance'&&<> · <span style={{color:'var(--red)'}}>Advance required</span></>}
@@ -1252,24 +1513,109 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
                       </div>
                     </div>
                     <button className="btn btn-xs"
-                      disabled={so.payment_blocked===1||so.payment_blocked===true}
-                      title={so.payment_blocked===1||so.payment_blocked===true?'Supplier advance payment pending — Finance must pay first':''}
-                      style={{opacity:(so.payment_blocked===1||so.payment_blocked===true)?0.4:1,
-                        cursor:(so.payment_blocked===1||so.payment_blocked===true)?'not-allowed':'pointer'}}
-                      onClick={()=>{ if(so.payment_blocked===1||so.payment_blocked===true) return; setManagingPO(so); }}>✏ Manage</button>
+                      disabled={(so.payment_blocked===1||so.payment_blocked===true)}
+                      title={(so.payment_blocked===1||so.payment_blocked===true)?'Supplier advance payment pending — Finance must pay first':''}
+                      style={{opacity:((so.payment_blocked===1||so.payment_blocked===true))?0.4:1,
+                        cursor:((so.payment_blocked===1||so.payment_blocked===true))?'not-allowed':'pointer'}}
+                      onClick={()=>{ if((so.payment_blocked===1||so.payment_blocked===true)) return; setManagingPO(so); }}>✏ Manage</button>
                   </div>
                   <div style={{display:'flex',gap:16,flexWrap:'wrap',fontSize:12}}>
                     <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>COMPONENTS</div>
                       <div style={{fontWeight:600}}>{soItems.map(li=>li.component).join(', ')||'—'}</div></div>
                     {so.confirmed_price&&<div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PRICE</div>
                       <div style={{fontWeight:700,color:cfg.color}}>{fmtM(so.confirmed_price,so.confirmed_currency)}</div></div>}
-                    {so.promised_delivery_date&&<div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PROMISED</div>
-                      <div style={{fontWeight:600,color:late?'var(--red)':'inherit'}}>{so.promised_delivery_date}{late?' ⚠':''}</div></div>}
-                    {so.tracking_no&&<div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>TRACKING</div>
-                      <div className="mono" style={{fontWeight:600}}>🚚 {so.tracking_no}</div></div>}
+                    {/* Promised Delivery Date */}
+                    {so.promised_delivery_date ? (
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PROMISED DELIVERY</div>
+                        <div style={{fontWeight:600,color:late?'var(--red)':'var(--green)',display:'flex',alignItems:'center',gap:4}}>
+                          {so.promised_delivery_date}{late?' ⚠':''}
+                          <span style={{fontSize:10,fontWeight:600,color:late?'var(--red)':'var(--green)',
+                            background:late?'var(--red-lt,#fef2f2)':'var(--green-lt)',
+                            padding:'1px 6px',borderRadius:99,border:`1px solid ${late?'var(--red)':'var(--green)'}44`}}>
+                            {late ? 'Overdue' : 'Confirmed'}
+                          </span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PROMISED DELIVERY</div>
+                        <div style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
+                          <span style={{background:'var(--amber-lt,#fffbeb)',padding:'1px 7px',borderRadius:99,
+                            border:'1px solid var(--amber,#d97706)44'}}>
+                            ⏳ Awaiting date from supplier
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {/* Ship Load Date — date supplier dispatched goods */}
+                    {so.ship_load_date && (
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIP LOAD DATE</div>
+                        <div style={{fontWeight:600,color:'var(--accent)',display:'flex',alignItems:'center',gap:4}}>
+                          📦 {so.ship_load_date}
+                          <span style={{fontSize:10,color:'var(--accent)',fontWeight:600,
+                            background:'var(--accent-lt)',padding:'1px 6px',borderRadius:99,
+                            border:'1px solid var(--accent)44'}}>
+                            Dispatched
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {/* Shipping details — show once carrier/tracking is set */}
+                    {(so.tracking_no || so.shipper_id) && (
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIPPING</div>
+                        <div style={{fontWeight:600,display:'flex',alignItems:'center',gap:6}}>
+                          {so.shipper_id && <span style={{fontSize:11}}>{so.shipper_id}</span>}
+                          {so.tracking_no && <span className="mono" style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>🚚 {so.tracking_no}</span>}
+                          {so.shipping_status && so.shipping_status !== 'pending' && (
+                            <span style={{fontSize:10,padding:'1px 7px',borderRadius:99,fontWeight:700,
+                              background: so.shipping_status==='received'?'var(--green-lt)': so.shipping_status==='in-transit'?'var(--accent-lt)':'var(--amber-lt,#fffbeb)',
+                              color: so.shipping_status==='received'?'var(--green)': so.shipping_status==='in-transit'?'var(--accent)':'var(--amber,#d97706)',
+                              border:`1px solid ${so.shipping_status==='received'?'var(--green)': so.shipping_status==='in-transit'?'var(--accent)':'var(--amber,#d97706)'}44`}}>
+                              {so.shipping_status}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   {/* Progress tracker */}
                   <POProgressTracker status={so.status} paymentTermsType={so.payment_terms_type||'net'}/>
+                  {/* GRN receipt summary for partially_received / received */}
+                  {['partially_received','received'].includes(so.status) && soItems.length > 0 && (
+                    <div style={{marginTop:8,padding:'8px 12px',borderRadius:'var(--r-sm)',fontSize:11,
+                      background: so.status==='received'?'var(--green-lt)':'var(--amber-lt,#fffbeb)',
+                      border:`1px solid ${so.status==='received'?'var(--green)':'var(--amber,#d97706)'}33`}}>
+                      <div style={{fontWeight:700,color:so.status==='received'?'var(--green)':'var(--amber,#d97706)',marginBottom:4}}>
+                        {so.status==='received'?'✅ Fully Received':'⚠ Partially Received — balance pending from supplier'}
+                      </div>
+                      {soItems.map(li => {
+                        const lineStatus = li.line_status||'';
+                        const recLabel = {
+                          ready_to_ship:   '✅ Ready to ship',
+                          grn_partial:     '⚠ Partial',
+                          delivered_hub:   '📦 At hub',
+                          partial_shipped: '🔄 Balance pending',
+                          shipped:         '🚚 Shipped',
+                        }[lineStatus] || lineStatus;
+                        const recColor = {
+                          ready_to_ship:   'var(--green)',
+                          grn_partial:     'var(--amber,#d97706)',
+                          delivered_hub:   'var(--teal,#0d9488)',
+                          partial_shipped: 'var(--purple,#7c3aed)',
+                          shipped:         'var(--text3)',
+                        }[lineStatus] || 'var(--text3)';
+                        return (
+                          <div key={li.id} style={{display:'flex',justifyContent:'space-between',padding:'2px 0',borderTop:'0.5px solid var(--border)'}}>
+                            <span style={{fontWeight:600}}>{li.component}</span>
+                            <span style={{color:recColor,fontWeight:700}}>{recLabel} ×{li.qty}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                   {/* Net terms payment due date alert */}
                   {so.payment_terms_type==='net'&&so.payment_due_date&&!['received','cancelled'].includes(so.status)&&(()=>{
                     const daysLeft=Math.ceil((new Date(so.payment_due_date)-new Date())/(1000*60*60*24));
@@ -1287,9 +1633,10 @@ function OrderProcurementModal({ order, suppliers, customers, shippers, enquiry,
         </div>
         <div className="modal-footer"><button className="btn" onClick={onClose}>Close</button></div>
       </div>
-      {showAlloc&&<AllocationModal order={order} suppliers={suppliers} enquiry={enquiry} poMode={poMode}
+      {showAlloc&&<AllocationModal order={order} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} enquiry={enquiry} poMode={poMode} readOnly={allocationLocked}
         onClose={()=>setShowAlloc(false)} onSaved={()=>{setShowAlloc(false);qc.invalidateQueries(['orders']);onSaved();}}/>}
-      {managingPO&&<ManagePOModal po={managingPO} order={order} enquiry={enquiry} suppliers={suppliers} shippers={shippers} poMode={poMode}
+      {managingPO&&<ManagePOModal po={managingPO} order={order} enquiry={enquiry} suppliers={suppliers} inventoryItems={inventoryItems} shippers={shippers} poMode={poMode}
+        readOnly={false}
         poList={soList} poIndex={soList.findIndex(s=>s.id===managingPO.id)}
         onNavigate={(idx)=>setManagingPO(soList[idx])}
         onClose={()=>setManagingPO(null)} onSaved={()=>{setManagingPO(null);qc.invalidateQueries(['orders']);onSaved();}}/>}
@@ -1312,6 +1659,7 @@ export default function ProcurementBinPage() {
 
   const { data: orders    = [], isLoading } = useQuery({ queryKey:['orders'],    queryFn:()=>api.get('/orders').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]),    refetchInterval:20000 });
   const { data: suppliers = [] }            = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]) });
+  const { data: inventoryItems = [] }       = useQuery({ queryKey:['inventory'], queryFn:()=>api.get('/inventory').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]) });
   const { data: customers = [] }            = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]) });
   const { data: shippers  = [] }            = useQuery({ queryKey:['shippers'],  queryFn:()=>api.get('/shippers').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]) });
   const { data: enquiries = [] }            = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]) });
@@ -1319,14 +1667,21 @@ export default function ProcurementBinPage() {
 
   const poMode      = settings.po_mode || 'external';
   const custName    = id=>customers.find(c=>c.id===id)?.name||(user.perms?.canSeeCustomer===false?'[Restricted]':id);
+  const inventoryByIdMain = useMemo(() => { const m={}; (inventoryItems||[]).forEach(inv=>{m[inv.id]=inv;}); return m; }, [inventoryItems]);
+  const supName = id => {
+    if (!id) return '—';
+    if (id.startsWith('__inv__')) return getInventoryLabel(inventoryByIdMain[id.slice(7)]);
+    return suppliers.find(s=>s.id===id)?.name||id;
+  };
   const findEnquiry = (id, no) => {
     if (!id && !no) return null;
     return enquiries.find(e=>e.id===id) || enquiries.find(e=>e.id===no) || null;
   };
 
   const safeOrders = Array.isArray(orders) ? orders : [];
+  const READ_ONLY_STATUSES = ['delivery_hub','partial_hub','transit_hub','partial_dispatched','transit_customer','closed'];
   const procOrders = safeOrders.filter(o =>
-    ['procurement','open'].includes(o.status) &&
+    ['procurement','sup_payment_update', ...READ_ONLY_STATUSES].includes(o.status) &&
     (o.lineItems||[]).some(li=>!['delivered','closed'].includes(li.line_status))
   );
 
@@ -1339,14 +1694,22 @@ export default function ProcurementBinPage() {
              custName(o.customer_id).toLowerCase().includes(q)||
              (o.lineItems||[]).some(li=>(li.component||'').toLowerCase().includes(q));
     });
-    if (poFilter==='no-po')  list=list.filter(o=>{const ids=(o.supplierOrders||[]).flatMap(so=>so.items||[]);return(o.lineItems||[]).some(li=>!ids.includes(li.id));});
+    if (poFilter==='no-po')  list=list.filter(o=>{
+      const ids=(o.supplierOrders||[]).flatMap(so=>so.items||[]);
+      const rowEnquiry = findEnquiry(o.enquiry_id, o.enquiry_no);
+      return (o.lineItems||[]).some(li=>!ids.includes(li.id) && !getSourcedSupplierId(li, rowEnquiry));
+    });
     if (poFilter==='overdue')list=list.filter(o=>(o.supplierOrders||[]).some(so=>so.promised_delivery_date&&so.promised_delivery_date<today&&so.status!=='received'));
     if (poFilter==='blocked')list=list.filter(o=>(o.supplierOrders||[]).some(so=>so.payment_blocked===1||so.payment_blocked===true));
-    return list;
+    return list.sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
   }, [procOrders,search,poFilter]);
 
   const totalOrders=procOrders.length;
-  const noPO=procOrders.filter(o=>{const ids=(o.supplierOrders||[]).flatMap(so=>so.items||[]);return(o.lineItems||[]).some(li=>!ids.includes(li.id));}).length;
+  const noPO=procOrders.filter(o=>{
+    const ids=(o.supplierOrders||[]).flatMap(so=>so.items||[]);
+    const rowEnquiry = findEnquiry(o.enquiry_id, o.enquiry_no);
+    return (o.lineItems||[]).some(li=>!ids.includes(li.id) && !getSourcedSupplierId(li, rowEnquiry));
+  }).length;
   const overdue=procOrders.filter(o=>(o.supplierOrders||[]).some(so=>so.promised_delivery_date&&so.promised_delivery_date<today&&so.status!=='received')).length;
   const blocked=procOrders.filter(o=>(o.supplierOrders||[]).some(so=>so.payment_blocked===1||so.payment_blocked===true)).length;
   const allSOs=procOrders.flatMap(o=>o.supplierOrders||[]);
@@ -1408,7 +1771,7 @@ export default function ProcurementBinPage() {
       {/* ── Full-width expandable table layout ── */}
       <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden'}}>
         {/* Table header */}
-        <div style={{display:'grid',gridTemplateColumns:'28px 1fr 160px 120px 110px 110px 110px 120px',
+        <div style={{display:'grid',gridTemplateColumns:'28px 1fr 160px 120px 110px 110px 110px 90px 120px',
           gap:0,background:'var(--surface2)',borderBottom:'1px solid var(--border)',
           padding:'7px 12px',fontSize:11,fontWeight:700,color:'var(--text2)',letterSpacing:.4}}>
           <div/>
@@ -1418,6 +1781,7 @@ export default function ProcurementBinPage() {
           <div>PROC. COST</div>
           <div>MARGIN</div>
           <div>DUE DATE</div>
+          <div style={{textAlign:'center'}}>DAYS IN STAGE</div>
           <div style={{textAlign:'right'}}>ACTIONS</div>
         </div>
 
@@ -1432,7 +1796,8 @@ export default function ProcurementBinPage() {
           const soList      = order.supplierOrders||[];
           const allItems    = order.lineItems||[];
           const poItemIds   = soList.flatMap(so=>so.items||[]);
-          const unPOd       = allItems.filter(li=>!poItemIds.includes(li.id));
+          const rowEnquiry  = findEnquiry(order.enquiry_id, order.enquiry_no);
+          const unPOd       = allItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, rowEnquiry));
           const hasBlocked  = soList.some(so=>so.payment_blocked===1||so.payment_blocked===true);
           const hasOverdue  = soList.some(so=>so.promised_delivery_date&&so.promised_delivery_date<today&&so.status!=='received');
           const allRcvd     = soList.length>0&&soList.every(so=>so.status==='received');
@@ -1458,7 +1823,7 @@ export default function ProcurementBinPage() {
             <React.Fragment key={order.id}>
 
               {/* ── Summary row ── */}
-              <div style={{display:'grid',gridTemplateColumns:'28px 1fr 160px 120px 110px 110px 110px 120px',
+              <div style={{display:'grid',gridTemplateColumns:'28px 1fr 160px 120px 110px 110px 110px 90px 120px',
                 gap:0,padding:'10px 12px',borderBottom:'1px solid var(--border)',
                 background:isExpanded?'var(--accent-lt)':rowBg,
                 borderLeft:`3px solid ${accentCol}`,cursor:'pointer',alignItems:'center'}}
@@ -1507,16 +1872,25 @@ export default function ProcurementBinPage() {
                   {order.tentative_date||'—'}{delayed&&' ⚠'}
                 </div>
 
+                {/* Days in Stage */}
+                <div><DaysBadge updatedAt={order.updated_at||order.created_at} /></div>
+
                 {/* Actions */}
                 <div style={{display:'flex',gap:6,justifyContent:'flex-end'}} onClick={e=>e.stopPropagation()}>
+                  {(() => {
+                    const rowReadOnly = READ_ONLY_STATUSES.includes(order.status);
+                    const rowBlocked = order.status==='sup_payment_update'||order.status==='payment_approval';
+                    return (
                   <button className="btn btn-xs btn-primary"
-                    disabled={order.status==='sup_payment_update'||order.status==='payment_approval'}
-                    title={order.status==='sup_payment_update'?'Supplier payment pending — Finance must pay first':order.status==='payment_approval'?'Customer payment pending — Finance must approve first':''}
-                    style={{opacity:(order.status==='sup_payment_update'||order.status==='payment_approval')?0.4:1,
-                      cursor:(order.status==='sup_payment_update'||order.status==='payment_approval')?'not-allowed':'pointer'}}
-                    onClick={()=>{ if(order.status==='sup_payment_update'||order.status==='payment_approval') return; setSelected(order); }}>
-                    ✏ Manage
+                    disabled={rowBlocked}
+                    title={rowBlocked?'Finance action pending':''}
+                    style={{opacity:rowBlocked?0.4:1,
+                      cursor:rowBlocked?'not-allowed':'pointer'}}
+                    onClick={()=>{ if(rowBlocked) return; setSelected(order); }}>
+                    {rowReadOnly ? '👁 View' : '✏ Manage'}
                   </button>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -1534,10 +1908,9 @@ export default function ProcurementBinPage() {
                       <span>🔒 Waiting for Finance to pay:&nbsp;
                       {soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true).map(so=>(
                         <strong key={so.id} style={{marginRight:8}}>
-                          {so.internal_po_no} ({suppliers.find(s=>s.id===so.supplier_id)?.name||'—'})
+                          {so.internal_po_no} ({supName(so.supplier_id)})
                         </strong>
                       ))}</span>
-                      {/* ADDED: Go to Finance button for supplier advance */}
                       <button className="btn btn-sm"
                         style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
                           fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
@@ -1561,71 +1934,151 @@ export default function ProcurementBinPage() {
                     </div>
                   )}
 
-                  {/* Line items table */}
-                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-                    <thead>
-                      <tr style={{background:'var(--surface)',borderBottom:'1px solid var(--border)'}}>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Component</th>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Manufacturer</th>
-                        <th style={{padding:'5px 8px',textAlign:'center',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Qty</th>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Supplier</th>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Buying Price</th>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>PO Status</th>
-                        <th style={{padding:'5px 10px',textAlign:'left',fontSize:11,fontWeight:700,color:'var(--text2)'}}>Progress</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {allItems.map(li=>{
-                        const so=soList.find(s=>(s.items||[]).includes(li.id));
-                        const cfg=so?PO_STATUS[so.status]||PO_STATUS.draft:null;
-                        const blk=so&&(so.payment_blocked===1||so.payment_blocked===true);
-                        const late=so&&so.promised_delivery_date&&so.promised_delivery_date<today&&so.status!=='received';
-                        return (
-                          <tr key={li.id} style={{borderBottom:'0.5px solid var(--border)',
-                            background:blk?'var(--red-lt,#fef2f2)':late?'var(--amber-lt,#fffbeb)':undefined}}>
-                            <td style={{padding:'7px 10px',fontWeight:600,color:'var(--accent)'}}>{li.component}</td>
-                            <td style={{padding:'7px 10px',color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
-                            <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600}}>{li.qty}</td>
-                            <td style={{padding:'7px 10px',color:'var(--text2)'}}>
-                              {so ? (suppliers.find(s=>s.id===so.supplier_id)?.name||'—') : <span style={{color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>}
-                            </td>
-                            <td style={{padding:'7px 10px',fontFamily:'monospace'}}>
-                              {so?.buying_price_per_unit ? fmtM(so.buying_price_per_unit, so.confirmed_currency||'INR')+'/u' : '—'}
-                            </td>
-                            <td style={{padding:'7px 10px'}}>
-                              {so ? <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,
-                                color:blk?'var(--red)':cfg.color,background:blk?'var(--red-lt,#fef2f2)':cfg.bg,
-                                border:`1px solid ${blk?'var(--red)':cfg.color}33`}}>
-                                {blk?'🔒 Blocked':cfg.icon+' '+cfg.label}
-                                {so.promised_delivery_date&&<span style={{marginLeft:5,opacity:.8}}>→{so.promised_delivery_date}{late?' ⚠':''}</span>}
-                              </span> : <span style={{color:'var(--text3)'}}>—</span>}
-                            </td>
-                            <td style={{padding:'7px 10px'}}>
-                              {so ? <POProgressTracker status={so.status} paymentTermsType={so.payment_terms_type||'net'}/> : '—'}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  {/* ── Per-supplier PO sections ── */}
+                  {(()=>{
+                    // Build received/shipped maps from order data
+                    const grnMap = (order.grnRecords||[]).reduce((m,r)=>{
+                      m[r.order_item_id]=(m[r.order_item_id]||0)+(parseInt(r.qty_received)||0);
+                      return m;
+                    },{});
+                    const shipMap = (order.shipments||[]).flatMap(s=>s.items||[]).reduce((m,si)=>{
+                      m[si.order_item_id]=(m[si.order_item_id]||0)+(parseInt(si.qty_shipped)||0);
+                      return m;
+                    },{});
 
-                  {/* Bottom action */}
-                  <div style={{marginTop:10,display:'flex',gap:8,justifyContent:'flex-end'}}>
-                    {unPOd.length>0&&(
-                      <button className="btn btn-sm" style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:600}}
-                        onClick={()=>setSelected(order)}>
-                        ⚠ Raise PO for {unPOd.length} unallocated item{unPOd.length!==1?'s':''}
-                      </button>
-                    )}
-                    <button className="btn btn-sm btn-primary"
-                      disabled={order.status==='sup_payment_update'||order.status==='payment_approval'}
-                      style={{opacity:(order.status==='sup_payment_update'||order.status==='payment_approval')?0.4:1,
-                        cursor:(order.status==='sup_payment_update'||order.status==='payment_approval')?'not-allowed':'pointer'}}
-                      title={order.status==='sup_payment_update'?'Supplier payment pending':order.status==='payment_approval'?'Customer payment pending':''}
-                      onClick={()=>{ if(order.status==='sup_payment_update'||order.status==='payment_approval') return; setSelected(order); }}>
-                      ✏ Full Manage →
-                    </button>
-                  </div>
+                    // Items with no PO
+                    const unPoedItems = allItems.filter(li=>!soList.some(so=>(so.items||[]).includes(li.id)));
+
+                    return (
+                      <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                        {soList.map(so=>{
+                          const cfg   = PO_STATUS[so.status]||PO_STATUS.draft;
+                          const blk   = so.payment_blocked===1||so.payment_blocked===true;
+                          const late  = so.promised_delivery_date&&so.promised_delivery_date<today&&!['received','cancelled'].includes(so.status);
+                          const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+
+                          // Totals for this PO
+                          const totOrdered  = soItems.reduce((s,li)=>s+(li.qty||0),0);
+                          const totReceived = soItems.reduce((s,li)=>s+(grnMap[li.id]||0),0);
+                          const totShipped  = soItems.reduce((s,li)=>s+(shipMap[li.id]||0),0);
+                          const totPending  = totOrdered - totReceived;
+
+                          const borderCol = blk?'var(--red)':['received'].includes(so.status)?'var(--green)':['partially_received'].includes(so.status)?'var(--amber,#d97706)':cfg.color;
+
+                          return (
+                            <div key={so.id} style={{border:`2px solid ${borderCol}33`,borderRadius:'var(--r)',overflow:'hidden'}}>
+                              {/* PO header */}
+                              <div style={{padding:'8px 12px',background:`${borderCol}11`,
+                                display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+                                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                                  <span className="mono" style={{fontWeight:700,fontSize:13,color:borderCol}}>
+                                    {so.internal_po_no||so.id}
+                                  </span>
+                                  <span style={{fontWeight:700,fontSize:13}}>
+                                    {supName(so.supplier_id)}
+                                  </span>
+                                  <POStatusBadge status={so.status}/>
+                                  {blk&&<span style={{fontSize:10,fontWeight:700,color:'var(--red)',padding:'2px 7px',borderRadius:999,background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)44'}}>🔒 Blocked</span>}
+                                  {late&&!blk&&<span style={{fontSize:10,fontWeight:700,color:'var(--red)',padding:'2px 7px',borderRadius:999,background:'var(--red-lt,#fef2f2)'}}>⏰ Overdue</span>}
+                                  {(so.zoho_po_number||so.po_no)&&<span style={{fontSize:11,color:'var(--text3)'}}>Ref: {so.zoho_po_number||so.po_no}</span>}
+                                  {so.promised_delivery_date&&<span style={{fontSize:11,color:late?'var(--red)':'var(--text3)'}}>Due: {so.promised_delivery_date}</span>}
+                                  {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>🚚 {so.tracking_no}</span>}
+                                </div>
+                                {/* Summary pills */}
+                                <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+                                  <span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--surface)',border:'1px solid var(--border)',color:'var(--text2)',fontWeight:600}}>
+                                    Ordered: {totOrdered}
+                                  </span>
+                                  {totReceived>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--green-lt)',color:'var(--green)',fontWeight:700,border:'1px solid var(--green)44'}}>
+                                    ✅ Rcvd: {totReceived}
+                                  </span>}
+                                  {totPending>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700,border:'1px solid var(--amber,#d97706)44'}}>
+                                    ⏳ Pending: {totPending}
+                                  </span>}
+                                  {totShipped>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700,border:'1px solid var(--teal,#0d9488)44'}}>
+                                    🚚 Shipped: {totShipped}
+                                  </span>}
+                                </div>
+                              </div>
+
+                              {/* Per-item rows */}
+                              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                                <thead>
+                                  <tr style={{background:'var(--surface)',borderBottom:'1px solid var(--border)'}}>
+                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>COMPONENT</th>
+                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>MANUFACTURER</th>
+                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--text2)'}}>ORDERED</th>
+                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--green)'}}>RECEIVED</th>
+                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--amber,#d97706)'}}>PENDING</th>
+                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--teal,#0d9488)'}}>SHIPPED OUT</th>
+                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>ITEM STATUS</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {soItems.map(li=>{
+                                    const rcvd    = grnMap[li.id]||0;
+                                    const shipped = shipMap[li.id]||0;
+                                    const pending = (li.qty||0) - rcvd;
+                                    const LINE_STATUS_LABEL = {
+                                      negotiating:     {l:'Negotiating',    c:'var(--text3)'},
+                                      procurement:     {l:'Procurement',    c:'var(--accent)'},
+                                      shipped:         {l:'🚚 Shipped',     c:'var(--teal,#0d9488)'},
+                                      ready_to_ship:   {l:'✅ Ready',       c:'var(--green)'},
+                                      grn_partial:     {l:'⚠ Partial GRN',  c:'var(--amber,#d97706)'},
+                                      delivered_hub:   {l:'📦 At Hub',      c:'var(--teal,#0d9488)'},
+                                      partial_shipped: {l:'🔄 Bal. Pending', c:'var(--purple,#7c3aed)'},
+                                      delivered:       {l:'✅ Delivered',   c:'var(--green)'},
+                                    };
+                                    const ls = LINE_STATUS_LABEL[li.line_status]||{l:li.line_status||'—',c:'var(--text3)'};
+                                    return (
+                                      <tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}>
+                                        <td style={{padding:'7px 10px',fontWeight:600,color:'var(--accent)'}}>{li.component}</td>
+                                        <td style={{padding:'7px 10px',color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
+                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600}}>{li.qty}</td>
+                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:700,color:rcvd>0?'var(--green)':'var(--text3)'}}>
+                                          {rcvd>0?rcvd:'—'}
+                                        </td>
+                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:700,color:pending>0?'var(--amber,#d97706)':'var(--green)'}}>
+                                          {pending>0?pending:<span style={{fontSize:11}}>✓</span>}
+                                        </td>
+                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600,color:shipped>0?'var(--teal,#0d9488)':'var(--text3)'}}>
+                                          {shipped>0?shipped:'—'}
+                                        </td>
+                                        <td style={{padding:'7px 10px'}}>
+                                          <span style={{fontSize:11,fontWeight:700,color:ls.c}}>{ls.l}</span>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          );
+                        })}
+
+                        {/* Items with no PO */}
+                        {unPoedItems.length>0&&(
+                          <div style={{border:'2px solid var(--amber,#d97706)33',borderRadius:'var(--r)',overflow:'hidden'}}>
+                            <div style={{padding:'8px 12px',background:'var(--amber-lt,#fffbeb)',fontSize:12,fontWeight:700,color:'var(--amber,#d97706)'}}>
+                              ⚠ {unPoedItems.length} item{unPoedItems.length>1?'s':''} with no PO assigned
+                            </div>
+                            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                              <tbody>
+                                {unPoedItems.map(li=>(
+                                  <tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}>
+                                    <td style={{padding:'7px 10px',fontWeight:600,color:'var(--amber,#d97706)'}}>{li.component}</td>
+                                    <td style={{padding:'7px 10px',color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
+                                    <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600}}>{li.qty}</td>
+                                    <td style={{padding:'7px 10px',color:'var(--text3)',fontSize:11}}>No PO raised</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </React.Fragment>
@@ -1634,7 +2087,8 @@ export default function ProcurementBinPage() {
       </div>
 
       {selected&&<OrderProcurementModal
-        order={selected} suppliers={suppliers} customers={customers} shippers={shippers}
+        order={selected} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} shippers={shippers}
+        readOnly={READ_ONLY_STATUSES.includes(selected.status)}
         enquiry={findEnquiry(selected.enquiry_id, selected.enquiry_no)} poMode={poMode}
         onClose={()=>setSelected(null)} onSaved={()=>{qc.invalidateQueries(['orders']);api.get('/orders/'+selected.id).then(r=>setSelected(r.data)).catch(()=>{});}}/>}
     </div>

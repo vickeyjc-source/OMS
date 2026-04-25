@@ -7,7 +7,7 @@ import toast from 'react-hot-toast';
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate  = useNavigate();
-  const [form, setForm] = useState({ username: 'admin', password: 'admin123' });
+  const [form, setForm] = useState({ username: '', password: '' });
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async e => {
@@ -43,9 +43,7 @@ export default function LoginPage() {
             {loading ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
-        <div style={{ marginTop: 16, fontSize: 11, color: 'var(--text3)', textAlign: 'center', lineHeight: 1.8 }}>
-          admin/admin123 · manager/pass123 · sales/pass123 · ops/pass123
-        </div>
+
       </div>
     </div>
   );

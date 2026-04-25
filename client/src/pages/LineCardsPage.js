@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 
 // ── Category definitions ──────────────────────────────────────────────────────
 export const CATS = [
@@ -249,8 +250,10 @@ function LcModal({ lc, prefillName, onClose }) {
     mutationFn: ()=>api.delete('/linecards/'+lc.id),
     onSuccess: ()=>{ qc.invalidateQueries(['linecards']); toast.success('Deleted'); onClose(); },
   });
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   return (
+    <>
     <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header">
@@ -287,7 +290,7 @@ function LcModal({ lc, prefillName, onClose }) {
           </div>
         </div>
         <div className="modal-footer">
-          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>{del.mutate()}}>Delete</button>}
+          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary" disabled={mutation.isPending} onClick={()=>mutation.mutate(form)}>
             {mutation.isPending?'Saving…':'Save Line Card'}
@@ -295,6 +298,15 @@ function LcModal({ lc, prefillName, onClose }) {
         </div>
       </div>
     </div>
+    {confirmDelete && (
+      <ConfirmDeleteModal
+        label={lc?.name}
+        onConfirm={() => { setConfirmDelete(false); del.mutate(); }}
+        onCancel={() => setConfirmDelete(false)}
+        loading={del.isPending}
+      />
+    )}
+    </>
   );
 }
 

@@ -3,11 +3,13 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import KeyboardProvider from './components/KeyboardProvider';
 import Layout from './components/Layout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import EnquiriesPage from './pages/EnquiriesPage';
 import NewEnquiryPage from './pages/NewEnquiryPage';
+import EnquiryDetailPage from './pages/EnquiryDetailPage';
 import QuotesPage from './pages/QuotesPage';
 import OrdersPage from './pages/OrdersPage';
 import NewOrderPage from './pages/NewOrderPage';
@@ -24,6 +26,8 @@ import ProcurementBinPage from './pages/ProcurementBinPage';
 import ClosedBinPage from './pages/ClosedBinPage';
 import DeletedBinPage from './pages/DeletedBinPage';
 import FinancePage from './pages/FinancePage'; // Finance module
+import TaxSettingsPage from './pages/TaxSettingsPage'; // Tax Settings
+import InventoryPage from './pages/InventoryPage'; // Stock Inventory
 
 function Spinner() {
   return (
@@ -53,6 +57,7 @@ function AppRoutes() {
         <Route index element={<DashboardPage />} />
         <Route path="enquiries" element={<EnquiriesPage />} />
         <Route path="enquiries/new" element={<NewEnquiryPage />} />
+        <Route path="enquiries/:id" element={<EnquiryDetailPage />} />
         <Route path="quotes" element={<QuotesPage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/new" element={<NewOrderPage />} />
@@ -61,6 +66,7 @@ function AppRoutes() {
         <Route path="linecards" element={<LineCardsPage />} />
         <Route path="users" element={<RequireAuth adminOnly><UsersPage /></RequireAuth>} />
         <Route path="settings" element={<RequireAuth adminOnly><SettingsPage /></RequireAuth>} />
+        <Route path="tax-settings" element={<RequireAuth adminOnly><TaxSettingsPage /></RequireAuth>} />
         <Route path="delivery-hub" element={<DeliveryHubPage />} />
         <Route path="approvals" element={<RequireAuth adminOnly><ApprovalsPage /></RequireAuth>} />
         <Route path="reports" element={<ReportsPage />} />
@@ -69,6 +75,7 @@ function AppRoutes() {
         <Route path="closed-bin" element={<ClosedBinPage />} />
         <Route path="deleted-bin" element={<DeletedBinPage />} />
         <Route path="finance" element={<FinancePage />} />
+        <Route path="inventory" element={<InventoryPage />} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/' : '/login'} replace />} />
     </Routes>
@@ -79,8 +86,10 @@ export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
-        <AppRoutes />
-        <Toaster position="bottom-right" toastOptions={{ duration: 3500, style: { fontSize: 13 } }} />
+        <KeyboardProvider>
+          <AppRoutes />
+          <Toaster position="bottom-right" toastOptions={{ duration: 3500, style: { fontSize: 13 } }} />
+        </KeyboardProvider>
       </BrowserRouter>
     </AuthProvider>
   );

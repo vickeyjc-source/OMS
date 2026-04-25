@@ -3,6 +3,12 @@ export const initials = n => n.split(' ').map(w=>w[0]).join('').toUpperCase().sl
 export const fmt = n => new Intl.NumberFormat('en-IN').format(n||0);
 export const fmtCur = (n, c='INR') => c==='USD'?`$${fmt(n)}`:c==='EUR'?`€${fmt(n)}`:c==='GBP'?`£${fmt(n)}`:`₹${fmt(n)}`;
 export const today = () => new Date().toISOString().slice(0,10);
+export const fmtDateTime = (s) => {
+  if (!s) return '—';
+  const d = new Date(s);
+  if (isNaN(d)) return s;
+  return d.toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+};
 export const orderTotal = o => (o.lineItems||[]).reduce((s,i)=>s+(i.qty*i.unit_price),0);
 export const isDelayed = o => {
   if (['delivered','failed','closed','cancelled'].includes(o.status)) return false;
@@ -54,6 +60,7 @@ export const STATUS_BADGE = {
   payment:     ['badge-amber',  'Payment'],
   shipped:     ['badge-teal',   'Shipped'],
   // Enquiry
+  draft:       ['badge-gray',   '💾 Draft'],
   new:         ['badge-gray',   'New'],
   sourcing:    ['badge-purple', 'Sourcing'],
   quoted:      ['badge-orange', 'Quoted'],
@@ -77,6 +84,35 @@ export const ShipBadge = ({ s }) => {
 export const RoleBadge = ({ role }) => {
   const labels = { admin:'Administrator', manager:'Manager', user:'User' };
   return <span className={`role-${role}`}>{labels[role]||role}</span>;
+};
+
+// ── Days-in-stage helper ──────────────────────────────────────────────────────
+// Calculates how many days an item has been sitting in its current stage
+// using updated_at (falls back to created_at if not available)
+export const daysInStage = (updatedAt) => {
+  if (!updatedAt) return null;
+  const d = new Date(updatedAt.replace(' ', 'T'));
+  if (isNaN(d)) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+};
+
+// Color-coded badge: green 0-2d, amber 3-7d, red 8+d
+export const DaysBadge = ({ updatedAt }) => {
+  const d = daysInStage(updatedAt);
+  if (d === null) return null;
+  const color = d <= 2 ? 'var(--green)' : d <= 7 ? 'var(--amber)' : 'var(--red)';
+  const bg    = d <= 2 ? 'var(--green-lt)' : d <= 7 ? 'var(--amber-lt)' : 'var(--red-lt)';
+  return (
+    <div style={{display:'flex', justifyContent:'center', alignItems:'center'}}>
+      <span title={`${d} day${d!==1?'s':''} in this stage`} style={{
+        display:'inline-flex', alignItems:'center', justifyContent:'center',
+        width:46, height:28, borderRadius:5, fontSize:13, fontWeight:800,
+        background:bg, color, border:`1px solid ${color}44`, whiteSpace:'nowrap',
+      }}>
+        {d}d
+      </span>
+    </div>
+  );
 };
 export const DeptBadge = ({ dept }) => (
   <span className={`badge ${DEPT_COLOR[dept]||'badge-gray'}`}>{DEPT_LABEL[dept]||dept}</span>

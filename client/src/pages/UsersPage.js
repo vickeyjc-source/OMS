@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { initials, DEPARTMENTS, DEPT_LABEL, DEPT_COLOR, DeptBadge } from '../utils/helpers';
 import { useAuth } from '../context/AuthContext';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 
 function UserModal({ u, onClose }) {
   const qc = useQueryClient();
@@ -21,7 +22,9 @@ function UserModal({ u, onClose }) {
     mutationFn: ()=>api.delete(`/users/${u.id}`),
     onSuccess: ()=>{ qc.invalidateQueries(['users']); toast.success('Deleted'); onClose(); },
   });
+  const [confirmDelete, setConfirmDelete] = useState(false);
   return (
+    <>
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-sm">
         <div className="modal-header"><h2>{isNew?'Add User':'Edit User'}</h2><button className="close-x" onClick={onClose}>×</button></div>
@@ -53,12 +56,21 @@ function UserModal({ u, onClose }) {
           </div>
         </div>
         <div className="modal-footer">
-          {!isNew&&u.id!==me.id&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>{del.mutate()}}>Delete</button>}
+          {!isNew&&u.id!==me.id&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary" disabled={mutation.isPending} onClick={()=>mutation.mutate(form)}>{mutation.isPending?'Saving…':'Save'}</button>
         </div>
       </div>
     </div>
+    {confirmDelete && (
+      <ConfirmDeleteModal
+        label={u?.name}
+        onConfirm={() => { setConfirmDelete(false); del.mutate(); }}
+        onCancel={() => setConfirmDelete(false)}
+        loading={del.isPending}
+      />
+    )}
+    </>
   );
 }
 

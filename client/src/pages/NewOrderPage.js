@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { today } from '../utils/helpers';
+import { PhoneField, CountrySelect, StateSelect, CitySelect } from '../components/AddressForm';
 
 const PAYMENT_TERMS_GROUPS = [
   { group:'Advance Payment', terms:['Advance Payment (AP) – Full payment before shipment','Partial Advance – 30% upfront, 70% on delivery','Partial Advance – 50% upfront, 50% on delivery','Cash in Advance (CIA) – 100% before dispatch','Cash Before Shipment (CBS) – Payment before goods ship','Cash on Delivery (COD)','Cash Against Delivery (CAD)'] },
@@ -104,6 +105,218 @@ function POUpload({ files, onChange }) {
   );
 }
 
+// ── Delivery Address Panel ────────────────────────────────────────────────────
+function DeliveryAddressPanel({ customer, selectedAddress, onSelect, onCustomerUpdated, isIntl }) {
+  const [editIdx, setEditIdx] = useState(null); // null | 'new' | number
+  const [draft,   setDraft]   = useState({});
+  const [saving,  setSaving]  = useState(false);
+
+  const addresses = (() => {
+    try { return JSON.parse(customer.shipping_addresses || '[]'); } catch(_) { return []; }
+  })();
+
+  const addrStr = a =>
+    [a.attention, a.street1, a.street2, a.city, a.state, a.country, a.pincode].filter(Boolean).join(', ');
+
+  const startEdit = idx => {
+    setEditIdx(idx);
+    setDraft(idx === 'new' ? { country: isIntl ? '' : 'India' } : { ...addresses[idx] });
+  };
+  const cancelEdit = () => { setEditIdx(null); setDraft({}); };
+
+  const saveAddress = async () => {
+    const newList = editIdx === 'new'
+      ? [...addresses, draft]
+      : addresses.map((a, i) => i === editIdx ? draft : a);
+    setSaving(true);
+    try {
+      await api.put('/customers/' + customer.id, {
+        ...customer,
+        shipping_addresses: newList,
+        contact_persons: (() => { try { return JSON.parse(customer.contact_persons || '[]'); } catch(_) { return []; } })(),
+      });
+      onCustomerUpdated(newList);
+      const str = addrStr(draft);
+      if (str) onSelect(str);
+      cancelEdit();
+      toast.success('Address saved & selected');
+    } catch(e) {
+      toast.error('Could not save address');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const setD = (k, v) => setDraft(d => {
+    const n = { ...d, [k]: v };
+    if (k === 'country') { n.state = ''; n.city = ''; }
+    if (k === 'state')   { n.city = ''; }
+    return n;
+  });
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      {/* ── Header ── */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10 }}>
+        <div style={{ fontSize:12, fontWeight:700, color:'var(--text2)' }}>
+          📦 Delivery Address
+          <span style={{ fontSize:11, fontWeight:400, color:'var(--text3)', marginLeft:8 }}>
+            (synced with customer profile)
+          </span>
+        </div>
+        {editIdx !== 'new' && (
+          <button className="btn btn-xs btn-primary" onClick={() => startEdit('new')} style={{ fontSize:11 }}>
+            + Add New Address
+          </button>
+        )}
+      </div>
+
+      {/* ── No addresses warning ── */}
+      {addresses.length === 0 && editIdx !== 'new' && (
+        <div style={{ padding:'8px 14px', borderRadius:'var(--r-sm)',
+          background:'var(--amber-lt,#fffbeb)', border:'1px solid var(--amber,#d97706)44',
+          fontSize:12, color:'var(--amber,#d97706)', fontWeight:600, marginBottom:10 }}>
+          ⚠ No shipping addresses on file — click "+ Add New Address" above.
+        </div>
+      )}
+
+      {/* ── Address Rows ── */}
+      {addresses.length > 0 && (
+        <div style={{ display:'flex', flexDirection:'column', gap:6,
+          marginBottom: editIdx !== null ? 10 : 0 }}>
+          {addresses.map((addr, i) => {
+            const str        = addrStr(addr);
+            const isSelected = selectedAddress === str;
+            const isEditing  = editIdx === i;
+            const oneLine    = [
+              addr.attention,
+              [addr.street1, addr.street2].filter(Boolean).join(', '),
+              [addr.city, addr.state, addr.country, addr.pincode].filter(Boolean).join(', '),
+            ].filter(Boolean).join('  •  ');
+            return (
+              <div key={i} style={{
+                display:'flex', alignItems:'center', gap:10,
+                padding:'9px 14px', borderRadius:'var(--r)',
+                border:`2px solid ${isEditing?'var(--accent)':isSelected?'var(--green,#16a34a)':'var(--border)'}`,
+                background: isEditing?'var(--accent-lt)':isSelected?'var(--green-lt,#f0fdf4)':'var(--surface2)',
+                transition:'border-color .15s,background .15s', cursor: isEditing?'default':'pointer',
+              }}
+                onClick={() => !isEditing && !isSelected && onSelect(str)}>
+                {/* selection indicator */}
+                <span style={{ fontSize:15, flexShrink:0 }}>
+                  {isSelected ? '✅' : '○'}
+                </span>
+                {/* single-line address */}
+                <span style={{ flex:1, fontSize:12, color:'var(--text)', overflow:'hidden',
+                  textOverflow:'ellipsis', whiteSpace:'nowrap', fontWeight: isSelected?600:400 }}>
+                  {oneLine || '(no address details)'}
+                </span>
+                {/* phone pill */}
+                {addr.phone && (
+                  <span style={{ fontSize:11, color:'var(--text3)', whiteSpace:'nowrap',
+                    flexShrink:0, marginRight:4 }}>
+                    📞 {addr.phone}
+                  </span>
+                )}
+                {/* edit button */}
+                {!isEditing && (
+                  <button
+                    onClick={e => { e.stopPropagation(); startEdit(i); }}
+                    style={{ flexShrink:0, background:'var(--surface)', border:'1px solid var(--border-md)',
+                      borderRadius:'var(--r-sm)', padding:'2px 10px', fontSize:11, cursor:'pointer',
+                      color:'var(--text2)', lineHeight:1.6 }}>
+                    ✏ Edit
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Edit / New form ── */}
+      {editIdx !== null && (
+        <div style={{ border:'1px solid var(--accent)', borderRadius:'var(--r)',
+          padding:'16px 18px', background:'var(--surface)', marginTop:4 }}>
+          <div style={{ fontWeight:700, fontSize:12, color:'var(--accent)', marginBottom:14 }}>
+            {editIdx === 'new' ? '➕ New Delivery Address' : `✏ Edit Address ${editIdx + 1}`}
+          </div>
+
+          {/* Row 1: Attention | Phone | Street 1 | Street 2 */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:12, marginBottom:12 }}>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Attention / Name</label>
+              <input className="input" value={draft.attention||''} placeholder="Contact person"
+                onChange={e => setD('attention', e.target.value)} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Phone</label>
+              <PhoneField value={draft.phone||''} onChange={v => setD('phone', v)}
+                domestic={!isIntl} excludeIndia={isIntl} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Street 1</label>
+              <input className="input" value={draft.street1||''} placeholder="Street 1"
+                onChange={e => setD('street1', e.target.value)} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Street 2</label>
+              <input className="input" value={draft.street2||''} placeholder="Street 2"
+                onChange={e => setD('street2', e.target.value)} />
+            </div>
+          </div>
+
+          {/* Row 2: Country | State | City | Pincode */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:12, marginBottom:16 }}>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Country</label>
+              <CountrySelect value={draft.country||''} onChange={v => setD('country', v)} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">State / Province</label>
+              <StateSelect key={draft.country} country={draft.country||''} value={draft.state||''}
+                onChange={v => setD('state', v)} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">City</label>
+              <CitySelect key={`${draft.country}__${draft.state}`}
+                country={draft.country||''} state={draft.state||''}
+                value={draft.city||''} onChange={v => setD('city', v)} />
+            </div>
+            <div className="form-group" style={{ marginBottom:0 }}>
+              <label className="label">Pincode / Zip</label>
+              <input className="input" value={draft.pincode||''} placeholder="Pincode"
+                onChange={e => setD('pincode', e.target.value)} />
+            </div>
+          </div>
+
+          <div style={{ display:'flex', gap:8 }}>
+            <button className="btn btn-sm btn-primary" onClick={saveAddress} disabled={saving}>
+              {saving ? 'Saving…' : '💾 Save & Select'}
+            </button>
+            <button className="btn btn-sm" onClick={cancelEdit}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Selected summary (when form is closed) ── */}
+      {editIdx === null && selectedAddress && (
+        <div style={{ marginTop:8, display:'flex', alignItems:'center', gap:10,
+          padding:'8px 14px', borderRadius:'var(--r-sm)',
+          background:'var(--green-lt,#f0fdf4)', border:'1px solid var(--green,#16a34a)44',
+          fontSize:12 }}>
+          <span style={{ color:'var(--green,#16a34a)', fontWeight:700 }}>✅ Selected:</span>
+          <span style={{ color:'var(--text2)', flex:1 }}>{selectedAddress}</span>
+          <button className="btn btn-xs" onClick={() => onSelect('')}
+            style={{ color:'var(--red)', borderColor:'var(--red)', background:'transparent' }}>
+            Clear
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function NewOrderPage() {
   const navigate  = useNavigate();
@@ -118,16 +331,16 @@ export default function NewOrderPage() {
   const { data: quotes=[] }    = useQuery({ queryKey:['quotes'],     queryFn:()=>api.get('/quotes').then(r=>r.data) });
 
   const [form, setForm] = useState(() => ({
-    customer_id:        prefill?.customer_id || '',
-    delivery_address:   '',
-    customer_ref:   '',
-    enquiry_id:     prefill?.enquiry_id  || '',
-    quote_id:       prefill?.quote_id    || '',
-    enquiry_no:     prefill?.enquiry_no  || '',
-    quote_no:       prefill?.quote_no    || '',
-    po_number:      '',
-    tentative_date: '',
-    notes: prefill?.quote_no ? 'From Quote ' + prefill.quote_no + (prefill.zoho_quote_no ? ' (Zoho: ' + prefill.zoho_quote_no + ')' : '') : '',
+    customer_id:      prefill?.customer_id || '',
+    delivery_address: prefill?.delivery_address || '',
+    customer_ref:     prefill?.customer_ref || '',
+    enquiry_id:       prefill?.enquiry_id  || '',
+    quote_id:         prefill?.quote_id    || '',
+    enquiry_no:       prefill?.enquiry_no  || '',
+    quote_no:         prefill?.quote_no    || '',
+    po_number:        prefill?.po_number   || '',
+    tentative_date:   prefill?.tentative_date || '',
+    notes: prefill?.notes || (prefill?.quote_no ? 'From Quote ' + prefill.quote_no + (prefill.zoho_quote_no ? ' (Zoho: ' + prefill.zoho_quote_no + ')' : '') : ''),
   }));
 
   const [items, setItems] = useState(() => {
@@ -171,6 +384,13 @@ export default function NewOrderPage() {
   const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
   const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
 
+  // Navigate to linked enquiry for editing, then back through sourcing → quote → order
+  const handleEditViaEnquiry = () => {
+    const enq = enquiries.find(e => e.id === form.enquiry_id);
+    if (!enq) { toast.error('Linked enquiry not found — check enquiry ID'); return; }
+    navigate('/enquiries/new', { state: { editEnquiry: enq, returnToOrder: true } });
+  };
+
   // Derived customer info
   const selectedCustomer = customers.find(c => c.id === form.customer_id) || null;
   const customerPayTerms = selectedCustomer?.payment_terms || '';
@@ -194,6 +414,13 @@ export default function NewOrderPage() {
       // Use dedicated endpoint that returns items pre-enriched with quote_price
       const res = await api.get('/quotes/' + qid + '/lineitems');
       const { items: lineItems } = res.data;
+      console.log('[NET MARGIN DEBUG]', lineItems?.map(li => ({
+        component: li.component,
+        quote_price: li.quote_price,
+        sourced_price: li.sourced_price,
+        margin_inr: li.margin_inr,
+        margin_pct: li.margin_pct,
+      })));
       if (lineItems?.length) {
         setItems(lineItems.map((li, i) => ({
           id:               'li' + i + Date.now(),
@@ -205,6 +432,8 @@ export default function NewOrderPage() {
           quoted_price:     li.quote_price  != null ? String(li.quote_price) : '',
           target_price:     li.target_price != null ? String(li.target_price): '',
           procurement_price:li.sourced_price!= null ? String(li.sourced_price): '',
+          net_margin_amt:   li.margin_inr   != null ? li.margin_inr   : null,
+          net_margin_pct:   li.margin_pct   != null ? li.margin_pct   : null,
           currency:         li.quote_currency || li.target_currency || 'INR',
           order_date:       today(),
           delivery_date:    li.preferred_delivery_date || '',
@@ -218,9 +447,32 @@ export default function NewOrderPage() {
     }
   };
 
+  const existingOrderId = prefill?.existing_order_id || null;
+
   const mutation = useMutation({
-    mutationFn: d => api.post('/orders', d),
-    onSuccess: r => { qc.invalidateQueries(['orders']); toast.success('Order ' + r.data.id + ' created!'); navigate('/orders'); },
+    mutationFn: d => {
+      if (existingOrderId) {
+        // Update existing order with revised line items and new quote reference
+        return api.put('/orders/' + existingOrderId, {
+          ...d,
+          quote_id:  d.quote_id  || form.quote_id,
+          quote_no:  d.quote_no  || form.quote_no,
+          lineItems: d.lineItems,
+          _action: 'Order revised — items updated from ' + (d.quote_no || form.quote_no),
+          _comment: '',
+        });
+      }
+      return api.post('/orders', d);
+    },
+    onSuccess: r => {
+      qc.invalidateQueries(['orders']);
+      if (existingOrderId) {
+        toast.success('✅ Order updated with revised items!');
+      } else {
+        toast.success('Order ' + r.data.id + ' created!');
+      }
+      navigate('/orders');
+    },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
@@ -252,42 +504,54 @@ export default function NewOrderPage() {
   const handleSaveDraft = () => { if (validate(true))  mutation.mutate(buildPayload('draft')); };
   const handleCreate    = () => { if (validate(false)) mutation.mutate(buildPayload('open')); };
 
-  // Column defs for inline line items
+  // Column defs for read-only line items (all from enquiry/quote — no editing here)
   const fmtMoney = (n, cur) => {
     const sym = {INR:'₹',USD:'$',EUR:'€',GBP:'£',SGD:'S$',AED:'د.إ'};
     return (sym[cur]||cur+' ') + Number(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
   };
+  const readCell = (val, opts={}) => (
+    <div style={{
+      padding:'7px 10px', fontSize: opts.mono?12:13,
+      fontFamily: opts.mono?'DM Mono,monospace':'inherit',
+      fontWeight: opts.bold?700:opts.mono?600:400,
+      color: opts.color||'var(--text)',
+      background: opts.bg||'transparent',
+      borderRadius: opts.bg?'var(--r-sm)':0,
+      border: opts.bg?'1px solid var(--border)':'none',
+      textAlign: opts.right?'right':'left',
+      whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+    }}>
+      {val || <span style={{color:'var(--text3)'}}>—</span>}
+    </div>
+  );
   const cols = [
-    { key:'component',    label:'Component *',  flex:'2 1 120px',
-      render:(li,idx)=><input className="input" value={li.component} onChange={e=>upd(idx,'component',e.target.value)} placeholder="e.g. STM32F103"/> },
-    { key:'manufacturer', label:'Manufacturer', flex:'1.3 1 95px',
-      render:(li,idx)=><input className="input" value={li.manufacturer} onChange={e=>upd(idx,'manufacturer',e.target.value)} placeholder="e.g. ST"/> },
-    { key:'ipn',          label:'IPN',          flex:'0.85 1 70px',
-      render:(li,idx)=><input className="input" value={li.ipn} onChange={e=>upd(idx,'ipn',e.target.value)} placeholder="IPN-001"/> },
-    { key:'qty',          label:'Qty',          flex:'0.5 1 50px',
-      render:(li,idx)=><input className="input" type="number" value={li.qty} onChange={e=>upd(idx,'qty',e.target.value)} placeholder="0"/> },
+    { key:'component',    label:'Component',     flex:'2 1 120px',
+      render:(li)=>readCell(li.component,{bold:true}) },
+    { key:'manufacturer', label:'Manufacturer',  flex:'1.3 1 95px',
+      render:(li)=>readCell(li.manufacturer) },
+    { key:'ipn',          label:'IPN',           flex:'0.85 1 70px',
+      render:(li)=>readCell(li.ipn,{mono:true}) },
+    { key:'qty',          label:'Qty',           flex:'0.5 1 50px',
+      render:(li)=>readCell(li.qty,{right:true,bold:true}) },
 
-    /* ── Quoted Price — populated from sourcing, editable as fallback ── */
+    /* ── Quote Price — from sourcing (locked) ── */
     { key:'unit_price', label:'Quote Price / Unit', flex:'1.1 1 95px',
-      render:(li,idx)=>{
-        const hasLocked = !!li.quoted_price;
-        return hasLocked
-          ? /* Locked from sourcing — show read-only green pill */
-            <div style={{padding:'7px 10px',background:'var(--green-lt)',borderRadius:'var(--r-sm)',
-              color:'var(--green)',fontWeight:800,fontSize:13,border:'1px solid var(--green)44',
-              textAlign:'right',whiteSpace:'nowrap',letterSpacing:'-.01em'}}>
-              {fmtMoney(li.quoted_price, li.currency)}
-            </div>
-          : /* Manual order — editable */
-            <input className="input" type="number" step="0.01"
-              value={li.unit_price} onChange={e=>upd(idx,'unit_price',e.target.value)}
-              placeholder="0.00"/>;
+      render:(li)=>{
+        const price = Number(li.quoted_price)||Number(li.unit_price)||0;
+        if (!price) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
+        return (
+          <div style={{padding:'7px 10px',background:'var(--green-lt)',borderRadius:'var(--r-sm)',
+            color:'var(--green)',fontWeight:800,fontSize:13,border:'1px solid var(--green)44',
+            textAlign:'right',whiteSpace:'nowrap',letterSpacing:'-.01em'}}>
+            {fmtMoney(price, li.currency)}
+          </div>
+        );
       }
     },
 
     /* ── Target Price — read-only amber pill ── */
     { key:'target_price', label:'Target Price', flex:'0.95 1 80px',
-      render:(li,idx)=>{
+      render:(li)=>{
         const tp = li.target_price;
         return tp
           ? <div style={{padding:'5px 8px',background:'var(--amber-lt,#fffbeb)',borderRadius:'var(--r-sm)',
@@ -299,47 +563,41 @@ export default function NewOrderPage() {
       }
     },
 
-    /* ── CHANGE 4: Margin % = ((Quoted×QTY - Sourced×QTY) / Quoted×QTY) × 100 ── */
-    { key:'margin', label:'Margin %', flex:'0.75 1 65px',
-      render:(li,idx)=>{
-        const qty       = Number(li.qty)||0;
-        const quoted    = Number(li.unit_price)||Number(li.quoted_price)||0;
-        const sourced   = Number(li.procurement_price)||0;
-        const qRev      = quoted * qty;
-        if (!qRev || !sourced) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
-        const sRev      = sourced * qty;
-        const pct       = ((qRev - sRev) / qRev * 100).toFixed(1);
-        const col = Number(pct) < 0  ? 'var(--red)'
-          : Number(pct) <= 10 ? 'var(--amber,#d97706)'
-          : Number(pct) <= 15 ? 'var(--green)'
-          : '#ca8a04';
-        const bg = Number(pct) < 0  ? 'var(--red-lt,#fef2f2)'
-          : Number(pct) <= 10 ? 'var(--amber-lt,#fffbeb)'
-          : Number(pct) <= 15 ? 'var(--green-lt)'
-          : '#fefce8';
+    /* ── Net Margin ── */
+    { key:'margin', label:'Net Margin', flex:'1.1 1 95px',
+      render:(li)=>{
+        const qty     = Number(li.qty) || 0;
+        const quote   = Number(li.unit_price) || Number(li.quoted_price) || 0;
+        const source  = Number(li.procurement_price) || 0;
+        if (!qty || !quote || !source) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
+        const netAmt  = (quote - source) * qty;
+        const pct     = ((quote - source) / source) * 100;
+        const col = netAmt < 0 ? 'var(--red)'
+          : pct <= 10 ? 'var(--amber,#d97706)'
+          : 'var(--green,#16a34a)';
+        const bg  = netAmt < 0 ? 'var(--red-lt,#fef2f2)'
+          : pct <= 10 ? 'var(--amber-lt,#fffbeb)'
+          : 'var(--green-lt,#f0fdf4)';
         return (
           <div style={{padding:'5px 8px',background:bg,borderRadius:'var(--r-sm)',
-            fontWeight:700,fontSize:11,textAlign:'right',
-            color:col,border:`1px solid ${col}33`}}>
-            {Number(pct)>=0?'+':''}{pct}%
+            border:`1px solid ${col}33`,textAlign:'right'}}>
+            <div style={{fontWeight:700,fontSize:12,color:col,whiteSpace:'nowrap'}}>
+              {netAmt<0?'-':'+'}₹{Math.abs(netAmt).toLocaleString('en-IN',{maximumFractionDigits:0})}
+            </div>
+            <div style={{fontSize:10,color:col,opacity:.8,marginTop:1}}>
+              {pct>=0?'+':''}{pct.toFixed(1)}%
+            </div>
           </div>
         );
       }
     },
 
-    { key:'currency',      label:'Cur.',                flex:'0.55 1 52px',
-      render:(li,idx)=><select className="input" value={li.currency} onChange={e=>upd(idx,'currency',e.target.value)}>
-        {['INR','USD','EUR','SGD','GBP','AED'].map(c=><option key={c}>{c}</option>)}
-      </select>
-    },
-    // CHANGE 3: Promised Delivery Date removed from line items view
-    // (delivery_date still saved in state and sent in payload — only hidden from UI)
-    // CHANGE 5: Status col removed from New Order view
-    // (line_status still initialised as 'negotiating' in state and sent in payload)
+    { key:'currency', label:'Cur.', flex:'0.55 1 52px',
+      render:(li)=>readCell(li.currency,{mono:true,color:'var(--text2)'}) },
 
-    /* ── CHANGE 6: Base Value = Unit Price × QTY ── */
+    /* ── Base Value = Unit Price × QTY ── */
     { key:'base_value', label:'Base Value', flex:'1 1 88px',
-      render:(li,idx)=>{
+      render:(li)=>{
         const qty = Number(li.qty)||0;
         const up  = Number(li.unit_price)||Number(li.quoted_price)||0;
         if (!qty || !up) return <span style={{color:'var(--text3)',fontSize:11,padding:'5px 8px',display:'block'}}>—</span>;
@@ -352,18 +610,18 @@ export default function NewOrderPage() {
         );
       }
     },
-    /* ── CHANGE 7: Tax % — from sourcing for this line item ── */
+    /* ── Tax % ── */
     { key:'tax_pct', label:'Tax %', flex:'0.55 1 52px',
-      render:(li,idx)=>(
+      render:(li)=>(
         <div style={{padding:'6px 8px',textAlign:'right',fontSize:12,
           color:Number(li.tax_rate)>0?'var(--teal,#0d9488)':'var(--text3)'}}>
           {Number(li.tax_rate)||0}%
         </div>
       )
     },
-    /* ── CHANGE 8: Total Value = Base Value + Tax ── */
+    /* ── Total Value = Base + Tax ── */
     { key:'total_value', label:'Total Value', flex:'1 1 88px',
-      render:(li,idx)=>{
+      render:(li)=>{
         const qty  = Number(li.qty)||0;
         const up   = Number(li.unit_price)||Number(li.quoted_price)||0;
         const base = qty * up;
@@ -389,12 +647,29 @@ export default function NewOrderPage() {
     <div style={{ maxWidth: 1500 }}>
       <div className="card">
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
-          <div className="card-title" style={{ marginBottom:0 }}>Create New Order</div>
+          <div className="card-title" style={{ marginBottom:0 }}>{existingOrderId ? '✏ Update Order' : 'Create New Order'}</div>
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
-            <span style={{ fontSize:11, color:'var(--text3)' }}>Order ID</span>
-            <span style={{ fontFamily:'DM Mono,monospace', fontWeight:700, fontSize:15, color:'var(--accent)', background:'var(--accent-lt)', padding:'4px 12px', borderRadius:'var(--r-sm)' }}>{orderId}</span>
+            {!existingOrderId && <>
+              <span style={{ fontSize:11, color:'var(--text3)' }}>Order ID</span>
+              <span style={{ fontFamily:'DM Mono,monospace', fontWeight:700, fontSize:15, color:'var(--accent)', background:'var(--accent-lt)', padding:'4px 12px', borderRadius:'var(--r-sm)' }}>{orderId}</span>
+            </>}
           </div>
         </div>
+
+        {/* ── Revision banner ── */}
+        {existingOrderId && (
+          <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',
+            background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)',
+            borderRadius:'var(--r-sm)',marginBottom:14,fontSize:13}}>
+            <span style={{fontSize:16}}>🔄</span>
+            <div>
+              <div style={{fontWeight:700,color:'var(--amber,#d97706)'}}>Revising existing order</div>
+              <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
+                Line items are updated from the revised quote. PO, delivery address and other details are pre-filled from the original order — change only what's needed, then click <strong>Update Order</strong>.
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Linked Enquiry / Quote — read-only reference, hidden when empty ── */}
         {(form.enquiry_id || form.quote_id) && (
@@ -473,67 +748,24 @@ export default function NewOrderPage() {
           </div>
         )}
 
-        {/* ── Delivery (Shipping) Address — live from customer record ── */}
-        {selectedCustomer && (() => {
-          let shippingAddresses = [];
-          try {
-            const raw = JSON.parse(selectedCustomer.shipping_addresses||'[]');
-            // Deduplicate by stringified address content
-            const seen = new Set();
-            shippingAddresses = raw.filter(addr => {
-              const key = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join('|');
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-          } catch(_) {}
-          const hasShipping = shippingAddresses.length > 0;
-          return (
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:12,fontWeight:700,color:'var(--text2)',marginBottom:6}}>
-                📦 Delivery Address
-                <span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:8}}>
-                  (live from customer profile)
-                </span>
-              </div>
-              {!hasShipping ? (
-                <div style={{padding:'8px 14px',borderRadius:'var(--r-sm)',
-                  background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)44',
-                  fontSize:12,color:'var(--amber,#d97706)',fontWeight:600}}>
-                  ⚠ No shipping addresses on file for this customer.
-                  <a href="/customers" style={{marginLeft:8,color:'var(--accent)'}}>Add in Customers →</a>
-                </div>
-              ) : (
-                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(280px,1fr))',gap:10}}>
-                  {shippingAddresses.map((addr,i)=>{
-                    const addrStr = [addr.attention,addr.street1,addr.street2,addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ');
-                    const isSelected = form.delivery_address === addrStr;
-                    return (
-                      <div key={i} onClick={()=>setForm(f=>({...f,delivery_address:isSelected?'':addrStr}))}
-                        style={{cursor:'pointer',padding:'10px 14px',borderRadius:'var(--r)',
-                          border:`2px solid ${isSelected?'var(--accent)':'var(--border)'}`,
-                          background:isSelected?'var(--accent-lt)':'var(--surface2)'}}>
-                        {addr.attention&&<div style={{fontWeight:700,fontSize:13}}>{addr.attention}</div>}
-                        <div style={{fontSize:12,color:isSelected?'var(--accent)':'var(--text2)',lineHeight:1.5}}>
-                          {[addr.street1,addr.street2].filter(Boolean).join(', ')}<br/>
-                          {[addr.city,addr.state,addr.country,addr.pincode].filter(Boolean).join(', ')}
-                          {addr.phone&&<div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>📞 {addr.phone}</div>}
-                        </div>
-                        {isSelected&&<div style={{fontSize:11,color:'var(--accent)',fontWeight:700,marginTop:4}}>✅ Selected</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {form.delivery_address&&(
-                <div style={{marginTop:6,fontSize:11,color:'var(--text3)'}}>
-                  Selected: <strong style={{color:'var(--accent)'}}>{form.delivery_address}</strong>
-                  <button className="btn btn-xs" style={{marginLeft:8}} onClick={()=>setForm(f=>({...f,delivery_address:''}))}>Clear</button>
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        {/* ── Delivery Address Panel ── */}
+        {selectedCustomer && (
+          <DeliveryAddressPanel
+            customer={selectedCustomer}
+            selectedAddress={form.delivery_address}
+            onSelect={str => setForm(f => ({ ...f, delivery_address: str }))}
+            isIntl={selectedCustomer.customer_scope === 'international'}
+            onCustomerUpdated={newAddresses => {
+              qc.setQueryData(['customers'], prev =>
+                (prev || []).map(c =>
+                  c.id === selectedCustomer.id
+                    ? { ...c, shipping_addresses: JSON.stringify(newAddresses) }
+                    : c
+                )
+              );
+            }}
+          />
+        )}
 
         {/* ── PO Upload ── */}
         <div className="section-divider">
@@ -544,8 +776,17 @@ export default function NewOrderPage() {
           <POUpload files={poFiles} onChange={setPoFiles} />
         </div>
 
-        {/* ── Line Items ── */}
-        <div className="section-divider">Line Items</div>
+        {/* ── Line Items — read-only from enquiry/quote ── */}
+        <div className="section-divider" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span>Line Items <span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:6}}>Read-only · sourced from enquiry/quote</span></span>
+          {form.enquiry_id && (
+            <button className="btn btn-sm"
+              onClick={handleEditViaEnquiry}
+              style={{fontSize:12,fontWeight:600,color:'var(--accent)',borderColor:'var(--accent)',background:'var(--accent-lt)'}}>
+              ✏ Modify Items via Enquiry
+            </button>
+          )}
+        </div>
 
         {/* Header */}
         <div style={{ display:'flex', gap:6, alignItems:'center', padding:'0 6px 7px 6px', borderBottom:'1px solid var(--border)', marginBottom:4 }}>
@@ -555,7 +796,6 @@ export default function NewOrderPage() {
               <span style={{ fontSize:11, fontWeight:600, color:'var(--text2)', whiteSpace:'nowrap' }}>{c.label}</span>
             </div>
           ))}
-          <div style={{ flex:'0 0 26px' }} />
         </div>
 
         {/* Rows */}
@@ -565,15 +805,8 @@ export default function NewOrderPage() {
             {cols.map(c=>(
               <div key={c.key} style={{ flex:c.flex, minWidth:0 }}>{c.render(li,idx)}</div>
             ))}
-            <div style={{ flex:'0 0 26px', display:'flex', justifyContent:'center' }}>
-              {items.length > 1
-                ? <button className="btn btn-xs btn-danger" style={{ padding:'1px 7px', fontSize:15, lineHeight:1 }} onClick={()=>removeItem(idx)}>×</button>
-                : <span />}
-            </div>
           </div>
         ))}
-
-        <button className="btn btn-sm" onClick={addItem} style={{ marginTop:10, marginBottom:10 }}>+ Add Line Item</button>
 
         {/* ── Order Total Summary ── */}
         {(() => {
@@ -647,12 +880,8 @@ export default function NewOrderPage() {
         {/* ── Actions ── */}
         <div style={{ display:'flex', justifyContent:'flex-end', alignItems:'center', gap:10, borderTop:'1px solid var(--border)', paddingTop:16 }}>
           <button className="btn" onClick={()=>navigate('/orders')} disabled={busy}>Cancel</button>
-          <button className="btn" onClick={handleSaveDraft} disabled={busy}
-            style={{ color:'var(--text2)', borderColor:'var(--border-md)' }}>
-            {busy ? '…' : '💾 Save Draft'}
-          </button>
           <button className="btn btn-primary" onClick={handleCreate} disabled={busy}>
-            {busy ? 'Creating…' : '📋 Create Order'}
+            {busy ? (existingOrderId ? 'Updating…' : 'Creating…') : (existingOrderId ? '✅ Update Order' : '📋 Create Order')}
           </button>
         </div>
       </div>

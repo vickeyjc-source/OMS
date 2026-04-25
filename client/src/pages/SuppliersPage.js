@@ -1,110 +1,12 @@
-// client/src/pages/SuppliersPage.js  v2 — full onboarding form matching customer style
+// client/src/pages/SuppliersPage.js  v3 — geo data from country-state-city package only
 import React, { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-
-// ── Geo Data (same as CustomersPage) ─────────────────────────────────────────
-const COUNTRIES = ['Afghanistan','Albania','Algeria','Andorra','Angola','Argentina','Armenia',
-  'Australia','Austria','Azerbaijan','Bahrain','Bangladesh','Belarus','Belgium','Bolivia',
-  'Bosnia','Brazil','Bulgaria','Cambodia','Canada','Chile','China','Colombia','Croatia',
-  'Cyprus','Czech Republic','Denmark','Egypt','Estonia','Ethiopia','Finland','France',
-  'Germany','Ghana','Greece','Guatemala','Hong Kong','Hungary','India','Indonesia','Iran',
-  'Iraq','Ireland','Israel','Italy','Japan','Jordan','Kazakhstan','Kenya','Kuwait','Latvia',
-  'Lebanon','Lithuania','Luxembourg','Malaysia','Mexico','Morocco','Myanmar','Nepal',
-  'Netherlands','New Zealand','Nigeria','Norway','Oman','Pakistan','Philippines','Poland',
-  'Portugal','Qatar','Romania','Russia','Saudi Arabia','Serbia','Singapore','Slovakia',
-  'South Africa','South Korea','Spain','Sri Lanka','Sweden','Switzerland','Taiwan',
-  'Thailand','Turkey','Ukraine','United Arab Emirates','United Kingdom','United States',
-  'Uruguay','Uzbekistan','Venezuela','Vietnam','Yemen','Zimbabwe'];
-
-const STATE_MAP = {
-  'India': ['Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
-    'Haryana','Himachal Pradesh','Jharkhand','Karnataka','Kerala','Madhya Pradesh','Maharashtra',
-    'Manipur','Meghalaya','Mizoram','Nagaland','Odisha','Punjab','Rajasthan','Sikkim',
-    'Tamil Nadu','Telangana','Tripura','Uttar Pradesh','Uttarakhand','West Bengal',
-    'Andaman and Nicobar Islands','Chandigarh','Dadra and Nagar Haveli','Daman and Diu',
-    'Delhi','Jammu and Kashmir','Ladakh','Lakshadweep','Puducherry'],
-  'United States': ['Alabama','Alaska','Arizona','Arkansas','California','Colorado','Connecticut',
-    'Delaware','Florida','Georgia','Hawaii','Idaho','Illinois','Indiana','Iowa','Kansas',
-    'Kentucky','Louisiana','Maine','Maryland','Massachusetts','Michigan','Minnesota',
-    'Mississippi','Missouri','Montana','Nebraska','Nevada','New Hampshire','New Jersey',
-    'New Mexico','New York','North Carolina','North Dakota','Ohio','Oklahoma','Oregon',
-    'Pennsylvania','Rhode Island','South Carolina','South Dakota','Tennessee','Texas',
-    'Utah','Vermont','Virginia','Washington','West Virginia','Wisconsin','Wyoming'],
-  'Australia': ['New South Wales','Victoria','Queensland','Western Australia','South Australia','Tasmania','ACT','Northern Territory'],
-  'Canada': ['Ontario','Quebec','British Columbia','Alberta','Manitoba','Saskatchewan','Nova Scotia','New Brunswick','Newfoundland','PEI','Northwest Territories','Nunavut','Yukon'],
-  'United Arab Emirates': ['Abu Dhabi','Dubai','Sharjah','Ajman','Umm Al Quwain','Ras Al Khaimah','Fujairah'],
-  'United Kingdom': ['England','Scotland','Wales','Northern Ireland'],
-  'Germany': ['Bavaria','Berlin','Brandenburg','Bremen','Hamburg','Hesse','Lower Saxony','Mecklenburg-Vorpommern','North Rhine-Westphalia','Rhineland-Palatinate','Saarland','Saxony','Saxony-Anhalt','Schleswig-Holstein','Thuringia'],
-  'China': ['Beijing','Shanghai','Guangdong','Zhejiang','Jiangsu','Shandong','Sichuan','Hubei','Hunan','Fujian','Liaoning','Henan','Hebei','Anhui','Shanxi','Shaanxi','Jilin','Heilongjiang','Yunnan','Guizhou','Guangxi','Inner Mongolia','Xinjiang','Tibet','Chongqing','Tianjin'],
-  'Japan': ['Tokyo','Osaka','Kanagawa','Aichi','Saitama','Chiba','Hyogo','Hokkaido','Fukuoka','Shizuoka'],
-  'Malaysia': ['Johor','Kedah','Kelantan','Melaka','Negeri Sembilan','Pahang','Penang','Perak','Perlis','Sabah','Sarawak','Selangor','Terengganu','Kuala Lumpur','Labuan','Putrajaya'],
-  'Singapore': ['Central Region','East Region','North Region','North-East Region','West Region'],
-};
-
-const CITY_MAP = {
-  'India': ['Agra','Ahmedabad','Amritsar','Aurangabad','Bangalore','Bhopal','Bhubaneswar',
-    'Chandigarh','Chennai','Coimbatore','Delhi','Dehradun','Faridabad','Ghaziabad',
-    'Gurgaon','Guwahati','Hyderabad','Indore','Jaipur','Jalandhar','Jammu','Jamshedpur',
-    'Jodhpur','Kanpur','Kochi','Kolkata','Kozhikode','Lucknow','Ludhiana','Madurai',
-    'Mangalore','Mumbai','Mysore','Nagpur','Nashik','Navi Mumbai','Noida','Patna',
-    'Pune','Raipur','Rajkot','Ranchi','Srinagar','Surat','Thiruvananthapuram',
-    'Thrissur','Tiruppur','Vadodara','Varanasi','Vijayawada','Visakhapatnam'],
-  'United States': ['Atlanta','Austin','Boston','Charlotte','Chicago','Columbus','Dallas',
-    'Denver','Detroit','Houston','Indianapolis','Las Vegas','Los Angeles','Miami',
-    'Minneapolis','Nashville','New York','Philadelphia','Phoenix','Portland',
-    'San Antonio','San Diego','San Francisco','San Jose','Seattle','Washington DC'],
-  'United Kingdom': ['Birmingham','Bristol','Edinburgh','Glasgow','Leeds','Leicester',
-    'Liverpool','London','Manchester','Newcastle','Nottingham','Sheffield'],
-  'Australia': ['Adelaide','Brisbane','Canberra','Darwin','Gold Coast','Hobart','Melbourne','Perth','Sydney'],
-  'Canada': ['Calgary','Edmonton','Halifax','Montreal','Ottawa','Quebec City','Toronto','Vancouver','Winnipeg'],
-  'Germany': ['Berlin','Cologne','Dortmund','Dresden','Düsseldorf','Frankfurt','Hamburg','Munich','Stuttgart'],
-  'China': ['Beijing','Chengdu','Chongqing','Guangzhou','Hangzhou','Nanjing','Shanghai','Shenzhen','Tianjin','Wuhan'],
-  'Japan': ['Fukuoka','Hiroshima','Kyoto','Nagoya','Osaka','Sapporo','Tokyo','Yokohama'],
-  'Singapore': ['Ang Mo Kio','Bedok','Jurong','Orchard','Tampines','Woodlands'],
-  'United Arab Emirates': ['Abu Dhabi','Al Ain','Dubai','Fujairah','Ras Al Khaimah','Sharjah'],
-  'Malaysia': ['George Town','Ipoh','Johor Bahru','Kota Kinabalu','Kuala Lumpur','Petaling Jaya'],
-  'France': ['Bordeaux','Lyon','Marseille','Montpellier','Nantes','Nice','Paris','Toulouse'],
-  'Netherlands': ['Amsterdam','Eindhoven','Rotterdam','The Hague','Utrecht'],
-  'South Korea': ['Busan','Daegu','Daejeon','Incheon','Seoul'],
-  'Taiwan': ['Kaohsiung','New Taipei','Taichung','Taipei'],
-  'Hong Kong': ['Central','Kowloon','Mong Kok','Tsim Sha Tsui','Wan Chai'],
-};
-
-const PHONE_CODES = [
-  {code:'+91',flag:'🇮🇳',name:'India'},{code:'+1',flag:'🇺🇸',name:'USA / Canada'},
-  {code:'+44',flag:'🇬🇧',name:'UK'},{code:'+61',flag:'🇦🇺',name:'Australia'},
-  {code:'+971',flag:'🇦🇪',name:'UAE'},{code:'+65',flag:'🇸🇬',name:'Singapore'},
-  {code:'+60',flag:'🇲🇾',name:'Malaysia'},{code:'+81',flag:'🇯🇵',name:'Japan'},
-  {code:'+82',flag:'🇰🇷',name:'South Korea'},{code:'+86',flag:'🇨🇳',name:'China'},
-  {code:'+852',flag:'🇭🇰',name:'Hong Kong'},{code:'+886',flag:'🇹🇼',name:'Taiwan'},
-  {code:'+49',flag:'🇩🇪',name:'Germany'},{code:'+33',flag:'🇫🇷',name:'France'},
-  {code:'+39',flag:'🇮🇹',name:'Italy'},{code:'+34',flag:'🇪🇸',name:'Spain'},
-  {code:'+31',flag:'🇳🇱',name:'Netherlands'},{code:'+46',flag:'🇸🇪',name:'Sweden'},
-  {code:'+41',flag:'🇨🇭',name:'Switzerland'},{code:'+966',flag:'🇸🇦',name:'Saudi Arabia'},
-  {code:'+974',flag:'🇶🇦',name:'Qatar'},{code:'+973',flag:'🇧🇭',name:'Bahrain'},
-  {code:'+965',flag:'🇰🇼',name:'Kuwait'},{code:'+968',flag:'🇴🇲',name:'Oman'},
-  {code:'+92',flag:'🇵🇰',name:'Pakistan'},{code:'+880',flag:'🇧🇩',name:'Bangladesh'},
-  {code:'+94',flag:'🇱🇰',name:'Sri Lanka'},{code:'+66',flag:'🇹🇭',name:'Thailand'},
-  {code:'+84',flag:'🇻🇳',name:'Vietnam'},{code:'+62',flag:'🇮🇩',name:'Indonesia'},
-  {code:'+63',flag:'🇵🇭',name:'Philippines'},{code:'+55',flag:'🇧🇷',name:'Brazil'},
-  {code:'+27',flag:'🇿🇦',name:'South Africa'},{code:'+20',flag:'🇪🇬',name:'Egypt'},
-  {code:'+52',flag:'🇲🇽',name:'Mexico'},{code:'+7',flag:'🇷🇺',name:'Russia'},
-];
-
-const dialCode = c => ({
-  'India':'+91','United States':'+1','Canada':'+1','United Kingdom':'+44',
-  'Australia':'+61','United Arab Emirates':'+971','Singapore':'+65','Malaysia':'+60',
-  'Japan':'+81','South Korea':'+82','China':'+86','Hong Kong':'+852','Taiwan':'+886',
-  'Germany':'+49','France':'+33','Italy':'+39','Spain':'+34','Netherlands':'+31',
-  'Sweden':'+46','Switzerland':'+41','Saudi Arabia':'+966','Qatar':'+974',
-  'Bahrain':'+973','Kuwait':'+965','Oman':'+968','Pakistan':'+92','Bangladesh':'+880',
-  'Sri Lanka':'+94','Thailand':'+66','Vietnam':'+84','Indonesia':'+62','Philippines':'+63',
-  'Brazil':'+55','South Africa':'+27','Egypt':'+20','Mexico':'+52','Russia':'+7',
-})[c] || '+91';
-
-const CURRENCIES = ['INR','USD','EUR','GBP','AED','SGD','JPY','CNY','AUD','CAD','CHF','HKD','MYR','NZD','QAR','SAR','THB','TWD'];
+import { fmtDateTime } from '../utils/helpers';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import { AddressForm, PhoneField, CountrySelect, StateSelect, CitySelect } from '../components/AddressForm';
+import { ALL_CURRENCIES } from '../utils/currencies';
 const SALUTATIONS = ['Mr.','Ms.','Mrs.','Dr.','Prof.'];
 const GST_TREATMENTS = ['Registered Business – Regular','Registered Business – Composition','Unregistered Business','Overseas','Special Economic Zone'];
 
@@ -129,106 +31,33 @@ const Tab = ({ label, active, onClick }) => (
   }}>{label}</button>
 );
 
-function StateField({ country, value, onChange }) {
-  const states = STATE_MAP[country] || [];
-  return states.length > 0
-    ? <select className="input" value={value} onChange={e=>onChange(e.target.value)}>
-        <option value="">— Select State / Region —</option>
-        {states.map(s=><option key={s}>{s}</option>)}
-      </select>
-    : <input className="input" value={value} onChange={e=>onChange(e.target.value)} placeholder="State / Province" />;
-}
-
-function CityField({ country, value, onChange }) {
-  const cities = CITY_MAP[country] || [];
-  const [useCustom, setUseCustom] = React.useState(!cities.includes(value) && !!value);
-  if (!cities.length) return <input className="input" value={value||''} onChange={e=>onChange(e.target.value)} placeholder="City" />;
-  if (useCustom) return (
-    <div style={{display:'flex',gap:6}}>
-      <input className="input" value={value||''} onChange={e=>onChange(e.target.value)} placeholder="Type city" style={{flex:1}}/>
-      <button type="button" className="btn btn-xs" onClick={()=>{setUseCustom(false);onChange('');}}>↩ List</button>
-    </div>
-  );
-  return (
-    <div style={{display:'flex',gap:6}}>
-      <select className="input" value={cities.includes(value)?value:''} onChange={e=>onChange(e.target.value)} style={{flex:1}}>
-        <option value="">— Select City —</option>
-        {cities.map(c=><option key={c}>{c}</option>)}
-      </select>
-      <button type="button" className="btn btn-xs" onClick={()=>setUseCustom(true)}>+ Other</button>
-    </div>
-  );
-}
-
-function PhoneField({ value, onChange, country }) {
-  const parts = (value||'').match(/^(\+\d{1,4})\s?(.*)$/) || [];
-  const [code, setCode] = React.useState(parts[1] || dialCode(country) || '+91');
-  const [num,  setNum]  = React.useState(parts[2] || (!value?.startsWith('+') ? value||'' : ''));
-  React.useEffect(() => {
-    const d = dialCode(country);
-    if (d && d !== code) { setCode(d); onChange(d + ' ' + num); }
-  }, [country]);
-  const upd = (c, n) => { setCode(c); setNum(n); onChange(c + ' ' + n); };
-  return (
-    <div style={{display:'flex',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'hidden',background:'var(--surface)'}}>
-      <select value={code} onChange={e=>upd(e.target.value,num)}
-        style={{border:'none',background:'var(--surface2)',padding:'6px 4px',fontSize:12,fontWeight:600,cursor:'pointer',outline:'none',minWidth:92,borderRight:'1px solid var(--border-md)'}}>
-        {PHONE_CODES.map(p=><option key={p.code+p.name} value={p.code}>{p.flag} {p.code} {p.name}</option>)}
-        {!PHONE_CODES.find(p=>p.code===code)&&<option value={code}>{code}</option>}
-      </select>
-      <input className="input" value={num} onChange={e=>upd(code,e.target.value)}
-        placeholder="Phone number" style={{border:'none',borderRadius:0,flex:1,boxShadow:'none'}}/>
-    </div>
-  );
-}
-
-function ShippingBlock({ addr, idx, onChange, onRemove }) {
+// ── Shipping Address Block (matches customer UX) ─────────────────────────────
+function ShippingBlock({ addr, idx, onChange, onRemove, domestic, excludeIndia }) {
   const [open, setOpen] = React.useState(idx === 0);
-  const set = (k,v) => onChange({...addr,[k]:v});
-  const label = addr.attention || addr.city || `Delivery Address ${idx+1}`;
+  const label = addr.attention || addr.city || `Delivery Address ${idx + 1}`;
   return (
     <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',marginBottom:10,overflow:'hidden'}}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface2)',cursor:'pointer'}} onClick={()=>setOpen(o=>!o)}>
+      <div role="button" tabIndex={0}
+        style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:'var(--surface2)',cursor:'pointer'}}
+        onClick={() => setOpen(o => !o)}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <span style={{fontSize:16}}>{open?'▾':'▸'}</span>
+          <span style={{fontSize:16}}>{open ? '▾' : '▸'}</span>
           <span style={{fontWeight:600,fontSize:13}}>{label}</span>
-          {addr.city&&<span style={{fontSize:11,color:'var(--text3)'}}>{[addr.city,addr.state,addr.country].filter(Boolean).join(', ')}</span>}
+          {addr.city && <span style={{fontSize:11,color:'var(--text3)'}}>{[addr.city,addr.state,addr.country].filter(Boolean).join(', ')}</span>}
         </div>
-        <button onClick={e=>{e.stopPropagation();onRemove();}} style={{background:'none',border:'none',cursor:'pointer',color:'var(--red)',fontSize:18,lineHeight:1}}>×</button>
+        <button onClick={e => { e.stopPropagation(); onRemove(); }}
+          style={{background:'none',border:'none',cursor:'pointer',color:'var(--red)',fontSize:18,lineHeight:1}}>×</button>
       </div>
       {open && (
         <div style={{padding:'14px'}}>
-          <div className="form-group"><label className="label">Attention / Name</label>
-            <input className="input" value={addr.attention||''} onChange={e=>set('attention',e.target.value)}/>
-          </div>
-          <div className="form-grid-2">
-            <div className="form-group"><label className="label">Country</label>
-              <select className="input" value={addr.country||'India'} onChange={e=>set('country',e.target.value)}>
-                {COUNTRIES.map(c=><option key={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="form-group"><label className="label">Pin / Zip Code</label>
-              <input className="input" value={addr.pincode||''} onChange={e=>set('pincode',e.target.value)}/>
-            </div>
-          </div>
-          <div className="form-group"><label className="label">Street 1</label><input className="input" value={addr.street1||''} onChange={e=>set('street1',e.target.value)}/></div>
-          <div className="form-group"><label className="label">Street 2</label><input className="input" value={addr.street2||''} onChange={e=>set('street2',e.target.value)}/></div>
-          <div className="form-grid-2">
-            <div className="form-group"><label className="label">City</label>
-              <CityField country={addr.country||'India'} value={addr.city||''} onChange={v=>set('city',v)}/>
-            </div>
-            <div className="form-group"><label className="label">State</label>
-              <StateField country={addr.country||'India'} value={addr.state||''} onChange={v=>set('state',v)}/>
-            </div>
-          </div>
-          <div className="form-group"><label className="label">Phone</label>
-            <PhoneField value={addr.phone||''} country={addr.country||'India'} onChange={v=>set('phone',v)}/>
-          </div>
+          <AddressForm value={addr} onChange={onChange} domestic={domestic} excludeIndia={excludeIndia} />
         </div>
       )}
     </div>
   );
 }
+
 
 // ── Bulk Upload ───────────────────────────────────────────────────────────────
 function BulkUpload({ onClose, onDone }) {
@@ -308,7 +137,7 @@ function BulkUpload({ onClose, onDone }) {
 }
 
 // ── Supplier Modal ─────────────────────────────────────────────────────────────
-function SupplierModal({ supplier, linecards, onClose }) {
+export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
   const qc = useQueryClient();
   const isNew = !supplier?.id;
   const isIntl = (f) => f.type === 'international';
@@ -341,7 +170,6 @@ function SupplierModal({ supplier, linecards, onClose }) {
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   const intl = isIntl(form);
-  const billingStates = STATE_MAP[form.billing_country]||[];
 
   const addShipping = () => set('shipping_addresses',[...form.shipping_addresses,{attention:'',street1:'',street2:'',city:'',state:'',country: intl ? '' : 'India',pincode:'',phone:''}]);
   const addFromBilling = () => set('shipping_addresses',[...form.shipping_addresses,{
@@ -364,13 +192,19 @@ function SupplierModal({ supplier, linecards, onClose }) {
 
   const mutation = useMutation({
     mutationFn: d => isNew ? api.post('/suppliers',d) : api.put('/suppliers/'+supplier.id,d),
-    onSuccess: () => { qc.invalidateQueries(['suppliers']); toast.success('Supplier saved'); onClose(); },
+    onSuccess: (res) => {
+      qc.invalidateQueries(['suppliers']);
+      toast.success('Supplier saved');
+      onSaved && onSaved(res?.data);
+      onClose();
+    },
     onError: e => toast.error(e.response?.data?.error||'Save failed'),
   });
   const deleteMutation = useMutation({
     mutationFn: () => api.delete('/suppliers/'+supplier.id),
     onSuccess: () => { qc.invalidateQueries(['suppliers']); toast.success('Deleted'); onClose(); },
   });
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const save = () => {
     if (!form.name) { toast.error('Supplier name is required'); return; }
@@ -383,8 +217,9 @@ function SupplierModal({ supplier, linecards, onClose }) {
   };
 
   return (
+    <>
     <div className="overlay">
-      <div className="modal" style={{maxWidth:920,maxHeight:'96vh'}}>
+      <div className="modal" style={{maxWidth:'98vw',width:'98vw',maxHeight:'98vh',padding:0}}>
         <div className="modal-header">
           <div>
             <h2>{isNew?'New Supplier':'Edit Supplier'}</h2>
@@ -396,7 +231,7 @@ function SupplierModal({ supplier, linecards, onClose }) {
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
-        <div className="modal-body" style={{paddingBottom:0}}>
+        <div className="modal-body" style={{paddingBottom:0, padding:'20px 28px 0 28px'}}>
 
           {/* ── Top fields ── */}
           <div className="form-group" style={{marginBottom:13}}>
@@ -404,7 +239,7 @@ function SupplierModal({ supplier, linecards, onClose }) {
             <div style={{display:'flex',gap:20,paddingTop:8}}>
               {[['domestic','🇮🇳 Domestic (India)'],['international','🌐 International']].map(([v,l])=>(
                 <label key={v} style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                  <input type="radio" checked={form.type===v} onChange={()=>{set('type',v);if(v==='domestic'){set('billing_country','India');set('bank_country','India');}}} style={{accentColor:'var(--accent)'}}/>{l}
+                  <input type="radio" checked={form.type===v} onChange={()=>{set('type',v);if(v==='domestic'){set('billing_country','India');set('bank_country','India');set('currency','INR');}}} style={{accentColor:'var(--accent)'}}/>{l}
                 </label>
               ))}
             </div>
@@ -429,17 +264,21 @@ function SupplierModal({ supplier, linecards, onClose }) {
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:13,marginBottom:13}}>
             <div className="form-group"><label className="label">Email</label><input className="input" type="email" value={form.email} onChange={e=>set('email',e.target.value)}/></div>
             <div className="form-group"><label className="label">Work Phone</label>
-              <PhoneField value={form.phone} country={form.billing_country||'India'} onChange={v=>set('phone',v)}/>
+              <PhoneField value={form.phone} onChange={v=>set('phone',v)} domestic={!intl} excludeIndia={intl}/>
             </div>
             <div className="form-group"><label className="label">Mobile</label>
-              <PhoneField value={form.mobile||''} country={form.billing_country||'India'} onChange={v=>set('mobile',v)}/>
+              <PhoneField value={form.mobile||''} onChange={v=>set('mobile',v)} domestic={!intl} excludeIndia={intl}/>
             </div>
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:13,marginBottom:4}}>
             <div className="form-group"><label className="label">Website</label><input className="input" value={form.website} onChange={e=>set('website',e.target.value)} placeholder="example.com"/></div>
             <div className="form-group"><label className="label">Currency</label>
-              <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}>{CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
+              {intl ? (
+                <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}>{ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
+              ) : (
+                <input className="input" value="INR" readOnly style={{background:'var(--surface2)',cursor:'not-allowed',color:'var(--text2)'}} />
+              )}
             </div>
             <div className="form-group"><label className="label">Status</label>
               <select className="input" value={form.status} onChange={e=>set('status',e.target.value)}>
@@ -467,10 +306,7 @@ function SupplierModal({ supplier, linecards, onClose }) {
                       </select>
                     </div>
                     <div className="form-group"><label className="label">Place of Supply</label>
-                      <select className="input" value={form.place_of_supply} onChange={e=>set('place_of_supply',e.target.value)}>
-                        <option value="">— Select State —</option>
-                        {STATE_MAP['India'].map(s=><option key={s}>{s}</option>)}
-                      </select>
+                      <StateSelect country="India" value={form.place_of_supply} onChange={v=>set('place_of_supply',v)}/>
                     </div>
                   </div>
                   <div className="form-grid-2">
@@ -511,32 +347,30 @@ function SupplierModal({ supplier, linecards, onClose }) {
           {tab==='address' && (
             <div style={{paddingTop:16}}>
               <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🏢 Office / Billing Address</div>
-              <div className="form-group"><label className="label">Attention</label>
-                <input className="input" value={form.billing_attention} onChange={e=>set('billing_attention',e.target.value)}/>
-              </div>
-              <div className="form-grid-2">
-                <div className="form-group"><label className="label">Country</label>
-                  <select className="input" value={form.billing_country} onChange={e=>set('billing_country',e.target.value)}>
-                    {COUNTRIES.map(c=><option key={c}>{c}</option>)}
-                  </select>
-                </div>
-                <div className="form-group"><label className="label">Pin / Zip Code</label>
-                  <input className="input" value={form.billing_pincode} onChange={e=>set('billing_pincode',e.target.value)}/>
-                </div>
-              </div>
-              <div className="form-group"><label className="label">Street 1</label><input className="input" value={form.billing_street1} onChange={e=>set('billing_street1',e.target.value)}/></div>
-              <div className="form-group"><label className="label">Street 2</label><input className="input" value={form.billing_street2} onChange={e=>set('billing_street2',e.target.value)}/></div>
-              <div className="form-grid-2">
-                <div className="form-group"><label className="label">City</label>
-                  <CityField country={form.billing_country} value={form.billing_city} onChange={v=>set('billing_city',v)}/>
-                </div>
-                <div className="form-group"><label className="label">State / Province</label>
-                  <StateField country={form.billing_country} value={form.billing_state} onChange={v=>set('billing_state',v)}/>
-                </div>
-              </div>
-              <div className="form-group"><label className="label">Phone</label>
-                <PhoneField value={form.billing_phone} country={form.billing_country} onChange={v=>set('billing_phone',v)}/>
-              </div>
+              <AddressForm
+                value={{
+                  attention: form.billing_attention,
+                  phone: form.billing_phone,
+                  street1: form.billing_street1,
+                  street2: form.billing_street2,
+                  country: form.billing_country,
+                  state: form.billing_state,
+                  city: form.billing_city,
+                  pincode: form.billing_pincode,
+                }}
+                onChange={a => setForm(f => ({...f,
+                  billing_attention: a.attention || '',
+                  billing_phone: a.phone || '',
+                  billing_street1: a.street1 || '',
+                  billing_street2: a.street2 || '',
+                  billing_country: a.country || 'India',
+                  billing_state: a.state || '',
+                  billing_city: a.city || '',
+                  billing_pincode: a.pincode || '',
+                }))}
+                domestic={!intl}
+                excludeIndia={intl}
+              />
 
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:20,marginBottom:12}}>
                 <div style={{fontWeight:700,fontSize:13}}>🚚 Dispatch / Warehouse Addresses</div>
@@ -551,7 +385,7 @@ function SupplierModal({ supplier, linecards, onClose }) {
                 </div>
               )}
               {form.shipping_addresses.map((a,i)=>(
-                <ShippingBlock key={i} addr={a} idx={i} onChange={x=>updShipping(i,x)} onRemove={()=>delShipping(i)}/>
+                <ShippingBlock key={i} addr={a} idx={i} onChange={x=>updShipping(i,x)} onRemove={()=>delShipping(i)} domestic={!intl} excludeIndia={intl}/>
               ))}
             </div>
           )}
@@ -570,8 +404,8 @@ function SupplierModal({ supplier, linecards, onClose }) {
                         <td><input className="input" style={{fontSize:12}} value={cp.first_name||''} onChange={e=>updContact(i,'first_name',e.target.value)}/></td>
                         <td><input className="input" style={{fontSize:12}} value={cp.last_name||''} onChange={e=>updContact(i,'last_name',e.target.value)}/></td>
                         <td><input className="input" style={{fontSize:12}} type="email" value={cp.email||''} onChange={e=>updContact(i,'email',e.target.value)}/></td>
-                        <td><PhoneField value={cp.work_phone||''} country={form.billing_country||'India'} onChange={v=>updContact(i,'work_phone',v)}/></td>
-                        <td><PhoneField value={cp.mobile||''} country={form.billing_country||'India'} onChange={v=>updContact(i,'mobile',v)}/></td>
+                        <td><PhoneField value={cp.work_phone||''} onChange={v=>updContact(i,'work_phone',v)} domestic={!intl} excludeIndia={intl}/></td>
+                        <td><PhoneField value={cp.mobile||''} onChange={v=>updContact(i,'mobile',v)} domestic={!intl} excludeIndia={intl}/></td>
                         <td style={{textAlign:'center'}}><input type="checkbox" checked={!!cp.email_notify} onChange={e=>updContact(i,'email_notify',e.target.checked)} style={{accentColor:'var(--accent)'}}/></td>
                         <td style={{textAlign:'center'}}><input type="checkbox" checked={!!cp.sms_notify} onChange={e=>updContact(i,'sms_notify',e.target.checked)} style={{accentColor:'var(--accent)'}}/></td>
                         <td><button onClick={()=>delContact(i)} style={{background:'none',border:'none',cursor:'pointer',color:'var(--red)',fontSize:16}}>×</button></td>
@@ -622,10 +456,10 @@ function SupplierModal({ supplier, linecards, onClose }) {
                 {!intl&&<div className="form-group"><label className="label">IFSC Code <span className="req">*</span></label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
                 <div className="form-grid-2">
                   <div className="form-group"><label className="label">Currency</label>
-                    <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>{CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
+                    <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>{ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
                   </div>
                   <div className="form-group"><label className="label">Bank Country</label>
-                    <select className="input" value={form.bank_country} onChange={e=>set('bank_country',e.target.value)}>{COUNTRIES.map(c=><option key={c}>{c}</option>)}</select>
+                    <CountrySelect value={form.bank_country} onChange={v=>set('bank_country',v)}/>
                   </div>
                 </div>
               </div>
@@ -652,12 +486,21 @@ function SupplierModal({ supplier, linecards, onClose }) {
 
         </div>
         <div className="modal-footer">
-          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>{deleteMutation.mutate()}}>Delete</button>}
+          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>{mutation.isPending?'Saving…':'Save Supplier'}</button>
         </div>
       </div>
     </div>
+    {confirmDelete && (
+      <ConfirmDeleteModal
+        label={supplier?.name}
+        onConfirm={() => { setConfirmDelete(false); deleteMutation.mutate(); }}
+        onCancel={() => setConfirmDelete(false)}
+        loading={deleteMutation.isPending}
+      />
+    )}
+    </>
   );
 }
 
@@ -681,7 +524,7 @@ export default function SuppliersPage() {
            (s.supplier_no||'').toLowerCase().includes(q) ||
            (s.email||'').toLowerCase().includes(q) ||
            (s.gstin||'').toLowerCase().includes(q);
-  });
+  }).sort((a,b)=>(b.created||b.created_at||'').localeCompare(a.created||a.created_at||''));
 
   return (
     <div>
@@ -708,7 +551,7 @@ export default function SuppliersPage() {
           <thead><tr>
             <th>Sup. No.</th><th>Supplier Name</th><th>Type</th>
             <th>Contact</th><th>Location</th><th>GSTIN / VAT</th>
-            <th>Currency</th><th>Line Cards</th><th>Terms</th><th>Status</th>
+            <th>Currency</th><th>Line Cards</th><th>Terms</th><th>Status</th><th>Created</th>
             <th style={{textAlign:'right'}}>Actions</th>
           </tr></thead>
           <tbody>
@@ -732,6 +575,7 @@ export default function SuppliersPage() {
                 </td>
                 <td style={{fontSize:11,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.payment_terms||'—'}</td>
                 <td>{s.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
+                <td style={{fontSize:11,color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(s.created||s.created_at)}</td>
                 <td style={{textAlign:'right'}}>
                   <button className="btn btn-xs btn-primary" onClick={()=>setModal(s)}>✏ Manage</button>
                 </td>

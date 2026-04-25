@@ -1,5 +1,5 @@
 // client/src/components/Layout.js  v2
-import React from 'react';
+import React, { useState } from 'react';
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { initials, DEPT_LABEL } from '../utils/helpers';
@@ -11,6 +11,7 @@ const Icon = ({ d }) => <svg width="14" height="14" fill="none" stroke="currentC
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [showKb, setShowKb] = useState(false);
   const { data: summary = {} } = useQuery({ queryKey:['summary'], queryFn:()=>api.get('/reports/summary').then(r=>r.data), refetchInterval:30000 });
 
   const dept = user.department || 'sales';
@@ -22,6 +23,7 @@ export default function Layout() {
 
   return (
     <div className="app-layout">
+      <a href="#main-content" className="skip-to-content">Skip to content</a>
       <aside className="sidebar">
         <div className="sb-logo">
           <div className="sb-logo-mark">⚡ Cif<span>lux</span> OMS</div>
@@ -62,11 +64,6 @@ export default function Layout() {
             All Orders
             {(summary.open||0) > 0 && <span className="nav-badge">{summary.open}</span>}
           </NavLink>
-          <NavLink to="/orders/new" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
-            <Icon d="M8 1.5a6.5 6.5 0 100 13A6.5 6.5 0 008 1.5zM8 5v6M5 8h6"/>
-            New Order
-          </NavLink>
-
           <div className="sb-section">Bins</div>
           <NavLink to="/sourcing-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M3 3h10l1 9H2L3 3zM6 3V2a2 2 0 014 0v1M6 7h4"/>
@@ -86,6 +83,10 @@ export default function Layout() {
               {(summary.delivery_hub||0) > 0 && <span className="nav-badge" style={{background:'var(--teal,#0d9488)',color:'#fff'}}>{summary.delivery_hub}</span>}
             </NavLink>
           )}
+          <NavLink to="/inventory" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+            <Icon d="M1 4h14v10H1zM1 8h14M5 4v10M9 4v10"/>
+            Stock Inventory
+          </NavLink>
           <NavLink to="/closed-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M2 8l4 4 8-8"/>
             Closed Bin
@@ -126,10 +127,15 @@ export default function Layout() {
             </NavLink>
           </>}
 
-          <div className="sb-section">Reports</div>
+          <div className="sb-section">Reports &amp; Tax</div>
           <NavLink to="/reports" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M1.5 1.5h13v13H1.5zM1.5 11l3.5-4 2.5 2 3.5-5 3 3"/>Reports
           </NavLink>
+          {isAdmin && (
+            <NavLink to="/tax-settings" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+              <Icon d="M8 1.5C4.4 1.5 1.5 4.4 1.5 8s2.9 6.5 6.5 6.5 6.5-2.9 6.5-6.5S11.6 1.5 8 1.5zM8 4v8M6 6h4M6 10h4"/>Tax Settings
+            </NavLink>
+          )}
 
           <div style={{borderTop:'1px solid var(--border)',marginTop:8,paddingTop:4}}>
             <div className="nav-item" onClick={async()=>{await logout();navigate('/login');}}>
@@ -142,19 +148,152 @@ export default function Layout() {
         <header className="topbar">
           <div style={{fontWeight:600,fontSize:15}}><PageTitle /></div>
           <div className="flex gap-8">
+            <button
+              className="btn btn-xs"
+              title="Keyboard shortcuts"
+              onClick={() => setShowKb(v => !v)}
+              style={{fontWeight:500,gap:5,display:'flex',alignItems:'center'}}
+            >
+              <span style={{fontSize:14}}>⌨</span> Shortcuts
+            </button>
             <div className="flex gap-8" style={{padding:'5px 11px 5px 5px',borderRadius:999,background:'var(--surface2)',border:'1px solid var(--border)',fontSize:12,color:'var(--text2)'}}>
               <div className="avatar avatar-sm">{initials(user.name)}</div>
               {user.name} · <span style={{color:'var(--accent)'}}>{DEPT_LABEL[dept]}</span>
             </div>
           </div>
         </header>
-        <main className="page-content"><Outlet /></main>
+        <main id="main-content" className="page-content"><Outlet /></main>
       </div>
+      {showKb && <KeyboardShortcutsPanel onClose={() => setShowKb(false)} />}
     </div>
   );
 }
 
 function PageTitle() {
-  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance'};
+  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance'};
   return map[window.location.pathname] || 'Ciflux OMS';
+}
+
+// ── Keyboard Shortcuts Panel ──────────────────────────────────────────────────
+const KB_SECTIONS = [
+  {
+    title: '⌨ Form Fields',
+    rows: [
+      [['Tab'],             'Move to next field'],
+      [['Shift','Tab'],     'Move to previous field'],
+      [['Enter'],           'Confirm / submit form'],
+      [['Space'],           'Toggle checkbox / expand accordion'],
+      [['Esc'],             'Clear field / cancel inline edit'],
+    ],
+  },
+  {
+    title: '🔍 Search & Navigation',
+    rows: [
+      [['/'],               'Focus the search bar from anywhere'],
+      [['↑','↓'],           'Move through list rows / dropdown options'],
+      [['Enter'],           'Open selected row / select option'],
+      [['Esc'],             'Close dropdown / clear search'],
+    ],
+  },
+  {
+    title: '🗂 Modals & Dialogs',
+    rows: [
+      [['Tab'],             'Cycle through all buttons & inputs inside modal'],
+      [['Shift','Tab'],     'Cycle backwards inside modal'],
+      [['Esc'],             'Close modal without saving'],
+      [['Enter'],           'Activate focused button (Save / Confirm)'],
+    ],
+  },
+  {
+    title: '📋 Tables & Lists',
+    rows: [
+      [['↑','↓'],           'Move between rows'],
+      [['Enter'],           'Open / edit the focused row'],
+      [['Tab'],             'Jump to next interactive column cell'],
+    ],
+  },
+  {
+    title: '🗔 Page-level',
+    rows: [
+      [['Alt','←'],         'Go back (browser history)'],
+      [['Alt','→'],         'Go forward (browser history)'],
+    ],
+  },
+];
+
+function KeyboardShortcutsPanel({ onClose }) {
+  return (
+    <div
+      className="overlay"
+      style={{zIndex:1200}}
+      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="modal" style={{maxWidth:600,maxHeight:'90vh'}}>
+        <div className="modal-header">
+          <h2 style={{display:'flex',alignItems:'center',gap:8}}><span style={{fontSize:20}}>⌨</span> Keyboard Shortcuts</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{overflowY:'auto',paddingBottom:24}}>
+          {KB_SECTIONS.map(sec => (
+            <div key={sec.title} style={{marginBottom:20}}>
+              <div style={{
+                fontWeight:700, fontSize:12, color:'var(--text2)',
+                textTransform:'uppercase', letterSpacing:'0.06em',
+                marginBottom:8, paddingBottom:5,
+                borderBottom:'1px solid var(--border)',
+              }}>
+                {sec.title}
+              </div>
+              <table style={{width:'100%',borderCollapse:'collapse'}}>
+                <tbody>
+                  {sec.rows.map(([keys, desc], i) => (
+                    <tr key={i} style={{borderBottom:'1px solid var(--border)'}}>
+                      <td style={{padding:'7px 0',width:'42%',verticalAlign:'middle'}}>
+                        <span style={{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+                          {keys.map((k, ki) => (
+                            <React.Fragment key={ki}>
+                              <kbd style={{
+                                display:'inline-block',
+                                padding:'2px 7px',
+                                borderRadius:5,
+                                background:'var(--surface2)',
+                                border:'1px solid var(--border-md)',
+                                boxShadow:'0 1px 0 var(--border-md)',
+                                fontSize:12,
+                                fontFamily:'DM Mono,monospace',
+                                fontWeight:600,
+                                color:'var(--text)',
+                                whiteSpace:'nowrap',
+                              }}>{k}</kbd>
+                              {ki < keys.length - 1 && (
+                                <span style={{fontSize:10,color:'var(--text3)',fontWeight:600}}>+</span>
+                              )}
+                            </React.Fragment>
+                          ))}
+                        </span>
+                      </td>
+                      <td style={{padding:'7px 0 7px 16px',fontSize:13,color:'var(--text)',verticalAlign:'middle'}}>
+                        {desc}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+
+          <div style={{
+            marginTop:12,padding:'10px 14px',borderRadius:'var(--r-sm)',
+            background:'var(--accent-lt)',border:'1px solid var(--accent)33',
+            fontSize:12,color:'var(--text2)',lineHeight:1.6,
+          }}>
+            💡 <strong>Tip:</strong> Focus rings are shown on all interactive elements. Use <kbd style={{padding:'1px 5px',borderRadius:4,background:'var(--surface2)',border:'1px solid var(--border-md)',fontSize:11,fontFamily:'DM Mono,monospace'}}>Tab</kbd> to navigate field-by-field through any form without touching the mouse.
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-primary" onClick={onClose}>Got it</button>
+        </div>
+      </div>
+    </div>
+  );
 }

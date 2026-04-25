@@ -1,28 +1,53 @@
 // client/src/pages/QuotesPage.js
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../utils/api';
-import { fmt, fmtCur, StatusBadge } from '../utils/helpers';
+import { fmt, fmtCur, StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
+import { printDoc, generateQuotePDF } from '../utils/pdfUtils';
 import { toast } from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const STATUS_FILTERS = ['all', 'active', 'superseded', 'order_created', 'returned_to_sourcing'];
+const STATUS_PRIORITY = ['active', 'returned_to_sourcing', 'order_created', 'superseded'];
 
-function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
+function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('items');
+  // Tab index: 0=Line Items, 1=Customer Response, 2=Details
+  const [tabIdx, setTabIdx] = useState(0);
   // Details tab — editable fields
   const [zohoQuote,       setZohoQuote]       = useState(quote.zoho_quote_no || '');
   const [validUntil,      setValidUntil]       = useState(quote.valid_until   || '');
   const [sentToCustomer,  setSentToCustomer]   = useState(!!(quote.sent_to_customer));
-  // Response tab — tick state
-  const [respAccepted,    setRespAccepted]     = useState(quote.customer_response === 'accepted');
-  const [respRejected,    setRespRejected]     = useState(quote.customer_response === 'rejected');
-  const [respNegotiating, setRespNegotiating]  = useState(quote.customer_response === 'negotiating');
+  // Response tab — selected (pending) value; only saved on OK
+  const [pendingResponse, setPendingResponse]  = useState('');
+  // Init from saved notes so locked view shows them when modal is reopened
   const [responseNotes,   setResponseNotes]    = useState(quote.customer_response_notes || '');
   const [savedResponse,   setSavedResponse]    = useState(quote.customer_response || '');
+
+  // Sync editable fields when parent passes updated quote data (after save+refresh)
+  useEffect(() => {
+    setZohoQuote(quote.zoho_quote_no || '');
+    setValidUntil(quote.valid_until   || '');
+    setSentToCustomer(!!(quote.sent_to_customer));
+    setSavedResponse(quote.customer_response || '');
+    setResponseNotes(quote.customer_response_notes || '');
+  }, [quote.id, quote.zoho_quote_no, quote.valid_until, quote.sent_to_customer, quote.customer_response, quote.customer_response_notes]);
+
+  // Linked enquiry — tells us if source is still re-pricing (returned_to_sourcing)
+  const linkedEnq = (enquiries||[]).find(e => e.id === quote.enquiry_id) || null;
+  const enquiryAwaitingRevision = linkedEnq?.status === 'returned_to_sourcing';
+
+  // Parent quote — for showing previous customer response context in V2+
+  const { data: allQuotes=[] } = useQuery({
+    queryKey: ['quotes'],
+    queryFn: () => api.get('/quotes').then(r => r.data),
+    staleTime: 30000,
+  });
+  const parentQuote = quote.parent_quote_id
+    ? allQuotes.find(q => q.id === quote.parent_quote_id)
+    : null;
 
   const custObj = customers.find(c => c.id === quote.customer_id);
 
@@ -54,43 +79,98 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
     mutationFn: async () => {
       const res = await api.get('/quotes/' + quote.id + '/lineitems');
       const { items } = res.data;
-      navigate('/orders/new', { state: { prefill: {
-        customer_id:  quote.customer_id,
-        enquiry_id:   quote.enquiry_id || '',
-        enquiry_no:   quote.enquiry_id || '',
-        quote_id:     quote.id,
-        quote_no:     quote.quote_no,
-        lineItems:    items.map((li, i) => ({
-          id:               'li' + i + Date.now(),
-          component:        li.component    || '',
-          manufacturer:     li.manufacturer || '',
-          ipn:              li.ipn          || '',
-          qty:              String(li.quantity || ''),
-          unit_price:       li.quote_price  != null ? String(li.quote_price) : '',
-          quoted_price:     li.quote_price  != null ? String(li.quote_price) : '',
-          target_price:     li.target_price != null ? String(li.target_price) : '',
-          procurement_price:li.sourced_price!= null ? String(li.sourced_price) : '',
-          currency:         li.quote_currency || li.target_currency || 'INR',
-          order_date:       new Date().toISOString().slice(0,10),
-          delivery_date:    li.preferred_delivery_date || '',
-          line_status:      'negotiating',
-          tax_rate:         Number(li.tax_rate) || 0,
-        })),
-      }}});
+      const lineItems = items.map((li, i) => ({
+        id:               'li' + i + Date.now(),
+        component:        li.component    || '',
+        manufacturer:     li.manufacturer || '',
+        ipn:              li.ipn          || '',
+        qty:              String(li.quantity || ''),
+        unit_price:       li.quote_price  != null ? String(li.quote_price) : '',
+        quoted_price:     li.quote_price  != null ? String(li.quote_price) : '',
+        target_price:     li.target_price != null ? String(li.target_price) : '',
+        procurement_price:li.sourced_price!= null ? String(li.sourced_price) : '',
+        currency:         li.quote_currency || li.target_currency || 'INR',
+        order_date:       new Date().toISOString().slice(0,10),
+        delivery_date:    li.preferred_delivery_date || '',
+        line_status:      'negotiating',
+        tax_rate:         Number(li.tax_rate) || 0,
+      }));
+
+      if (quote.existing_order_id) {
+        // Revision flow — update the existing order's line items and quote reference
+        const existingOrder = await api.get('/orders/' + quote.existing_order_id).then(r => r.data).catch(() => null);
+        navigate('/orders/new', { state: { prefill: {
+          customer_id:      quote.customer_id,
+          enquiry_id:       quote.enquiry_id || '',
+          enquiry_no:       quote.enquiry_id || '',
+          quote_id:         quote.id,
+          quote_no:         quote.quote_no,
+          // Pre-fill existing order fields
+          existing_order_id: quote.existing_order_id,
+          po_number:         existingOrder?.po_number || '',
+          delivery_address:  existingOrder?.delivery_address || '',
+          tentative_date:    existingOrder?.tentative_date || '',
+          notes:             existingOrder?.notes || '',
+          customer_ref:      existingOrder?.customer_ref || '',
+          lineItems,
+        }}});
+      } else {
+        navigate('/orders/new', { state: { prefill: {
+          customer_id:  quote.customer_id,
+          enquiry_id:   quote.enquiry_id || '',
+          enquiry_no:   quote.enquiry_id || '',
+          quote_id:     quote.id,
+          quote_no:     quote.quote_no,
+          lineItems,
+        }}});
+      }
     },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
+  // Cannot create order if sourcing is still re-pricing (ENQ in returned_to_sourcing)
+  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active' && !enquiryAwaitingRevision;
+
   const items = lineData?.items || [];
 
+  // Tab order: items → response → details
   const tabs = [
     { k: 'items',    l: '📦 Line Items' },
-    { k: 'details',  l: '📋 Details' },
     { k: 'response', l: '💬 Customer Response' },
+    { k: 'details',  l: '📋 Details' },
   ];
 
-  const responseValue  = respAccepted ? 'accepted' : respRejected ? 'rejected' : respNegotiating ? 'negotiating' : '';
-  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active';
+  const detailsAllFilled = quote.status === 'active' && !!zohoQuote.trim() && !!validUntil &&
+    (savedResponse === 'negotiating' || sentToCustomer);
+
+  // Confirm → save details → create order
+  const handleCreateOrder = () => {
+    if (!window.confirm('Are you sure you want to create an order from this quote?\nThis will save the details and open the new order form.')) return;
+    saveMutation.mutate(
+      { zoho_quote_no: zohoQuote.trim(), valid_until: validUntil, sent_to_customer: 1 },
+      { onSuccess: () => createOrderMutation.mutate() }
+    );
+  };
+
+  // Auto-save response then advance to Details tab (not when rejected)
+  const handleNextFromResponse = () => {
+    if (!pendingResponse) { toast.error('Please select a customer response'); return; }
+    if (pendingResponse === 'rejected') {
+      // Just save, stay on the Response tab
+      if (pendingResponse === savedResponse) { toast.success('Response already saved'); return; }
+      saveMutation.mutate(
+        { customer_response: pendingResponse, customer_response_notes: responseNotes },
+        { onSuccess: () => { setSavedResponse(pendingResponse); toast.success('Response saved'); } }
+      );
+      return;
+    }
+    if (pendingResponse === savedResponse) { setTabIdx(2); return; }  // already saved, just advance
+    saveMutation.mutate(
+      { customer_response: pendingResponse, customer_response_notes: responseNotes },
+      { onSuccess: () => { setSavedResponse(pendingResponse); setTabIdx(2); } }
+    );
+  };
+
 
   return (
     <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
@@ -104,27 +184,33 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
           </div>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <span style={{fontSize:12,color:'var(--text2)'}}>{custObj?.name || quote.customer_id}</span>
+            <button className="btn btn-xs" style={{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600,fontSize:12,padding:'4px 12px'}}
+              onClick={()=>printDoc(generateQuotePDF(quote, custObj))}>⬇ Download PDF</button>
             <button className="close-x" onClick={onClose}>×</button>
           </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tab step indicators — NOT clickable; use Next/Back buttons to navigate */}
         <div style={{display:'flex',gap:0,borderBottom:'1px solid var(--border)',padding:'0 20px'}}>
-          {tabs.map(t => (
-            <button key={t.k} onClick={() => setActiveTab(t.k)}
-              style={{padding:'10px 16px',border:'none',background:'transparent',cursor:'pointer',
-                fontSize:13,fontWeight:activeTab===t.k?700:400,
-                borderBottom:activeTab===t.k?'2px solid var(--accent)':'2px solid transparent',
-                color:activeTab===t.k?'var(--accent)':'var(--text2)'}}>
+          {tabs.map((t, i) => (
+            <div key={t.k}
+              style={{padding:'10px 16px',border:'none',background:'transparent',
+                fontSize:13,fontWeight:tabIdx===i?700:400,
+                borderBottom:tabIdx===i?'2px solid var(--accent)':'2px solid transparent',
+                color:tabIdx===i?'var(--accent)':i<tabIdx?'var(--green)':'var(--text3)',
+                display:'flex',alignItems:'center',gap:5,cursor:'default',userSelect:'none'}}>
+              {i < tabIdx && <svg width="12" height="10" viewBox="0 0 12 10" fill="none">
+                <path d="M1 5L4.5 8.5L11 1" stroke="var(--green)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>}
               {t.l}
-            </button>
+            </div>
           ))}
         </div>
 
         <div className="modal-body">
 
-          {/* Tab: Line Items */}
-          {activeTab === 'items' && (
+          {/* Tab 0: Line Items */}
+          {tabIdx === 0 && (
             <div>
               {items.length === 0
                 ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>Loading items…</div>
@@ -177,8 +263,131 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
             </div>
           )}
 
-          {/* Tab: Details */}
-          {activeTab === 'details' && (
+          {/* Tab 1: Customer Response */}
+          {tabIdx === 1 && (
+            <div>
+              {/* ── Sourcing re-pricing warning — blocks all response actions ── */}
+              {enquiryAwaitingRevision && (
+                <div style={{marginBottom:16,padding:'14px 16px',borderRadius:10,
+                  border:'2px solid var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)',
+                  display:'flex',alignItems:'flex-start',gap:12}}>
+                  <span style={{fontSize:22,flexShrink:0}}>⏳</span>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)',marginBottom:4}}>
+                      Waiting for Sourcing to re-price
+                    </div>
+                    <div style={{fontSize:12,color:'var(--text2)'}}>
+                      This quote has been sent back to Sourcing for revised pricing.
+                      Customer response and order creation are disabled until Sourcing returns the updated quote.
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* ── Previous response context (shown in V2+ when response not yet saved) ── */}
+              {!savedResponse && parentQuote?.customer_response && (
+                <div style={{marginBottom:14,padding:'10px 14px',borderRadius:8,
+                  background:'var(--surface2)',border:'1px solid var(--border)',
+                  display:'flex',alignItems:'center',gap:10}}>
+                  <span style={{fontSize:13}}>📋</span>
+                  <div style={{fontSize:12,color:'var(--text2)'}}>
+                    <span style={{fontWeight:700,color:'var(--text3)',marginRight:4}}>Previous response (V{(quote.revision||1)-1}):</span>
+                    <span style={{fontWeight:600,
+                      color:parentQuote.customer_response==='accepted'?'var(--green)':parentQuote.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
+                      {parentQuote.customer_response === 'accepted' ? '✓ Accepted' : parentQuote.customer_response === 'rejected' ? '✗ Rejected' : '⟳ Negotiating'}
+                    </span>
+                    {parentQuote.customer_response_notes && (
+                      <span style={{color:'var(--text3)',marginLeft:6,fontSize:11}}>— {parentQuote.customer_response_notes}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {/* ── LOCKED view once saved ── */}
+              {savedResponse ? (
+                <div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:18}}>
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <rect x="2" y="6" width="10" height="7" rx="1.5" stroke="var(--text3)" strokeWidth="1.5"/>
+                      <path d="M4.5 6V4a2.5 2.5 0 0 1 5 0v2" stroke="var(--text3)" strokeWidth="1.5" strokeLinecap="round"/>
+                    </svg>
+                    <span style={{fontSize:11,color:'var(--text3)',fontWeight:600,letterSpacing:.4}}>RESPONSE LOCKED — CANNOT BE MODIFIED</span>
+                  </div>
+                  {/* Saved response badge */}
+                  <div style={{marginBottom:18,padding:'12px 18px',borderRadius:10,fontSize:14,fontWeight:700,
+                    display:'inline-flex',alignItems:'center',gap:10,
+                    background:savedResponse==='accepted'?'var(--green-lt)':savedResponse==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
+                    border:`1.5px solid ${savedResponse==='accepted'?'var(--green)':savedResponse==='rejected'?'var(--red)':'var(--amber,#d97706)'}`,
+                    color:savedResponse==='accepted'?'var(--green)':savedResponse==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
+                    {savedResponse==='accepted' ? '✓ Accepted' : savedResponse==='rejected' ? '✗ Rejected' : '⟳ Negotiating'}
+                  </div>
+                  {/* Saved notes read-only */}
+                  {responseNotes && (
+                    <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:13}}>
+                      <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4}}>NOTES</div>
+                      <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{responseNotes}</div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                /* ── Editable view — choose response (starts blank each time modal opens) ── */
+                <div style={{opacity: enquiryAwaitingRevision ? 0.4 : 1, pointerEvents: enquiryAwaitingRevision ? 'none' : 'auto'}}>
+                  <div style={{marginBottom:14}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:10,letterSpacing:.5}}>
+                      SELECT CUSTOMER RESPONSE <span style={{color:'var(--red)',marginLeft:2}}>*</span>
+                    </div>
+                    <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                      {[
+                        {val:'accepted',    label:'Accepted',    color:'var(--green)'},
+                        {val:'rejected',    label:'Rejected',    color:'var(--red)'},
+                        {val:'negotiating', label:'Negotiating', color:'var(--amber,#d97706)'},
+                      ].map(opt => {
+                        const isSelected = pendingResponse === opt.val;
+                        const isDisabled = !!pendingResponse && !isSelected;
+                        return (
+                          <button key={opt.val}
+                            disabled={isDisabled}
+                            onClick={() => setPendingResponse(isSelected ? '' : opt.val)}
+                            style={{display:'inline-flex',alignItems:'center',gap:8,cursor:isDisabled?'not-allowed':'pointer',
+                              padding:'10px 18px',borderRadius:8,border:'none',
+                              outline:`1.5px solid ${isSelected?opt.color:'var(--border)'}`,
+                              background:isSelected?opt.color+'22':isDisabled?'var(--surface2)':'var(--surface2)',
+                              opacity:isDisabled?0.45:1,
+                              transition:'all .15s'}}>
+                            <span style={{width:19,height:19,borderRadius:4,flexShrink:0,
+                              border:`2px solid ${isSelected?opt.color:'var(--border)'}`,
+                              background:isSelected?opt.color:'transparent',
+                              display:'flex',alignItems:'center',justifyContent:'center',transition:'all .15s'}}>
+                              {isSelected && <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
+                                <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>}
+                            </span>
+                            <span style={{fontSize:13,fontWeight:isSelected?700:400,
+                              color:isSelected?opt.color:'var(--text2)',
+                              textDecoration:isDisabled?'line-through':'none'}}>
+                              {opt.label}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {!pendingResponse && (
+                      <div style={{marginTop:8,fontSize:11,color:'var(--red)',fontWeight:500}}>
+                        Please select a response before proceeding.
+                      </div>
+                    )}
+                  </div>
+                  <div className="form-group" style={{marginBottom:12}}>
+                    <label className="label">Notes</label>
+                    <textarea className="input" rows={3} value={responseNotes}
+                      onChange={e => setResponseNotes(e.target.value)}
+                      placeholder="Customer feedback, conditions, etc."/>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab 2: Details */}
+          {tabIdx === 2 && (
             <div>
               {/* Read-only info strip */}
               <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16,padding:'10px 14px',
@@ -188,7 +397,8 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
                   {l:'Status',     v:quote.status?.replace(/_/g,' ')},
                   {l:'Revision',   v:quote.revision||1},
                   {l:'Enquiry',    v:quote.enquiry_id||'—', mono:true},
-                  {l:'Created',    v:(quote.created_at||'').slice(0,10)},
+                  {l:'Created',    v:fmtDateTime(quote.created_at)},
+                  {l:'Last Updated', v:fmtDateTime(quote.updated_at||quote.created_at)||'—'},
                 ].map(f=>(
                   <div key={f.l} style={{minWidth:100}}>
                     <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:2}}>{f.l.toUpperCase()}</div>
@@ -203,24 +413,31 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
                   <input className="input" value={zohoQuote}
                     onChange={e => setZohoQuote(e.target.value)}
                     placeholder="e.g. ZQ-2024-001"
-                    style={{fontFamily:'monospace'}}/>
+                    disabled={quote.status !== 'active'}
+                    style={{fontFamily:'monospace',outline:!zohoQuote.trim()?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
                 </div>
                 <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Valid Until</label>
+                  <label className="label">Valid Until (Delivery) <span className="req">*</span></label>
                   <input className="input" type="date" value={validUntil}
-                    onChange={e => setValidUntil(e.target.value)}/>
+                    onChange={e => setValidUntil(e.target.value)}
+                    disabled={quote.status !== 'active'}
+                    style={{outline:!validUntil?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
                 </div>
               </div>
-              {/* Sent to customer tick */}
+              {/* Sent to customer tick — only for accepted */}
+              {savedResponse !== 'negotiating' && (
               <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:.5}}>
+                  SEND TO CUSTOMER <span style={{color:'var(--red)',marginLeft:2}}>*</span>
+                </div>
                 <label style={{display:'inline-flex',alignItems:'center',gap:10,cursor:'pointer',
                   padding:'10px 16px',borderRadius:8,
-                  border:`1.5px solid ${sentToCustomer?'var(--green)':'var(--border)'}`,
-                  background:sentToCustomer?'var(--green-lt)':'var(--surface2)',
+                  border:`1.5px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
+                  background:sentToCustomer?'var(--green-lt)':'var(--red-lt,#fff5f5)',
                   transition:'all .15s'}}>
                   <span style={{width:20,height:20,borderRadius:5,flexShrink:0,display:'flex',
                     alignItems:'center',justifyContent:'center',
-                    border:`2px solid ${sentToCustomer?'var(--green)':'var(--border)'}`,
+                    border:`2px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
                     background:sentToCustomer?'var(--green)':'transparent',transition:'all .15s'}}>
                     {sentToCustomer && <svg width="11" height="9" viewBox="0 0 11 9" fill="none">
                       <path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -229,131 +446,112 @@ function QuoteDetailModal({ quote, customers, onClose, onRefresh }) {
                   <input type="checkbox" checked={sentToCustomer} onChange={e=>setSentToCustomer(e.target.checked)}
                     style={{position:'absolute',opacity:0,width:0,height:0}}/>
                   <span style={{fontSize:13,fontWeight:sentToCustomer?600:400,
-                    color:sentToCustomer?'var(--green)':'var(--text2)'}}>
-                    Sent to customer
+                    color:sentToCustomer?'var(--green)':'var(--red)'}}>
+                    {sentToCustomer ? '✓ Sent to customer' : 'Mark as sent to customer (required)'}
                   </span>
                 </label>
+                {!sentToCustomer && (
+                  <div style={{marginTop:6,fontSize:11,color:'var(--red)',fontWeight:500}}>
+                    This field is mandatory before saving details.
+                  </div>
+                )}
               </div>
+              )}
               {quote.notes && (
-                <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:12}}>
+                <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:12,marginBottom:14}}>
                   <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4}}>NOTES</div>
                   <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
                 </div>
               )}
-              <div style={{marginTop:14,display:'flex',gap:8}}>
-                {/* CHANGE: Save Details only active when quote is active + both fields filled */}
-                <button className="btn btn-primary"
-                  disabled={quote.status !== 'active' || !zohoQuote.trim() || !validUntil}
-                  style={{opacity:(quote.status !== 'active' || !zohoQuote.trim() || !validUntil)?0.45:1}}
-                  onClick={() => {
-                    if (quote.status !== 'active') { toast.error('Quote must be active to save details'); return; }
-                    if (!zohoQuote.trim()) { toast.error('Zoho Quote No. is required'); return; }
-                    if (!validUntil)       { toast.error('Valid Until date is required'); return; }
-                    saveMutation.mutate({
-                      zoho_quote_no:    zohoQuote.trim(),
-                      valid_until:      validUntil,
-                      sent_to_customer: sentToCustomer ? 1 : 0,
-                    }, { onSuccess: () => toast.success('Details saved') });
-                  }}>
-                  Save Details
-                </button>
-                {quote.status !== 'active' && (
-                  <span style={{fontSize:11,color:'var(--text3)',alignSelf:'center'}}>
-                    Only active quotes can be updated
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Tab: Customer Response */}
-          {activeTab === 'response' && (
-            <div>
-              {savedResponse && (
-                <div style={{marginBottom:16,padding:'10px 14px',borderRadius:8,fontSize:13,fontWeight:600,
-                  background:savedResponse==='accepted'?'var(--green-lt)':savedResponse==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
-                  color:savedResponse==='accepted'?'var(--green)':savedResponse==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
-                  {savedResponse==='accepted'?'✓ Customer accepted':savedResponse==='rejected'?'✗ Customer rejected':'Negotiating'}
+              {quote.status !== 'active' && (
+                <div style={{marginTop:10,fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>
+                  Only active quotes can be updated.
                 </div>
               )}
-              <div style={{marginBottom:14}}>
-                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:10,letterSpacing:.5}}>CUSTOMER RESPONSE</div>
-                <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                  {[
-                    {val:'accepted',    label:'Accepted',    color:'var(--green)', state:respAccepted},
-                    {val:'rejected',    label:'Rejected',    color:'var(--red)',   state:respRejected},
-                    {val:'negotiating', label:'Negotiating', color:'var(--amber,#d97706)', state:respNegotiating},
-                  ].map(opt => (
-                    <label key={opt.val} style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',
-                      padding:'9px 16px',borderRadius:8,
-                      border:`1.5px solid ${opt.state?opt.color:'var(--border)'}`,
-                      background:opt.state?opt.color+'18':'var(--surface2)',
-                      transition:'all .15s'}}>
-                      <span style={{width:18,height:18,borderRadius:4,flexShrink:0,
-                        border:`2px solid ${opt.state?opt.color:'var(--border)'}`,
-                        background:opt.state?opt.color:'transparent',
-                        display:'flex',alignItems:'center',justifyContent:'center',transition:'all .15s'}}>
-                        {opt.state && <svg width="10" height="8" viewBox="0 0 10 8" fill="none">
-                          <path d="M1 4L3.5 6.5L9 1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
-                        </svg>}
-                      </span>
-                      <input type="checkbox" checked={opt.state}
-                        onChange={() => {
-                          setRespAccepted(opt.val==='accepted'?!opt.state:false);
-                          setRespRejected(opt.val==='rejected'?!opt.state:false);
-                          setRespNegotiating(opt.val==='negotiating'?!opt.state:false);
-                        }}
-                        style={{position:'absolute',opacity:0,width:0,height:0}}/>
-                      <span style={{fontSize:13,fontWeight:opt.state?600:400,color:opt.state?opt.color:'var(--text2)'}}>
-                        {opt.label}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-              <div className="form-group">
-                <label className="label">Notes</label>
-                <textarea className="input" rows={3} value={responseNotes}
-                  onChange={e => setResponseNotes(e.target.value)}
-                  placeholder="Customer feedback, conditions, etc."/>
-              </div>
-              <button className="btn btn-primary" style={{marginTop:8}}
-                onClick={() => {
-                  saveMutation.mutate({ customer_response: responseValue, customer_response_notes: responseNotes },
-                    { onSuccess: () => { toast.success('Response saved'); setSavedResponse(responseValue); }});
-                }}>
-                Save Response
-              </button>
             </div>
           )}
 
-        </div>
+          {/* ── Unified bottom nav bar — shown on ALL tabs ── */}
+          <div style={{marginTop:20,paddingTop:14,borderTop:'1px solid var(--border)',
+            display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
 
-        <div className="modal-footer">
-          {canCreateOrder && (
-            <button className="btn btn-primary"
-              style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
-              onClick={() => createOrderMutation.mutate()}>
-              ➕ Create Order from Quote
-            </button>
-          )}
-          {/* ADDED: Send to Revision — shown when active + customer rejected or negotiating */}
-          {quote.status === 'active' && (respRejected || respNegotiating) && (
-            <button className="btn"
-              style={{background:'var(--amber,#d97706)',color:'#fff',
-                borderColor:'var(--amber,#d97706)',fontWeight:600}}
-              disabled={reviseMutation.isPending}
-              onClick={() => {
-                if (!window.confirm('Send this quote back to Sourcing for re-pricing? The current quote will be superseded and a new revision created.')) return;
-                reviseMutation.mutate();
-              }}>
-              {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
-            </button>
-          )}
-          {!canCreateOrder && quote.status === 'active' && savedResponse !== 'accepted' && !respRejected && !respNegotiating && (
-            <span style={{fontSize:12,color:'var(--text3)'}}>Save customer acceptance to create order</span>
-          )}
-          <button className="btn" onClick={onClose}>Close</button>
+            {/* Left: Back */}
+            {tabIdx > 0 && (
+              <button className="btn" onClick={() => setTabIdx(t => t - 1)} style={{fontWeight:500}}>← Back</button>
+            )}
+
+            {/* Centre: action buttons — only on Details tab */}
+
+            {tabIdx === 2 && canCreateOrder && detailsAllFilled && (
+              <button className="btn btn-primary"
+                style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+                disabled={saveMutation.isPending || createOrderMutation.isPending}
+                onClick={handleCreateOrder}>
+                {(saveMutation.isPending || createOrderMutation.isPending) ? 'Processing…' : '➕ Create Order from Quote'}
+              </button>
+            )}
+            {tabIdx === 2 && !canCreateOrder && detailsAllFilled && (
+              <button className="btn btn-primary"
+                disabled={saveMutation.isPending}
+                style={{fontWeight:600}}
+                onClick={() => saveMutation.mutate(
+                  { zoho_quote_no: zohoQuote.trim(), valid_until: validUntil, sent_to_customer: 1 },
+                  { onSuccess: () => toast.success('Details saved') }
+                )}>
+                {saveMutation.isPending ? 'Saving…' : 'Save Details'}
+              </button>
+            )}
+            {tabIdx === 2 && quote.status === 'active' && savedResponse === 'negotiating' && !enquiryAwaitingRevision && (
+              <button className="btn"
+                style={{background:'var(--amber,#d97706)',color:'#fff',
+                  borderColor:'var(--amber,#d97706)',fontWeight:600}}
+                disabled={reviseMutation.isPending}
+                onClick={() => {
+                  if (!window.confirm('Send this quote back to Sourcing for re-pricing? The current quote will be superseded and a new revision created.')) return;
+                  reviseMutation.mutate();
+                }}>
+                {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
+              </button>
+            )}
+
+            {/* Spacer */}
+            <span style={{flex:1}}/>
+
+            {/* Right: Close + Next */}
+            <button className="btn" onClick={onClose} style={{fontWeight:500}}>✕ Close</button>
+            {tabIdx === 0 && (
+              <button className="btn btn-primary" onClick={() => setTabIdx(1)} style={{fontWeight:600}}>
+                Next → Customer Response
+              </button>
+            )}
+            {tabIdx === 1 && (
+              savedResponse
+                ? savedResponse === 'rejected'
+                  ? <button className="btn btn-primary" onClick={onClose} style={{fontWeight:600,background:'var(--green)',borderColor:'var(--green)'}}>
+                      ✓ Done
+                    </button>
+                  : savedResponse === 'negotiating'
+                    ? /* Negotiating: sent to revision, cannot go to Details until V2 quote comes back */
+                      <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
+                        borderRadius:8,background:'var(--amber-lt,#fffbeb)',
+                        border:'1px solid var(--amber,#d97706)',fontSize:12,
+                        color:'var(--amber,#d97706)',fontWeight:600}}>
+                        ⟳ Response saved — waiting for revised quote from Sourcing
+                      </div>
+                    : <button className="btn btn-primary" onClick={() => setTabIdx(2)} style={{fontWeight:600}}>
+                        Next → Details
+                      </button>
+                : <button className="btn btn-primary"
+                    disabled={!pendingResponse || saveMutation.isPending || enquiryAwaitingRevision}
+                    style={{opacity:(!pendingResponse||enquiryAwaitingRevision)?0.45:1,fontWeight:600}}
+                    onClick={handleNextFromResponse}>
+                    {saveMutation.isPending ? 'Saving…'
+                      : pendingResponse === 'rejected' ? 'Save Response'
+                      : 'Save & Next → Details'}
+                  </button>
+            )}
+          </div>
+
         </div>
       </div>
     </div>
@@ -368,10 +566,34 @@ export default function QuotesPage() {
 
   const { data: quotes=[], refetch }   = useQuery({ queryKey:['quotes'],    queryFn:()=>api.get('/quotes').then(r=>r.data) });
   const { data: customers=[] }         = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
+  const { data: enquiries=[] }         = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>r.data).catch(()=>[]), staleTime:60000 });
 
   const custName = id => customers.find(c => c.id === id)?.name || id;
 
-  const filtered = quotes.filter(q => {
+  // Group all quotes by enquiry_id — show one row per enquiry (the current/latest quote)
+  const enquiryGroups = useMemo(() => {
+    const groups = {};
+    quotes.forEach(q => {
+      const key = q.enquiry_id || String(q.id);
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(q);
+    });
+    return Object.values(groups).map(group => {
+      let primary = null;
+      for (const status of STATUS_PRIORITY) {
+        const byStatus = group.filter(q => q.status === status);
+        if (byStatus.length > 0) {
+          // Among same-priority status, pick the highest revision
+          primary = byStatus.sort((a, b) => (b.revision||1) - (a.revision||1))[0];
+          break;
+        }
+      }
+      if (!primary) primary = group[0];
+      return { ...primary, _totalVersions: group.length };
+    });
+  }, [quotes]);
+
+  const filtered = enquiryGroups.filter(q => {
     const matchFilter = filter === 'all' || q.status === filter;
     const s = search.toLowerCase();
     const matchSearch = !search
@@ -379,14 +601,14 @@ export default function QuotesPage() {
       || custName(q.customer_id).toLowerCase().includes(s)
       || (q.enquiry_id||'').toLowerCase().includes(s);
     return matchFilter && matchSearch;
-  });
+  }).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
 
   const counts = {
-    all:                   quotes.length,
-    active:                quotes.filter(q=>q.status==='active').length,
-    superseded:            quotes.filter(q=>q.status==='superseded').length,
-    order_created:         quotes.filter(q=>q.status==='order_created').length,
-    returned_to_sourcing:  quotes.filter(q=>q.status==='returned_to_sourcing').length,
+    all:                   enquiryGroups.length,
+    active:                enquiryGroups.filter(q=>q.status==='active').length,
+    superseded:            enquiryGroups.filter(q=>q.status==='superseded').length,
+    order_created:         enquiryGroups.filter(q=>q.status==='order_created').length,
+    returned_to_sourcing:  enquiryGroups.filter(q=>q.status==='returned_to_sourcing').length,
   };
 
   const filterLabels = {
@@ -440,7 +662,7 @@ export default function QuotesPage() {
               <thead><tr>
                 <th>Quote No.</th><th>Customer</th><th>Enquiry</th>
                 <th>Status</th><th>Response</th><th>Revision</th>
-                <th>Valid Until</th><th>Created</th><th style={{textAlign:'right'}}>Actions</th>
+                <th>Valid Until</th><th>Created</th><th style={{textAlign:'center'}}>Days in Stage</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
                 {filtered.map(q => (
@@ -458,9 +680,17 @@ export default function QuotesPage() {
                           </span>
                         : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
                     </td>
-                    <td style={{textAlign:'center'}}>{q.revision||1}</td>
+                    <td style={{textAlign:'center'}}>
+                      {q.revision||1}
+                      {q._totalVersions > 1 && (
+                        <span style={{fontSize:10,color:'var(--text3)',marginLeft:5,fontWeight:400}}>
+                          ({q._totalVersions} ver.)
+                        </span>
+                      )}
+                    </td>
                     <td style={{fontSize:12,color:'var(--text2)'}}>{q.valid_until||'—'}</td>
-                    <td style={{fontSize:11,color:'var(--text3)'}}>{(q.created_at||'').slice(0,10)}</td>
+                    <td style={{fontSize:11,color:'var(--text3)'}}>{fmtDateTime(q.created_at)}</td>
+                    <td><DaysBadge updatedAt={q.updated_at||q.created_at} /></td>
                     <td style={{textAlign:'right'}}>
                       <button className="btn btn-xs btn-primary" onClick={e=>{e.stopPropagation();setSelected(q)}}>
                         View
@@ -477,8 +707,9 @@ export default function QuotesPage() {
         <QuoteDetailModal
           quote={selected}
           customers={customers}
+          enquiries={enquiries}
           onClose={() => setSelected(null)}
-          onRefresh={() => { refetch(); setSelected(q => quotes.find(x=>x.id===q?.id)||null); }}
+          onRefresh={async () => { const res = await refetch(); setSelected(q => (res.data||[]).find(x=>x.id===q?.id)||null); }}
         />
       )}
     </div>

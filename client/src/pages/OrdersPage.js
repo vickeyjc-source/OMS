@@ -3,7 +3,8 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, orderTotal, isDelayed, StatusBadge } from '../utils/helpers';
+import { fmt, fmtCur, orderTotal, isDelayed, StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
+import { printDoc, generateOrderPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
@@ -72,11 +73,21 @@ function ShipperSelect({ value, onChange, shippers }) {
 
 function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRefresh }) {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const perms = user.perms || {};
   const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
   const canSeeProcPrice = perms.canSeeProcurementPrice !== false;
   const [editSection, setEditSection] = useState(null);
+
+  // Linked enquiry — needed for "Modify Items via Enquiry" flow
+  const { data: linkedEnquiry } = useQuery({
+    queryKey: ['enquiry', order.enquiry_id],
+    queryFn: () => api.get('/enquiries/' + order.enquiry_id).then(r => r.data),
+    enabled: !!order.enquiry_id,
+    staleTime: 30000,
+  });
+
   const [infoForm, setInfoForm] = useState({ enquiry_no:order.enquiry_no||'', quote_no:order.quote_no||'', tentative_date:order.tentative_date||'', po_number:order.po_number||'', notes:order.notes||'', delivery_address:order.delivery_address||'', allow_partial_shipment:order.allow_partial_shipment||0 });
   const [statusVal, setStatusVal] = useState(order.status);
   const [comment, setComment]     = useState('');
@@ -91,7 +102,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const [showHold, setShowHold]             = useState(false);
   const [showCancel, setShowCancel]         = useState(false);
   const [showProcurement, setShowProcurement] = useState(false);
-  const [showBackEnq, setShowBackEnq]       = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+
   const [cancelReason, setCancelReason] = useState('');
   const [paymentSaved, setPaymentSaved] = useState(false);
   const setP = (k,v) => setPayment(p=>({...p,[k]:v}));
@@ -172,7 +184,6 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           <div>
             <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
               <h2 style={{marginBottom:0}}>{order.id}</h2>
-              {order.customer_ref&&<span className="mono" style={{fontSize:13,color:'var(--text3)'}}>{perms.canSeeCustomer!==false?order.customer_ref:''}</span>}
             </div>
             {perms.canSeeCustomer!==false && (
               <div style={{marginTop:4,display:'flex',alignItems:'baseline',gap:8}}>
@@ -181,24 +192,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
               </div>
             )}
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:24,marginRight:14}}>
-            {/* Base Value */}
-            {Object.keys(liBaseByCur).map(cur=>(
-              <div key={cur} style={{textAlign:'right'}}>
-                <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',letterSpacing:.5,marginBottom:3}}>BASE VALUE</div>
-                <div style={{fontSize:22,fontWeight:800,color:'var(--accent)',letterSpacing:'-.03em',lineHeight:1}}>{fmtAmt(liBaseByCur[cur],cur)}</div>
-              </div>
-            ))}
-            {/* Total Value — show only if different from base (tax applies) */}
-            {hasTax && Object.keys(liTotalByCur).map(cur=>(
-              <div key={cur+'t'} style={{textAlign:'right'}}>
-                <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',letterSpacing:.5,marginBottom:3}}>TOTAL VALUE</div>
-                <div style={{fontSize:22,fontWeight:800,color:'var(--green)',letterSpacing:'-.03em',lineHeight:1}}>{fmtAmt(liTotalByCur[cur],cur)}</div>
-                <div style={{fontSize:10,color:'var(--green)',fontWeight:600,marginTop:2}}>incl. tax</div>
-              </div>
-            ))}
+          <div style={{display:'flex',alignItems:'center',gap:12,marginRight:14}}>
             <StatusBadge s={order.status}/>
-            <button className="close-x" onClick={onClose}>×</button>
           </div>
         </div>
         <div className="modal-body">
@@ -320,7 +315,26 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           <div className="card card-sm">
             <div className="card-title">
               <span>📦 Line Items ({order.lineItems?.length||0})</span>
-              {canEdit&&<button className="btn btn-xs btn-primary" onClick={()=>setEditSection(editSection==='items'?null:'items')}>Edit Items</button>}
+              {canEdit && order.enquiry_id && linkedEnquiry && !['payment_approval','procurement','shipped','delivered_hub','delivered_customer','closed'].includes(order.status) && order.customer_payment_status !== 'paid' && (
+                <button className="btn btn-xs"
+                  onClick={() => navigate('/enquiries/new', { state: {
+                    editEnquiry: linkedEnquiry,
+                    returnToOrder: true,
+                    existingOrder: {
+                      id:               order.id,
+                      order_no:         order.customer_ref || order.id,
+                      po_number:        order.po_number || '',
+                      delivery_address: order.delivery_address || '',
+                      tentative_date:   order.tentative_date || '',
+                      notes:            order.notes || '',
+                      quote_id:         order.quote_id || '',
+                      quote_no:         order.quote_no || '',
+                    }
+                  } })}
+                  style={{fontSize:11,fontWeight:600,color:'var(--accent)',borderColor:'var(--accent)',background:'var(--accent-lt)'}}>
+                  ✏ Modify Items via Enquiry
+                </button>
+              )}
             </div>
             <div style={{overflowX:'auto'}}>
               <table className="li-table">
@@ -394,12 +408,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     </tr>
                   ))}
                   <tr style={{background:'var(--surface2)',fontWeight:700}}>
-                    <td colSpan={canSeeProcPrice?6:5} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
+                    <td colSpan={canSeeProcPrice?7:6} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
                     <td style={{textAlign:'right'}}>
                       {Object.entries(liBaseByCur).map(([c,v])=>(
                         <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--accent)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
+                    <td colSpan={2}/>
                     <td style={{textAlign:'right'}}>
                       {Object.entries(liTotalByCur).map(([c,v])=>(
                         <div key={c} style={{fontSize:14,fontWeight:800,
@@ -408,29 +423,41 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                           padding:hasTax?'3px 6px':'0',borderRadius:'var(--r-sm)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
-                    <td colSpan={canEdit?3:2}/>
+                    <td colSpan={2}/>
                   </tr>
                 </tbody>
               </table>
             </div>
-            {editSection==='items'&&<EditLineItems order={order} suppliers={suppliers} canSeeProcPrice={canSeeProcPrice} onSave={d=>mutation.mutate({...d,_action:'Line items updated',_comment:comment})} onCancel={()=>setEditSection(null)} />}
           </div>
 
           {/* ── Order Info — single horizontal strip ── */}
           <div className="card card-sm" style={{marginBottom:14}}>
             <div className="card-title">
               <span>📋 Order Info</span>
-              {canEdit&&<button className="btn btn-xs" onClick={()=>setEditSection(editSection==='info'?null:'info')}>{editSection==='info'?'Cancel':'Edit'}</button>}
+              {canEdit && <button className="btn btn-xs" onClick={()=>setEditSection(editSection==='info'?null:'info')}>{editSection==='info'?'Cancel':'Edit'}</button>}
             </div>
             {editSection==='info' ? (
               <div>
+                {order.customer_payment_status !== 'paid' && (
                 <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:12,marginBottom:10}}>
-                  <div className="form-group" style={{marginBottom:0}}><label className="label">PO Number</label><input className="input" value={infoForm.po_number} onChange={e=>setInfoForm(f=>({...f,po_number:e.target.value}))}/></div>
-                  <div className="form-group" style={{marginBottom:0}}><label className="label">Enquiry No.</label><input className="input" value={infoForm.enquiry_no} onChange={e=>setInfoForm(f=>({...f,enquiry_no:e.target.value}))}/></div>
-                  <div className="form-group" style={{marginBottom:0}}><label className="label">Quote No.</label><input className="input" value={infoForm.quote_no} onChange={e=>setInfoForm(f=>({...f,quote_no:e.target.value}))}/></div>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">PO Number</label>
+                    <input className="input" value={infoForm.po_number} disabled style={{opacity:.72,background:'var(--surface2)'}}/>
+                  </div>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Enquiry No.</label>
+                    <input className="input" value={infoForm.enquiry_no} disabled style={{opacity:.72,background:'var(--surface2)'}}/>
+                  </div>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Quote No.</label>
+                    <input className="input" value={infoForm.quote_no} disabled style={{opacity:.72,background:'var(--surface2)'}}/>
+                  </div>
                   <div className="form-group" style={{marginBottom:0}}><label className="label">Expected Delivery Date</label><input className="input" type="date" value={infoForm.tentative_date} onChange={e=>setInfoForm(f=>({...f,tentative_date:e.target.value}))}/></div>
                 </div>
+                )}
+                {order.customer_payment_status !== 'paid' && (
                 <div className="form-group" style={{marginBottom:10}}><label className="label">Notes</label><textarea className="input" rows={2} value={infoForm.notes} onChange={e=>setInfoForm(f=>({...f,notes:e.target.value}))}/></div>
+                )}
                 {/* Delivery address — pick from customer's shipping addresses */}
                 {(()=>{
                   let addrs=[];
@@ -450,6 +477,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                   );
                 })()}
                 {/* Shipment mode toggle — isolated addition */}
+                {order.customer_payment_status !== 'paid' && (
                 <div style={{padding:'12px 14px',borderRadius:'var(--r-sm)',
                   background:'var(--surface2)',border:'1px solid var(--border)',marginBottom:10}}>
                   <div style={{fontSize:12,fontWeight:700,marginBottom:8,color:'var(--text2)'}}>📦 Shipment Mode</div>
@@ -470,6 +498,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     </label>
                   </div>
                 </div>
+                )}
                 <div className="flex gap-8"><button className="btn btn-sm" onClick={()=>setEditSection(null)}>Cancel</button><button className="btn btn-sm btn-primary" onClick={()=>mutation.mutate({...infoForm,_action:'Order info updated',_comment:''})}>Save</button></div>
               </div>
             ) : (
@@ -523,20 +552,28 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
 
                     {/* History */}
           <div className="card card-sm">
-            <div className="card-title">🕐 Audit History</div>
-            <div className="timeline">
-              {order.history?.map((h,i)=>(
-                <div key={h.id} className="tl-row">
-                  <div className="tl-dot-wrap"><div className={`tl-dot ${i===0?'td-active':'td-done'}`}><div className="tl-dot-inner"/></div></div>
-                  <div className="tl-content">
-                    <div className="tl-title">{h.action}</div>
-                    {h.comment&&<div style={{fontSize:11,color:'var(--text2)',marginTop:1,fontStyle:'italic'}}>"{h.comment}"</div>}
-                    <div className="tl-sub">by {h.by_user}</div>
-                    <div className="tl-ts">{h.ts}</div>
-                  </div>
-                </div>
-              ))}
+            <div className="card-title" onClick={()=>setShowHistory(h=>!h)}
+              style={{cursor:'pointer',userSelect:'none',display:'flex',alignItems:'center'}}>
+              <span>🕐 Audit History</span>
+              <span style={{marginLeft:'auto',fontSize:12,color:'var(--text3)',
+                display:'inline-block',transition:'transform .2s',
+                transform:showHistory?'rotate(90deg)':'rotate(0deg)'}}>▶</span>
             </div>
+            {showHistory && (
+              <div className="timeline" style={{maxHeight:260,overflowY:'auto',paddingRight:4}}>
+                {order.history?.map((h,i)=>(
+                  <div key={h.id} className="tl-row">
+                    <div className="tl-dot-wrap"><div className={`tl-dot ${i===0?'td-active':'td-done'}`}><div className="tl-dot-inner"/></div></div>
+                    <div className="tl-content">
+                      <div className="tl-title">{h.action}</div>
+                      {h.comment&&<div style={{fontSize:11,color:'var(--text2)',marginTop:1,fontStyle:'italic'}}>"{h.comment}"</div>}
+                      <div className="tl-sub">by {h.by_user}</div>
+                      <div className="tl-ts">{h.ts}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -604,61 +641,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                 💾 Save
               </button>
 
-              {/* Back to Enquiry */}
-              {['open','draft'].includes(order.status) && order.enquiry_id && !showBackEnq && (
-                <button className="btn"
-                  style={{background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',border:'1px solid var(--amber,#d97706)',fontWeight:600}}
-                  onClick={()=>setShowBackEnq(true)}>
-                  ↩ Back to Enquiry
-                </button>
-              )}
-              {showBackEnq && (
-                <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',
-                  borderRadius:'var(--r)',background:'var(--amber-lt,#fffbeb)',
-                  border:'1px solid var(--amber,#d97706)'}}>
-                  <span style={{fontSize:12,fontWeight:600,color:'var(--amber,#d97706)'}}>
-                    ↩ Return order to Enquiry? It will be put on hold.
-                  </span>
-                  <button className="btn btn-sm"
-                    style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:600}}
-                    onClick={async()=>{
-                      await mutation.mutateAsync({status:'hold',_action:'Returned to Enquiry for review',_comment:'Sent back from Order to Enquiry'});
-                      toast.success('Order returned to Enquiry');
-                      onClose();
-                    }}>Yes, Return</button>
-                  <button className="btn btn-xs" onClick={()=>setShowBackEnq(false)}>Cancel</button>
-                </div>
-              )}
 
-              {/* FIX: Send to Finance button — shown when advance terms and payment not yet done */}
-              {(order.status === 'payment_approval' || (
-                ['open'].includes(order.status) &&
-                (isFullAdvance(effectiveTerms) || isPartialAdvance(effectiveTerms)) &&
-                order.customer_payment_status !== 'paid'
-              )) && (
-                <button className="btn"
-                  disabled={order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
-                  style={{background:'var(--amber,#d97706)',color:'#fff',
-                    borderColor:'var(--amber,#d97706)',fontWeight:700,padding:'8px 18px',
-                    opacity:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
-                    cursor:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
-                  title={order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
-                  onClick={async()=>{
-                    if (order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
-                    try {
-                      await mutation.mutateAsync({
-                        status:                  'payment_approval',
-                        payment_terms:           effectiveTerms || custTerms || '',
-                        customer_payment_status: 'pending',
-                        _action: 'Sent to Finance for advance payment collection',
-                        _comment: '',
-                      });
-                    } catch(_) {}
-                    window.location.href = '/finance';
-                  }}>
-                  {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Go to Finance'}
-                </button>
-              )}
 
               {/* Send to Procurement — gated: hidden until advance paid (if applicable) */}
               {['open','draft','payment_pending'].includes(order.status) &&
@@ -681,7 +664,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700}}
                     onClick={async()=>{
                       try {
-                        await mutation.mutateAsync({status:'procurement',_action:'Sent to Procurement Bin',_comment:''});
+                        await api.put('/orders/' + order.id, {status:'procurement',_action:'Sent to Procurement Bin',_comment:''});
                         toast.success('✅ Order moved to Procurement Bin!');
                         qc.invalidateQueries(['orders']);
                         onClose();
@@ -696,6 +679,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           )}
 
           <button className="btn" onClick={onClose}>Close</button>
+          <button className="btn" style={{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+            onClick={()=>printDoc(generateOrderPDF(order, custObj))}>⬇ Download PDF</button>
         </div>
       </div>
     </div>
@@ -781,7 +766,7 @@ function EditSupplierOrders({ order, shippers, onSave, onCancel }) {
 }
 
 // ── ManageOrderModal — full editable order form ──────────────────────────────
-function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh }) {
+function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh, viewOnly = false }) {
   const { user } = useAuth();
   const qc = useQueryClient();
   const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
@@ -822,16 +807,16 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh }) {
 
   // Inline row cols (same layout as NewOrderPage)
   const cols = [
-    { key:'component',        label:'Component *',    flex:'2 1 120px', render:(li,idx)=><input className="input" value={li.component||''} onChange={e=>upd(idx,'component',e.target.value)} placeholder="Component"/> },
-    { key:'manufacturer',     label:'Manufacturer',   flex:'1.3 1 95px', render:(li,idx)=><input className="input" value={li.manufacturer||''} onChange={e=>upd(idx,'manufacturer',e.target.value)} placeholder="Mfr"/> },
-    { key:'ipn',              label:'IPN',            flex:'0.8 1 70px', render:(li,idx)=><input className="input" value={li.ipn||''} onChange={e=>upd(idx,'ipn',e.target.value)} placeholder="IPN"/> },
-    { key:'qty',              label:'Qty',            flex:'0.5 1 50px', render:(li,idx)=><input className="input" type="number" value={li.qty||''} onChange={e=>upd(idx,'qty',e.target.value)}/> },
-    { key:'unit_price',       label:'Cust. Price',    flex:'0.9 1 75px', render:(li,idx)=><input className="input" type="number" step="0.01" value={li.unit_price||''} onChange={e=>upd(idx,'unit_price',e.target.value)}/> },
-    ...(canSeeProcPrice ? [{ key:'procurement_price', label:'Proc. Price', flex:'0.9 1 75px', render:(li,idx)=><input className="input" type="number" step="0.01" value={li.procurement_price||''} onChange={e=>upd(idx,'procurement_price',e.target.value)}/> }] : []),
-    { key:'currency',         label:'Cur.',           flex:'0.6 1 56px', render:(li,idx)=><select className="input" value={li.currency||'INR'} onChange={e=>upd(idx,'currency',e.target.value)}>{['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}</select> },
-    { key:'delivery_date',    label:'Del. Date',      flex:'1 1 100px', render:(li,idx)=><input className="input" type="date" value={li.delivery_date||''} onChange={e=>upd(idx,'delivery_date',e.target.value)}/> },
-    { key:'supplier_id',      label:'Supplier',       flex:'1.5 1 110px', render:(li,idx)=><select className="input" value={li.supplier_id||''} onChange={e=>upd(idx,'supplier_id',e.target.value)}><option value="">— Select —</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select> },
-    { key:'line_status',      label:'Status',         flex:'1 1 88px', render:(li,idx)=><select className="input" value={li.line_status||'negotiating'} onChange={e=>upd(idx,'line_status',e.target.value)}>{[{v:'negotiating',l:'Negotiating'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}</select> },
+    { key:'component',        label:'Component *',    flex:'2 1 120px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontWeight:600}}>{li.component||'—'}</span>:<input className="input" value={li.component||''} onChange={e=>upd(idx,'component',e.target.value)} placeholder="Component"/> },
+    { key:'manufacturer',     label:'Manufacturer',   flex:'1.3 1 95px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.manufacturer||'—'}</span>:<input className="input" value={li.manufacturer||''} onChange={e=>upd(idx,'manufacturer',e.target.value)} placeholder="Mfr"/> },
+    { key:'ipn',              label:'IPN',            flex:'0.8 1 70px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.ipn||'—'}</span>:<input className="input" value={li.ipn||''} onChange={e=>upd(idx,'ipn',e.target.value)} placeholder="IPN"/> },
+    { key:'qty',              label:'Qty',            flex:'0.5 1 50px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.qty||'—'}</span>:<input className="input" type="number" value={li.qty||''} onChange={e=>upd(idx,'qty',e.target.value)}/> },
+    { key:'unit_price',       label:'Cust. Price',    flex:'0.9 1 75px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.unit_price||'—'}</span>:<input className="input" type="number" step="0.01" value={li.unit_price||''} onChange={e=>upd(idx,'unit_price',e.target.value)}/> },
+    ...(canSeeProcPrice ? [{ key:'procurement_price', label:'Proc. Price', flex:'0.9 1 75px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.procurement_price||'—'}</span>:<input className="input" type="number" step="0.01" value={li.procurement_price||''} onChange={e=>upd(idx,'procurement_price',e.target.value)}/> }] : []),
+    { key:'currency',         label:'Cur.',           flex:'0.6 1 56px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.currency||'INR'}</span>:<select className="input" value={li.currency||'INR'} onChange={e=>upd(idx,'currency',e.target.value)}>{['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}</select> },
+    { key:'delivery_date',    label:'Del. Date',      flex:'1 1 100px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.delivery_date||'—'}</span>:<input className="input" type="date" value={li.delivery_date||''} onChange={e=>upd(idx,'delivery_date',e.target.value)}/> },
+    { key:'supplier_id',      label:'Supplier',       flex:'1.5 1 110px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{suppliers.find(s=>String(s.id)===String(li.supplier_id))?.name||'—'}</span>:<select className="input" value={li.supplier_id||''} onChange={e=>upd(idx,'supplier_id',e.target.value)}><option value="">— Select —</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select> },
+    { key:'line_status',      label:'Status',         flex:'1 1 88px', render:(li,idx)=>viewOnly?<LineStatusBadge s={li.line_status||'negotiating'}/>:<select className="input" value={li.line_status||'negotiating'} onChange={e=>upd(idx,'line_status',e.target.value)}>{[{v:'negotiating',l:'Negotiating'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}</select> },
   ];
 
   return (
@@ -839,7 +824,7 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh }) {
       <div className="modal modal-xl">
         <div className="modal-header">
           <div>
-            <h2>✏ Manage Order — <span className="mono">{order.id}</span></h2>
+            <h2>{viewOnly ? '👁 View Order' : '✏ Manage Order'} — <span className="mono">{order.id}</span></h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
               {custName(order.customer_id)} · <StatusBadge s={order.status}/>
             </div>
@@ -850,19 +835,19 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh }) {
 
           {/* Order header fields */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:13,marginBottom:13}}>
-            <div className="form-group"><label className="label">Customer Ref</label><input className="input" value={form.customer_ref} onChange={e=>setF('customer_ref',e.target.value)} /></div>
-            <div className="form-group"><label className="label">PO Number</label><input className="input" value={form.po_number} onChange={e=>setF('po_number',e.target.value)} /></div>
-            <div className="form-group"><label className="label">Tentative Date</label><input className="input" type="date" value={form.tentative_date} onChange={e=>setF('tentative_date',e.target.value)} /></div>
+            <div className="form-group"><label className="label">Customer Ref</label><input className="input" value={form.customer_ref} onChange={e=>setF('customer_ref',e.target.value)} disabled={viewOnly} /></div>
+            <div className="form-group"><label className="label">PO Number</label><input className="input" value={form.po_number} onChange={e=>setF('po_number',e.target.value)} disabled={viewOnly} /></div>
+            <div className="form-group"><label className="label">Tentative Date</label><input className="input" type="date" value={form.tentative_date} onChange={e=>setF('tentative_date',e.target.value)} disabled={viewOnly} /></div>
             <div className="form-group"><label className="label">Enquiry / Quote No.</label>
               <div style={{display:'flex',gap:6}}>
-                <input className="input" value={form.enquiry_no} onChange={e=>setF('enquiry_no',e.target.value)} placeholder="ENQ-" style={{flex:1}}/>
-                <input className="input" value={form.quote_no}   onChange={e=>setF('quote_no',e.target.value)}   placeholder="QT-"  style={{flex:1}}/>
+                <input className="input" value={form.enquiry_no} onChange={e=>setF('enquiry_no',e.target.value)} placeholder="ENQ-" style={{flex:1}} disabled={viewOnly}/>
+                <input className="input" value={form.quote_no}   onChange={e=>setF('quote_no',e.target.value)}   placeholder="QT-"  style={{flex:1}} disabled={viewOnly}/>
               </div>
             </div>
           </div>
           <div className="form-group" style={{marginBottom:16}}>
             <label className="label">Notes</label>
-            <textarea className="input" rows={2} value={form.notes} onChange={e=>setF('notes',e.target.value)} />
+            <textarea className="input" rows={2} value={form.notes} onChange={e=>setF('notes',e.target.value)} disabled={viewOnly} />
           </div>
 
           {/* Inline line items */}
@@ -871,26 +856,34 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh }) {
           <div style={{display:'flex',gap:5,alignItems:'center',padding:'0 6px 7px',borderBottom:'1px solid var(--border)',marginBottom:4}}>
             <div style={{flex:'0 0 22px'}}/>
             {cols.map(c=><div key={c.key} style={{flex:c.flex,minWidth:0}}><span style={{fontSize:11,fontWeight:600,color:'var(--text2)',whiteSpace:'nowrap'}}>{c.label}</span></div>)}
-            <div style={{flex:'0 0 26px'}}/>
+            {!viewOnly && <div style={{flex:'0 0 26px'}}/>}
           </div>
           {/* Rows */}
           {items.map((li,idx)=>(
             <div key={li.id} style={{display:'flex',gap:5,alignItems:'center',padding:'4px 6px',borderRadius:'var(--r-sm)',marginBottom:3,background:idx%2===0?'transparent':'var(--surface2)'}}>
               <div style={{flex:'0 0 22px',fontSize:11,fontWeight:600,color:'var(--text3)',textAlign:'center'}}>{idx+1}</div>
               {cols.map(c=><div key={c.key} style={{flex:c.flex,minWidth:0}}>{c.render(li,idx)}</div>)}
-              <div style={{flex:'0 0 26px',display:'flex',justifyContent:'center'}}>
-                <button className="btn btn-xs btn-danger" style={{padding:'1px 7px',fontSize:15,lineHeight:1}} onClick={()=>removeItem(idx)}>×</button>
-              </div>
+              {!viewOnly && (
+                <div style={{flex:'0 0 26px',display:'flex',justifyContent:'center'}}>
+                  <button className="btn btn-xs btn-danger" style={{padding:'1px 7px',fontSize:15,lineHeight:1}} onClick={()=>removeItem(idx)}>×</button>
+                </div>
+              )}
             </div>
           ))}
-          <button className="btn btn-sm" onClick={addItem} style={{marginTop:8,marginBottom:4}}>+ Add Line Item</button>
+          {!viewOnly && <button className="btn btn-sm" onClick={addItem} style={{marginTop:8,marginBottom:4}}>+ Add Line Item</button>}
 
         </div>
         <div className="modal-footer">
-          <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>
-            {mutation.isPending ? 'Saving…' : '💾 Save Changes'}
-          </button>
+          {viewOnly ? (
+            <button className="btn" onClick={onClose}>Close</button>
+          ) : (
+            <>
+              <button className="btn" onClick={onClose}>Cancel</button>
+              <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>
+                {mutation.isPending ? 'Saving…' : '💾 Save Changes'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -912,6 +905,8 @@ export default function OrdersPage() {
   const { data: suppliers=[] }        = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data) });
   const { data: customers=[] }        = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
   const { data: shippers=[] }         = useQuery({ queryKey:['shippers'],  queryFn:()=>api.get('/shippers').then(r=>r.data) });
+  const { data: enquiries=[] }        = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>r.data).catch(()=>[]), staleTime:60000 });
+  const { data: allQuotes=[] }        = useQuery({ queryKey:['quotes'],    queryFn:()=>api.get('/quotes').then(r=>r.data).catch(()=>[]), staleTime:60000 });
   const { user } = useAuth();
   const canSeeCustomer = user.perms?.canSeeCustomer !== false;
   const custName = id => canSeeCustomer ? (customers.find(c=>c.id===id)?.name||id) : '[Restricted]';
@@ -1019,7 +1014,7 @@ export default function OrdersPage() {
             {(dateFrom||dateTo)&&<button className="btn btn-xs" onClick={()=>{setDateFrom('');setDateTo('');}}>✕ Clear</button>}
           </div>
         </div>
-        <button className="btn btn-primary" onClick={()=>navigate('/orders/new')}>+ New Order</button>
+
       </div>
 
       {/* ── Order Ageing cards ── */}
@@ -1080,13 +1075,14 @@ export default function OrdersPage() {
               <th>Total Value</th>
               <ThSort col="delivery">Promised Date</ThSort>
               <ThSort col="status">Status</ThSort>
+              <th style={{textAlign:'center'}}>Days in Stage</th>
               <ThSort col="created_at">Created</ThSort>
               <th style={{textAlign:'right'}}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length===0 && (
-              <tr><td colSpan={11}>
+              <tr><td colSpan={12}>
                 <div className="empty-state"><div className="empty-icon">📋</div><div>No orders found</div></div>
               </td></tr>
             )}
@@ -1117,6 +1113,19 @@ export default function OrdersPage() {
                       <div className="mono bold" style={{color:'var(--accent)',fontSize:12}}>{o.id}</div>
                       {canSeeCustomer && <div style={{fontSize:11,color:'var(--text3)',marginTop:1}}>{custName(o.customer_id)}</div>}
                       {o.po_number && <div style={{fontSize:10,color:'var(--text3)'}}>PO: {o.po_number}</div>}
+                      {/* Show revision version if quote_no has -V2 / -V3 suffix */}
+                      {(() => {
+                        const m = (o.quote_no||'').match(/-V(\d+)$/);
+                        if (!m) return null;
+                        return (
+                          <div style={{marginTop:2,display:'inline-flex',alignItems:'center',
+                            padding:'0px 5px',borderRadius:99,fontSize:9,fontWeight:800,
+                            background:'var(--purple-lt,#f5f3ff)',color:'var(--purple,#7c3aed)',
+                            border:'1px solid var(--purple,#7c3aed)',letterSpacing:.3}}>
+                            REV V{m[1]}
+                          </div>
+                        );
+                      })()}
                     </td>
                     {/* Enq No */}
                     <td className="mono" style={{fontSize:12}}>{o.enquiry_no||'—'}</td>
@@ -1161,14 +1170,42 @@ export default function OrdersPage() {
                     {/* Status + pickup date */}
                     <td>
                       <StatusBadge s={o.status}/>
+                      {/* Show revision sub-stage badge based on linked enquiry state */}
+                      {o.enquiry_id && (() => {
+                        const enq = enquiries.find(e => e.id === o.enquiry_id);
+                        if (!enq) return null;
+                        let badge = null;
+                        if (enq.status === 'returned_to_sourcing') {
+                          badge = { label: '🔄 Revising · Source Bin', color: 'var(--amber,#d97706)', bg: 'var(--amber-lt,#fffbeb)' };
+                        } else if (enq.status === 'sourcing') {
+                          badge = { label: '🔄 Re-Sourcing', color: 'var(--amber,#d97706)', bg: 'var(--amber-lt,#fffbeb)' };
+                        } else if (enq.status === 'quoted') {
+                          // check if there's a V2+ active quote (revision in quote review stage)
+                          const hasRevQ = allQuotes.some(q =>
+                            q.enquiry_id === o.enquiry_id && q.status === 'active' && (q.revision||1) > 1
+                          );
+                          if (hasRevQ) badge = { label: '🔄 Revising · In Quote', color: 'var(--purple,#7c3aed)', bg: '#f5f3ff' };
+                        }
+                        if (!badge) return null;
+                        return (
+                          <div style={{marginTop:3,display:'inline-flex',alignItems:'center',gap:4,
+                            padding:'1px 7px',borderRadius:99,fontSize:10,fontWeight:700,
+                            background:badge.bg,color:badge.color,
+                            border:`1px solid ${badge.color}`}}>
+                            {badge.label}
+                          </div>
+                        );
+                      })()}
                       {o.tentative_date && (
                         <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
                           📅 {o.tentative_date}
                         </div>
                       )}
                     </td>
+                    {/* Days in Stage */}
+                    <td><DaysBadge updatedAt={o.updated_at||o.created_at} /></td>
                     {/* Created */}
-                    <td style={{fontSize:11,color:'var(--text3)'}}>{(o.created_at||'').slice(0,10)}</td>
+                    <td style={{fontSize:11,color:'var(--text3)'}}>{fmtDateTime(o.created_at)}</td>
                     {/* Actions */}
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:5,justifyContent:'flex-end'}}>
@@ -1225,7 +1262,7 @@ export default function OrdersPage() {
         </table>
       </div>
       {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===selected.id);if(up)setSelected(up);});}} />}
-      {managing&&<ManageOrderModal order={managing} onClose={()=>setManaging(null)} suppliers={suppliers} customers={customers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===managing.id);if(up)setManaging(up);});}} />}
+      {managing&&<ManageOrderModal order={managing} viewOnly={true} onClose={()=>setManaging(null)} suppliers={suppliers} customers={customers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===managing.id);if(up)setManaging(up);});}} />}
     </div>
   );
 }

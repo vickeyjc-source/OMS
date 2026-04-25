@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "npm --prefix .. run dev",
+    "backend": "npm --prefix .. run backend",
+    "stop": "npm --prefix .. run stop",
+    "ui": "vite --port 3000",
     "start": "vite --port 3000",
     "build": "vite build",
     "preview": "vite preview"
@@ -11,6 +15,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.18.1",
     "axios": "^1.6.7",
+    "country-state-city": "^3.2.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hot-toast": "^2.4.1",

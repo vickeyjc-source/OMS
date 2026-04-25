@@ -32,6 +32,13 @@ const isNetTerms = t => {
 
 const PAYMENT_METHODS = ['Bank Transfer','NEFT / RTGS','SWIFT / Wire Transfer','UPI','Cheque','Cash','Bank Remittance'];
 
+const isSupplierBankReady = (s) => {
+  if (!s) return false;
+  const hasBase = !!(s.bank_account_name && s.bank_account_no);
+  if (!hasBase) return false;
+  return s.type === 'international' ? !!s.bank_swift : !!s.bank_ifsc;
+};
+
 // ── PI HTML Generator ─────────────────────────────────────────────────────────
 function numToWords(n) {
   const a=['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen','Seventeen','Eighteen','Nineteen'];
@@ -45,7 +52,7 @@ function inr(n){return '₹'+parseFloat(n||0).toLocaleString('en-IN',{minimumFra
 
 function generatePIHtml(order, customer, settings) {
   const now = new Date().toLocaleDateString('en-IN');
-  const piNo = order.pi_no || ('CIFLUX-PI-' + order.id);
+  const piNo = order.pi_no || ('CIFLUX-PI-' + order.id + '-' + new Date().getFullYear());
   const items = (order.lineItems||[]);
   const coName    = (settings||{}).company_name    || 'Ciflux Electronic Pvt Ltd';
   const coGst     = (settings||{}).company_gstin   || '29AANCC4989N1ZI';
@@ -119,17 +126,21 @@ function generatePIHtml(order, customer, settings) {
     <button onclick="window.print()" style="background:#fff;color:#1b4f9e;border:none;padding:5px 14px;border-radius:4px;cursor:pointer;font-weight:700">🖨 Print / Save PDF</button>
   </div>
 
-  <!-- HEADER: Company + PI details -->
+  <!-- HEADER: Logo + Company + PI details -->
   <table style="width:100%;border-collapse:collapse;margin-bottom:6px">
     <tr>
-      <td style="width:55%;vertical-align:top;padding:4px 8px 4px 0">
+      <td style="width:72px;padding:0 10px 0 0;border:none;vertical-align:middle">
+        <img src="/logo.png" style="height:52px;width:auto;display:block" alt="CIFLUX"
+          onerror="this.style.display='none'" />
+      </td>
+      <td style="width:55%;vertical-align:top;padding:4px 8px 4px 0;border:none">
         <div class="co-name">${coName}</div>
         <div class="co-detail">${coAddr}</div>
         <div class="co-detail">${coAddr2}</div>
         <div class="co-detail">GSTIN: ${coGst}</div>
         <div class="co-detail">Email: ${coEmail} | Phone: ${coPhone}</div>
       </td>
-      <td style="width:45%;vertical-align:top">
+      <td style="width:45%;vertical-align:top;border:none">
         <div class="pi-title">PROFORMA INVOICE</div>
         <table class="ref-table" style="margin-top:4px">
           <tr><td class="ref-label">Proforma Invoice</td><td class="ref-label">PI No.</td><td style="font-weight:700;color:#1b4f9e">${piNo}</td></tr>
@@ -228,6 +239,62 @@ function generatePIHtml(order, customer, settings) {
   </body></html>`;
 }
 
+function HistoryDetailModal({ detail, onClose }) {
+  if (!detail) return null;
+  const item = detail.item || {};
+  const type = detail.type;
+
+  const rows = type === 'customer'
+    ? [
+        ['Order', item.order_id || '—'],
+        ['Customer', item.customer_name || item.customer_id || '—'],
+        ['Customer PO Number', item.po_number || '—'],
+        ['PI Number', item.pi_no || '—'],
+        ['Amount', fmtM(item.amount, item.currency)],
+        ['Method', item.payment_method || '—'],
+        ['Reference', item.payment_ref || '—'],
+        ['Payment Date', fmtDate(item.payment_date)],
+        ['Recorded At', fmtDate(item.recorded_at)],
+        ['Status', item.status || '—'],
+        ['Notes', item.notes || '—'],
+      ]
+    : [
+        ['Order', item.linked_order_id || item.order_id || '—'],
+        ['Supplier', item.supplier_name || item.supplier_id || '—'],
+        ['Internal PO', item.internal_po_no || item.supplier_order_id || '—'],
+        ['Customer PO Ref', item.po_no || '—'],
+        ['Supplier PI / Ref', item.supplier_ref || '—'],
+        ['Amount', fmtM(item.paid_amount || item.amount, item.confirmed_currency || item.currency || 'INR')],
+        ['Reference', item.payment_ref || '—'],
+        ['Payment Date', fmtDate(item.payment_date)],
+        ['Paid At', fmtDate(item.paid_at)],
+        ['Status', item.status || '—'],
+        ['Notes', item.notes || '—'],
+      ];
+
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal modal-sm">
+        <div className="modal-header">
+          <h2>{type === 'customer' ? '🧾 Customer Receipt Details' : '💸 Supplier Payment Details'}</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'grid',gap:8}}>
+          {rows.map(([k, v]) => (
+            <div key={k} style={{display:'flex',justifyContent:'space-between',gap:12,padding:'7px 0',borderBottom:'1px solid var(--border)'}}>
+              <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{k}</span>
+              <span style={{fontSize:12,fontWeight:600,textAlign:'right'}}>{v}</span>
+            </div>
+          ))}
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── View Payment Modal — read-only with manager-approved edit ─────────────────
 function ViewPaymentModal({ item, onClose, onSaved }) {
   const qc = useQueryClient();
@@ -272,6 +339,8 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   );
 
   const rows = [
+    {l:'Customer PO Number', v: item.po_number || '—', mono:true},
+    {l:'PI Number',      v: item.pi_no || '—', mono:true, highlight: !!item.pi_no},
     {l:'Amount',         v: fmtM(pmt.amount, pmt.currency)},
     {l:'Method',         v: pmt.payment_method || '—'},
     {l:'UTR / Ref',      v: pmt.payment_ref    || '—', mono:true},
@@ -303,7 +372,8 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
                   padding:'7px 0',borderBottom:'1px solid var(--border)'}}>
                   <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{r.l}</span>
                   <span style={{fontSize:13,fontFamily:r.mono?'monospace':'inherit',
-                    fontWeight:r.l==='Amount'?700:400}}>{r.v}</span>
+                    fontWeight:r.l==='Amount'||r.highlight?700:400,
+                    color:r.highlight?'var(--green)':undefined}}>{r.v}</span>
                 </div>
               ))}
             </div>
@@ -332,7 +402,7 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Payment Date</label>
                   <input className="input" type="date" value={form.payment_date}
-                    onChange={e=>set('payment_date',e.target.value)}/>
+                    max={today()} onChange={e=>set('payment_date',e.target.value)}/>
                 </div>
                 <div className="form-group" style={{gridColumn:'1/-1',marginBottom:0}}>
                   <label className="label">UTR / Ref No.</label>
@@ -410,6 +480,9 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
     amount: type === 'customer' ? String(item.balance_due||item.order_total||'') : String(item.amount||''),
     currency: type === 'customer' ? 'INR' : (item.currency||'INR'),
     payment_method: '', payment_ref: '', payment_date: today(), notes: '',
+    customer_po_no: type === 'customer' ? (item.po_number || '') : '',
+    zoho_po_number: item.zoho_po_number || '',
+    supplier_ref: item.supplier_ref || '',
     payment_type: isPartialAdvance(item.payment_terms) ? 'partial_advance' : 'advance',
   });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
@@ -431,7 +504,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
     onError: e => toast.error(e.response?.data?.error||'Failed'),
   });
 
-  const label = type === 'customer' ? (item.customer?.name||item.customer_id) : (item.supplier?.name||item.supplier_id);
+  const label = type === 'customer' ? (item.customer?.name||item.customer_id) : (item._resolvedName || item.supplier?.name || item.supplier_id);
   const refNo = type === 'customer' ? item.id : (item.internal_po_no||item.supplier_order_id||item.id);
 
   return (
@@ -447,6 +520,61 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
             <div style={{fontWeight:700}}>{label}</div>
             <div style={{color:'var(--text2)',marginTop:2}}>Ref: {refNo} · Terms: {item.payment_terms||item.terms||'—'}</div>
           </div>
+
+          {type === 'customer' && (
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Customer PO Number</label>
+                <input className="input" value={form.customer_po_no}
+                  onChange={e=>set('customer_po_no', e.target.value)}
+                  placeholder="Enter customer PO manually"/>
+              </div>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Order ID</label>
+                <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',
+                  borderRadius:'var(--r-sm)',background:'var(--surface2)',
+                  border:'1px solid var(--border)',fontSize:13,fontFamily:'DM Mono,monospace',fontWeight:700}}>
+                  {item.id || '—'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {type !== 'customer' && (
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Zoho PO Number <span className="req">*</span></label>
+                <input className="input" value={form.zoho_po_number}
+                  onChange={e=>set('zoho_po_number', e.target.value)}
+                  placeholder="Enter Zoho PO number"
+                  style={{borderColor:!form.zoho_po_number?.trim()?'var(--amber,#d97706)':undefined}}/>
+              </div>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Supplier PI Number <span className="req">*</span></label>
+                <input className="input" value={form.supplier_ref}
+                  onChange={e=>set('supplier_ref', e.target.value)}
+                  placeholder="Enter supplier PI / reference"
+                  style={{borderColor:!form.supplier_ref?.trim()?'var(--amber,#d97706)':undefined}}/>
+              </div>
+            </div>
+          )}
+
+          {/* PI Number — auto-fetched, read-only, customer payments only */}
+          {type === 'customer' && (
+            <div className="form-group" style={{marginBottom:12}}>
+              <label className="label">PI Number</label>
+              <div style={{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',
+                borderRadius:'var(--r-sm)',background:'var(--surface2)',
+                border:'1px solid var(--border)',fontSize:13}}>
+                {item.pi_no
+                  ? <><span style={{fontFamily:'DM Mono,monospace',fontWeight:700,color:'var(--green)',letterSpacing:'0.02em'}}>{item.pi_no}</span>
+                      <span style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✅ PI Generated</span></>                  
+                  : <span style={{color:'var(--amber,#d97706)',fontWeight:600,fontSize:12}}>⚠ PI not yet generated — generate PI before recording payment</span>
+                }
+              </div>
+            </div>
+          )}
+
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Amount <span className="req">*</span></label>
@@ -469,7 +597,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Payment Date</label>
-              <input className="input" type="date" value={form.payment_date} onChange={e=>set('payment_date',e.target.value)}/>
+              <input className="input" type="date" value={form.payment_date} max={today()} onChange={e=>set('payment_date',e.target.value)}/>
             </div>
             <div className="form-group" style={{gridColumn:'1/-1',marginBottom:0}}>
               <label className="label">UTR / Ref No. <span className="req">*</span></label>
@@ -487,9 +615,181 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={mutation.isPending||!form.payment_method||!form.payment_ref||!form.amount}
-            onClick={()=>mutation.mutate(form)}>
+            disabled={mutation.isPending||!form.payment_method||!form.payment_ref||!form.amount||(type!=='customer'&&(!form.zoho_po_number?.trim()||!form.supplier_ref?.trim()))}
+            onClick={()=>mutation.mutate({
+              ...form,
+              finance_po_no: '',
+            })}>
             {mutation.isPending ? 'Saving…' : '✅ Record Payment'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerBankDetailsModal({ customer, onClose, onSaved }) {
+  const qc = useQueryClient();
+  const intl = customer?.type === 'international';
+  const [form, setForm] = useState({
+    bank_account_name: customer?.bank_account_name || '',
+    bank_account_no:   customer?.bank_account_no   || '',
+    bank_ifsc:         customer?.bank_ifsc         || '',
+    bank_name:         customer?.bank_name         || '',
+    bank_branch:       customer?.bank_branch       || '',
+    bank_swift:        customer?.bank_swift        || '',
+    bank_iban:         customer?.bank_iban         || '',
+    bank_aba:          customer?.bank_aba          || '',
+    bank_country:      customer?.bank_country      || 'India',
+    bank_currency:     customer?.bank_currency     || 'INR',
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const custListRes = await api.get('/customers');
+      const fullCustomer = (custListRes.data || []).find(c => c.id === customer.id);
+      if (!fullCustomer) throw new Error('Customer not found');
+      await api.put('/customers/' + customer.id, { ...fullCustomer, ...form });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries(['customers']);
+      qc.invalidateQueries(['finance-supplier']);
+      toast.success('Bank details saved for customer');
+      onSaved?.();
+      onClose();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to save bank details'),
+  });
+
+  const missingRequired = !form.bank_account_name?.trim() || !form.bank_account_no?.trim() || (!intl && !form.bank_ifsc?.trim());
+
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal" style={{maxWidth:920,width:'96vw'}}>
+        <div className="modal-header">
+          <h2>🏦 Bank Details — {customer?.name || 'Customer'}</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🏦 {intl?'Primary Bank':'Indian Bank Details'}</div>
+            <div className="form-group"><label className="label">Account Holder Name <span className="req">*</span></label><input className="input" value={form.bank_account_name} onChange={e=>set('bank_account_name',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Account Number <span className="req">*</span></label><input className="input" value={form.bank_account_no} onChange={e=>set('bank_account_no',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Bank Name</label><input className="input" value={form.bank_name} onChange={e=>set('bank_name',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Branch</label><input className="input" value={form.bank_branch} onChange={e=>set('bank_branch',e.target.value)}/></div>
+            {!intl&&<div className="form-group"><label className="label">IFSC Code <span className="req">*</span></label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+              <div className="form-group"><label className="label">Currency</label>
+                <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>
+                  {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="form-group"><label className="label">Bank Country</label>
+                <input className="input" value={form.bank_country} onChange={e=>set('bank_country',e.target.value)} placeholder="India"/>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🌐 International Wire</div>
+            <div className="form-group"><label className="label">SWIFT / BIC Code</label><input className="input" value={form.bank_swift} onChange={e=>set('bank_swift',e.target.value.toUpperCase())} placeholder="HDFCINBBXXX"/></div>
+            <div className="form-group"><label className="label">IBAN</label><input className="input" value={form.bank_iban} onChange={e=>set('bank_iban',e.target.value.toUpperCase())}/></div>
+            <div className="form-group"><label className="label">ABA / Routing (USA)</label><input className="input" value={form.bank_aba} onChange={e=>set('bank_aba',e.target.value)}/></div>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" disabled={mutation.isPending || missingRequired} onClick={()=>mutation.mutate()}>
+            {mutation.isPending ? 'Saving…' : 'Save Bank Details'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SupplierBankDetailsModal({ supplier, onClose, onSaved }) {
+  const qc = useQueryClient();
+  const intl = supplier?.type === 'international';
+  const [form, setForm] = useState({
+    bank_account_name: supplier?.bank_account_name || '',
+    bank_account_no: supplier?.bank_account_no || '',
+    bank_ifsc: supplier?.bank_ifsc || '',
+    bank_name: supplier?.bank_name || '',
+    bank_branch: supplier?.bank_branch || '',
+    bank_swift: supplier?.bank_swift || '',
+    bank_iban: supplier?.bank_iban || '',
+    bank_aba: supplier?.bank_aba || '',
+    bank_country: supplier?.bank_country || (intl ? '' : 'India'),
+    bank_currency: supplier?.bank_currency || (intl ? (supplier?.currency || 'USD') : 'INR'),
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      // Try suppliers first; fall back to customers (inventory-customer sources)
+      const supListRes = await api.get('/suppliers');
+      const fullSupplier = (supListRes.data || []).find(s => s.id === supplier.id);
+      if (fullSupplier) {
+        await api.put('/suppliers/' + supplier.id, { ...fullSupplier, ...form });
+      } else {
+        const custListRes = await api.get('/customers');
+        const fullCustomer = (custListRes.data || []).find(c => c.id === supplier.id);
+        if (!fullCustomer) throw new Error('Entity not found — cannot save bank details');
+        await api.put('/customers/' + supplier.id, { ...fullCustomer, ...form });
+      }
+    },
+    onSuccess: () => {
+      qc.invalidateQueries(['suppliers']);
+      qc.invalidateQueries(['customers']);
+      qc.invalidateQueries(['finance-supplier']);
+      toast.success('Bank details saved');
+      onSaved?.();
+      onClose();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to save bank details'),
+  });
+
+  const missingRequired = !form.bank_account_name?.trim() || !form.bank_account_no?.trim() || (!intl && !form.bank_ifsc?.trim()) || (intl && !form.bank_swift?.trim());
+
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal" style={{maxWidth:920,width:'96vw'}}>
+        <div className="modal-header">
+          <h2>🏦 Add Bank Details</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+          <div>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🏦 {intl?'Primary Bank':'Indian Bank Details'}</div>
+            <div className="form-group"><label className="label">Account Holder Name {!intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_account_name} onChange={e=>set('bank_account_name',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Account Number {!intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_account_no} onChange={e=>set('bank_account_no',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Bank Name</label><input className="input" value={form.bank_name} onChange={e=>set('bank_name',e.target.value)}/></div>
+            <div className="form-group"><label className="label">Branch</label><input className="input" value={form.bank_branch} onChange={e=>set('bank_branch',e.target.value)}/></div>
+            {!intl&&<div className="form-group"><label className="label">IFSC Code <span className="req">*</span></label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+              <div className="form-group"><label className="label">Currency</label>
+                <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>
+                  {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="form-group"><label className="label">Bank Country</label>
+                <input className="input" value={form.bank_country} onChange={e=>set('bank_country',e.target.value)} placeholder="India"/>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🌐 International Wire</div>
+            <div className="form-group"><label className="label">SWIFT / BIC Code {intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_swift} onChange={e=>set('bank_swift',e.target.value.toUpperCase())} placeholder="HDFCINBBXXX"/></div>
+            <div className="form-group"><label className="label">IBAN {intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_iban} onChange={e=>set('bank_iban',e.target.value.toUpperCase())} placeholder="GB29 NWBK 6016 1331 9268 19"/></div>
+            <div className="form-group"><label className="label">ABA / Routing (USA)</label><input className="input" value={form.bank_aba} onChange={e=>set('bank_aba',e.target.value)} placeholder="021000021"/></div>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" disabled={mutation.isPending || missingRequired} onClick={()=>mutation.mutate()}>
+            {mutation.isPending ? 'Saving…' : 'Save Bank Details'}
           </button>
         </div>
       </div>
@@ -511,6 +811,162 @@ function TermsBadge({ terms }) {
   return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:600,background:bg,color}}>{terms||'—'}</span>;
 }
 
+// ── PO Requests Tab — Finance fills in Supplier PI + Zoho PO for Procurement ──
+function PORequestsTab({ requests, onRefresh }) {
+  const qc = useQueryClient();
+  const [fulfillModal, setFulfillModal] = useState(null); // the po_request row
+  const pending   = requests.filter(r => r.status === 'pending');
+  const fulfilled = requests.filter(r => r.status === 'fulfilled');
+
+  return (
+    <div>
+      <div style={{marginBottom:10,fontSize:12,color:'var(--text3)'}}>
+        Procurement has requested Supplier PI Number and Zoho PO Number for these orders.
+        Fill in the details and submit — they will auto-populate in Procurement's PO Allocation.
+      </div>
+      {pending.length === 0 ? (
+        <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
+          <div style={{fontSize:32,marginBottom:8}}>✅</div>No pending PO requests
+        </div>
+      ) : (
+        <table className="table">
+          <thead><tr>
+            <th>Order</th><th>Supplier</th><th>PO Ref</th>
+            <th>Requested By</th><th>Requested At</th>
+            <th style={{textAlign:'right'}}>Actions</th>
+          </tr></thead>
+          <tbody>
+            {pending.map(r => (
+              <tr key={r.id}>
+                <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.order_id}</span></td>
+                <td style={{fontWeight:500}}>{r.supplier_name||r.supplier_id}</td>
+                <td style={{fontSize:11,color:'var(--text3)'}}>{r.order_ref||'—'}</td>
+                <td style={{fontSize:11}}>{r.requested_by||'—'}</td>
+                <td style={{fontSize:11}}>{fmtDate(r.requested_at)}</td>
+                <td style={{textAlign:'right'}}>
+                  <button className="btn btn-xs btn-primary"
+                    style={{fontSize:11}}
+                    onClick={()=>setFulfillModal(r)}>
+                    ✏ Fill in Details
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {fulfilled.length > 0 && (
+        <div style={{marginTop:24}}>
+          {(() => {
+            // Deduplicate: keep only the latest fulfilled entry per order+supplier
+            const dedupMap = {};
+            fulfilled.forEach(r => {
+              const key = (r.order_id||'') + '_' + (r.supplier_id||r.supplier_name||'');
+              if (!dedupMap[key] || new Date(r.fulfilled_at||0) > new Date(dedupMap[key].fulfilled_at||0)) {
+                dedupMap[key] = r;
+              }
+            });
+            const deduped = Object.values(dedupMap).sort((a,b) => new Date(b.fulfilled_at||0) - new Date(a.fulfilled_at||0));
+            return (
+          <>
+          <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:'var(--green)'}}>
+            ✅ Fulfilled Requests ({deduped.length})
+          </div>
+          <table className="table">
+            <thead><tr>
+              <th>Order</th><th>Supplier</th><th>Supplier PI</th><th>Zoho PO</th>
+              <th>Fulfilled By</th><th>Date</th>
+            </tr></thead>
+            <tbody>
+              {deduped.slice(0,50).map(r=>(
+                <tr key={r.id}>
+                  <td><span className="mono" style={{fontSize:11,color:'var(--accent)'}}>{r.order_id}</span></td>
+                  <td>{r.supplier_name||r.supplier_id}</td>
+                  <td><span className="mono" style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>{r.supplier_ref||'—'}</span></td>
+                  <td><span className="mono" style={{fontSize:11,fontWeight:600}}>{r.zoho_po_number||'—'}</span></td>
+                  <td style={{fontSize:11}}>{r.fulfilled_by||'—'}</td>
+                  <td style={{fontSize:11}}>{fmtDate(r.fulfilled_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Fulfill Modal */}
+      {fulfillModal && (
+        <FulfillPORequestModal
+          request={fulfillModal}
+          onClose={()=>setFulfillModal(null)}
+          onSaved={()=>{ setFulfillModal(null); qc.invalidateQueries(['po-requests']); onRefresh(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function FulfillPORequestModal({ request, onClose, onSaved }) {
+  const [form, setForm] = useState({ supplier_ref: '', zoho_po_number: '' });
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const mutation = useMutation({
+    mutationFn: d => api.put('/po-requests/' + request.id, d),
+    onSuccess: () => { toast.success('✅ Details saved — Procurement will see them automatically!'); onSaved(); },
+    onError: e => toast.error(e.response?.data?.error || 'Failed'),
+  });
+
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal modal-sm">
+        <div className="modal-header">
+          <h2>📋 Fill PO Details</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          <div style={{padding:'10px 14px',borderRadius:6,background:'var(--accent-lt)',
+            fontSize:12,marginBottom:16,fontWeight:600}}>
+            <div>{request.order_id} · {request.supplier_name||request.supplier_id}</div>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
+              Requested by {request.requested_by} on {fmtDate(request.requested_at)}
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="label">Supplier PI Number <span className="req">*</span></label>
+            <input className="input" value={form.supplier_ref}
+              onChange={e=>set('supplier_ref',e.target.value)}
+              placeholder="e.g. PI-2026-00123"
+              style={{borderColor:!form.supplier_ref?'var(--amber,#d97706)':undefined}}/>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
+              The Proforma Invoice number provided by the supplier
+            </div>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Zoho PO Number <span className="req">*</span></label>
+            <input className="input" value={form.zoho_po_number}
+              onChange={e=>set('zoho_po_number',e.target.value)}
+              placeholder="e.g. PO-20001"
+              style={{borderColor:!form.zoho_po_number?'var(--amber,#d97706)':undefined}}/>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
+              The PO number from Zoho Books
+            </div>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary"
+            disabled={mutation.isPending || !form.supplier_ref.trim() || !form.zoho_po_number.trim()}
+            onClick={()=>mutation.mutate(form)}>
+            {mutation.isPending ? 'Saving…' : '✅ Save & Send to Procurement'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Finance Page ─────────────────────────────────────────────────────────
 export default function FinancePage() {
   const { user } = useAuth();
@@ -522,16 +978,58 @@ export default function FinancePage() {
   });
   const [payModal,     setPayModal]     = useState(null);  // { item, type }
   const [viewPayModal, setViewPayModal] = useState(null); // { item } — view/edit recorded payment
+  const [bankModal, setBankModal] = useState(null); // { supplier }
+  const [customerBankModal, setCustomerBankModal] = useState(null); // customer object
+  const [releaseConfirm, setReleaseConfirm] = useState(null); // order to release
   const [search, setSearch]   = useState('');
+  const [historyDetail, setHistoryDetail] = useState(null);
+  const [historyFilter, setHistoryFilter] = useState({ query:'', method:'all', from:'', to:'' });
+
+  const releaseMutation = useMutation({
+    mutationFn: orderId => api.post('/finance/customer-release/' + orderId),
+    onSuccess: () => {
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-history']);
+      toast.success('✅ Payment released — order moved to procurement');
+      setReleaseConfirm(null);
+      setTab('history');
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Release failed'),
+  });
 
   const { data: custQueueRaw=[], isLoading: custLoading }   = useQuery({ queryKey:['finance-customer'], queryFn:()=>api.get('/finance/customer-queue').then(r=>r.data).catch(()=>[]), refetchInterval:30000 });
   const { data: supQueueRaw={advance:[],net:[]}, isLoading: supLoading } = useQuery({ queryKey:['finance-supplier'], queryFn:()=>api.get('/finance/supplier-queue').then(r=>r.data).catch(()=>({advance:[],net:[]})), refetchInterval:30000 });
   const { data: historyRaw={customer:[],supplier:[]} }      = useQuery({ queryKey:['finance-history'], queryFn:()=>api.get('/finance/history').then(r=>r.data).catch(()=>({customer:[],supplier:[]})) });
+  const { data: poRequestsRaw=[] }                          = useQuery({ queryKey:['po-requests'], queryFn:()=>api.get('/po-requests').then(r=>r.data).catch(()=>[]), refetchInterval:15000 });
   // FIX: defensive guards — ensure arrays even if server returns error object before migrations run
   const custQueue = Array.isArray(custQueueRaw) ? custQueueRaw : [];
   const supQueue  = (supQueueRaw && typeof supQueueRaw === 'object' && !Array.isArray(supQueueRaw)) ? supQueueRaw : {advance:[],net:[]};
   const history   = (historyRaw && typeof historyRaw === 'object' && !Array.isArray(historyRaw)) ? historyRaw : {customer:[],supplier:[]};
+  const poRequests = Array.isArray(poRequestsRaw) ? poRequestsRaw : [];
+  const pendingPORequests = poRequests.filter(r => r.status === 'pending');
   const { data: settings={} }                            = useQuery({ queryKey:['settings'], queryFn:()=>api.get('/settings').then(r=>r.data).catch(()=>({})) });
+  const { data: suppliers=[] }                           = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data).catch(()=>[]) });
+  const { data: customers=[] }                           = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
+  const { data: inventoryItems=[] }                      = useQuery({ queryKey:['inventory'],  queryFn:()=>api.get('/inventory').then(r=>r.data).catch(()=>[]) });
+
+  // Resolve the real entity (customer or supplier) behind a supplier_id (including __inv__ ones)
+  const resolveFinanceSupplier = (supplierId) => {
+    if (!supplierId) return { entity: null, entityType: 'supplier', displayName: '—' };
+    if (supplierId.startsWith('__inv__')) {
+      const inv = inventoryItems.find(i => i.id === supplierId.slice(7));
+      if (inv?.holder_type === 'customer') {
+        const cust = customers.find(c => c.id === inv.holder_id);
+        return { entity: cust || { id: inv.holder_id, name: inv.holder_name || supplierId }, entityType: 'customer', displayName: cust?.name || inv.holder_name || supplierId };
+      }
+      if (inv?.holder_type === 'supplier') {
+        const sup = suppliers.find(s => s.id === inv.holder_id);
+        return { entity: sup || { id: inv.holder_id, name: inv.holder_name || supplierId }, entityType: 'supplier', displayName: sup?.name || inv.holder_name || supplierId };
+      }
+      return { entity: null, entityType: 'supplier', displayName: supplierId };
+    }
+    const sup = suppliers.find(s => s.id === supplierId);
+    return { entity: sup || null, entityType: 'supplier', displayName: sup?.name || supplierId };
+  };
 
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
@@ -569,6 +1067,7 @@ export default function FinancePage() {
     { k:'cust-net',     l:`📅 Customer Net/Other (${custNet.length + custOther.length})` },
     { k:'sup-advance',  l:`💸 Supplier Advance (${supAdvance.length})` },
     { k:'sup-net',      l:`📅 Supplier Net (${supNet.length})` },
+    { k:'po-requests',  l:`📋 PO Requests (${pendingPORequests.length})` },
     { k:'history',      l:'✅ History' },
   ];
 
@@ -583,10 +1082,46 @@ export default function FinancePage() {
       const w = window.open('', '_blank');
       w.document.write(html);
       w.document.close();
+
       qc.invalidateQueries(['finance-customer']);
       toast.success('PI generated — ' + pi_no);
     } catch(e) { toast.error(e.response?.data?.error||'PI generation failed'); }
   };
+
+  const inDateRange = (d) => {
+    if (!d) return !historyFilter.from && !historyFilter.to;
+    const dt = new Date(d);
+    if (historyFilter.from && dt < new Date(historyFilter.from)) return false;
+    if (historyFilter.to) {
+      const to = new Date(historyFilter.to);
+      to.setHours(23,59,59,999);
+      if (dt > to) return false;
+    }
+    return true;
+  };
+
+  const hq = (historyFilter.query || '').toLowerCase();
+  const filteredCustomerHistory = useMemo(() => {
+    return (history.customer || []).filter(p => {
+      if (historyFilter.method !== 'all' && (p.payment_method || '').toLowerCase() !== historyFilter.method.toLowerCase()) return false;
+      if (!inDateRange(p.payment_date || p.recorded_at)) return false;
+      if (!hq) return true;
+      return [p.order_id, p.customer_name, p.customer_id, p.po_number, p.finance_po_no, p.pi_no, p.payment_ref, p.payment_method]
+        .map(v => (v || '').toLowerCase())
+        .some(v => v.includes(hq));
+    });
+  }, [history.customer, historyFilter, hq]);
+
+  const filteredSupplierHistory = useMemo(() => {
+    return (history.supplier || []).filter(p => {
+      if (historyFilter.method !== 'all' && (p.payment_method || '').toLowerCase() !== historyFilter.method.toLowerCase()) return false;
+      if (!inDateRange(p.payment_date || p.paid_at)) return false;
+      if (!hq) return true;
+      return [p.linked_order_id, p.order_id, p.supplier_name, p.supplier_id, p.internal_po_no, p.po_no, p.supplier_ref, p.payment_ref]
+        .map(v => (v || '').toLowerCase())
+        .some(v => v.includes(hq));
+    });
+  }, [history.supplier, historyFilter, hq]);
 
   const sq = search.toLowerCase();
   const filterCust = arr => !search ? arr : arr.filter(o =>
@@ -649,7 +1184,7 @@ export default function FinancePage() {
           ) : (
             <table className="table">
               <thead><tr>
-                <th>Order</th><th>Customer</th><th>PO No.</th><th>Terms</th>
+                <th>Order</th><th>Customer</th><th>PO Context</th><th>Terms</th>
                 <th style={{textAlign:'right'}}>Order Total</th>
                 <th style={{textAlign:'right'}}>Paid</th>
                 <th style={{textAlign:'right'}}>Balance Due</th>
@@ -660,7 +1195,10 @@ export default function FinancePage() {
                   <tr key={o.id}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
                     <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
-                    <td className="mono" style={{fontSize:11}}>{o.po_number||'—'}</td>
+                    <td style={{fontSize:11}}>
+                      <div className="mono" style={{fontWeight:700}}>{o.po_number||'—'}</div>
+                      <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>Customer PO</div>
+                    </td>
                     <td><TermsBadge terms={o.payment_terms}/></td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(o.order_total)}</td>
                     <td style={{textAlign:'right',fontFamily:'monospace',color:'var(--green)',fontWeight:600}}>
@@ -686,23 +1224,23 @@ export default function FinancePage() {
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         <button className="btn btn-xs" onClick={()=>handleGeneratePI(o)}
                           style={{fontSize:11}}>📄 {o.pi_no?'Re-print PI':'Generate PI'}</button>
-                        {/* FIX: show Record Payment based on status, not balance_due */}
-                        {/* balance_due can be 0 due to junk data even when no real payment was made */}
-                        {o.customer_payment_status !== 'paid' ? (
-                          <button className="btn btn-xs btn-primary" onClick={()=>setPayModal({item:o,type:'customer'})}
-                            style={{fontSize:11}}>💳 Record Payment</button>
+                        {o.customer_payment_status === 'payment_recorded' ? (
+                          <>
+                            <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
+                              style={{fontSize:11}}>👁 View</button>
+                            <button className="btn btn-xs"
+                              style={{fontSize:11,background:'var(--green)',color:'#fff',
+                                borderColor:'var(--green)',fontWeight:600}}
+                              onClick={()=>setReleaseConfirm(o)}>
+                              🚀 Release
+                            </button>
+                          </>
                         ) : (
-                          <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
-                            style={{fontSize:11,opacity:0.7}}>👁 View Payment</button>
-                        )}
-                        {/* ADDED: Go to Order button — shown once payment is confirmed paid */}
-                        {o.customer_payment_status === 'paid' && (
-                          <button className="btn btn-xs"
-                            style={{fontSize:11,background:'var(--green)',color:'#fff',
-                              borderColor:'var(--green)',fontWeight:600}}
-                            onClick={()=>window.location.href='/orders?q='+encodeURIComponent(o.id)}>
-                            ✓ Go to Order →
-                          </button>
+                          <button className="btn btn-xs btn-primary"
+                            onClick={()=>setPayModal({item:o,type:'customer'})}
+                            disabled={!o.pi_no}
+                            title={!o.pi_no ? 'Generate PI first before recording payment' : ''}
+                            style={{fontSize:11,opacity:o.pi_no?1:0.45,cursor:o.pi_no?'pointer':'not-allowed'}}>💳 Record Payment</button>
                         )}
                       </div>
                     </td>
@@ -728,7 +1266,7 @@ export default function FinancePage() {
           ) : (
             <table className="table">
               <thead><tr>
-                <th>Order</th><th>Customer</th><th>PO No.</th><th>Terms</th>
+                <th>Order</th><th>Customer</th><th>PO Context</th><th>Terms</th>
                 <th style={{textAlign:'right'}}>Order Total</th>
                 <th style={{textAlign:'right'}}>Balance Due</th>
                 <th>Due Date</th><th>Status</th><th style={{textAlign:'right'}}>Actions</th>
@@ -740,7 +1278,10 @@ export default function FinancePage() {
                     <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
                       <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
-                      <td className="mono" style={{fontSize:11}}>{o.po_number||'—'}</td>
+                      <td style={{fontSize:11}}>
+                        <div className="mono" style={{fontWeight:700}}>{o.po_number||'—'}</div>
+                        <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>Customer PO</div>
+                      </td>
                       <td><TermsBadge terms={o.payment_terms}/></td>
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(o.order_total)}</td>
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
@@ -799,9 +1340,16 @@ export default function FinancePage() {
               </tr></thead>
               <tbody>
                 {filterSup(supAdvance).map(r=>(
+                  (() => {
+                    const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
+                    const hasBank = isSupplierBankReady(fullEntity);
+                    return (
                   <tr key={r.id}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
-                    <td style={{fontWeight:500}}>{r.supplier?.name||r.supplier_id}</td>
+                    <td style={{fontWeight:500}}>
+                      {displayName}
+                      {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
+                    </td>
                     <td><span className="mono" style={{fontSize:11}}>{r.order_id}</span></td>
                     <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>{r.supplier_ref||'—'}</td>
                     <td><span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red)',fontWeight:700}}>
@@ -811,19 +1359,36 @@ export default function FinancePage() {
                       {fmtM(r.amount, r.currency)}
                     </td>
                     <td style={{fontSize:11,color:'var(--text2)'}}>
-                      {r.supplier?.bank_name && <div>{r.supplier.bank_name}</div>}
-                      {r.supplier?.bank_account_no && <div className="mono">{r.supplier.bank_account_no}</div>}
-                      {r.supplier?.bank_ifsc && <div style={{color:'var(--text3)'}}>{r.supplier.bank_ifsc}</div>}
-                      {!r.supplier?.bank_account_no && <span style={{color:'var(--text3)'}}>No bank details</span>}
+                      {fullEntity?.bank_name && <div>{fullEntity.bank_name}</div>}
+                      {fullEntity?.bank_account_no && <div className="mono">{fullEntity.bank_account_no}</div>}
+                      {fullEntity?.bank_ifsc && <div style={{color:'var(--text3)'}}>{fullEntity.bank_ifsc}</div>}
+                      {fullEntity?.bank_swift && <div style={{color:'var(--text3)'}}>{fullEntity.bank_swift}</div>}
+                      {!hasBank && <span style={{color:'var(--text3)'}}>No bank details</span>}
                     </td>
                     <td style={{textAlign:'right'}}>
-                      <button className="btn btn-xs btn-primary"
-                        onClick={()=>setPayModal({item:r,type:'supplier-advance'})}
-                        style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)'}}>
-                        💸 Mark Paid
-                      </button>
+                      <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                        {!hasBank && (
+                          <button className="btn btn-xs"
+                            onClick={()=>{
+                              if (entityType==='customer') setCustomerBankModal(fullEntity || { id: r.supplier_id });
+                              else setBankModal({ supplier: fullEntity || { id: r.supplier_id, name: displayName, type: 'domestic' } });
+                            }}
+                            style={{fontSize:11}}>
+                            🏦 Add Bank Details
+                          </button>
+                        )}
+                        <button className="btn btn-xs btn-primary"
+                          onClick={()=>setPayModal({item:{...r, _resolvedName: displayName},type:'supplier-advance'})}
+                          disabled={!hasBank}
+                          style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)',opacity:hasBank?1:0.55,cursor:hasBank?'pointer':'not-allowed'}}
+                          title={hasBank ? '' : 'Add bank details first'}>
+                          💸 Mark Paid
+                        </button>
+                      </div>
                     </td>
                   </tr>
+                    );
+                  })()
                 ))}
               </tbody>
             </table>
@@ -851,11 +1416,15 @@ export default function FinancePage() {
               </tr></thead>
               <tbody>
                 {filterSup(supNet).map(r=>{
+                  const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                   const daysLeft = r.payment_due_date ? daysDiff(r.payment_due_date) : null;
                   return (
                     <tr key={r.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.id}</span></td>
-                      <td style={{fontWeight:500}}>{r.supplier?.name||r.supplier_id}</td>
+                      <td style={{fontWeight:500}}>
+                        {displayName}
+                        {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
+                      </td>
                       <td><span className="mono" style={{fontSize:11}}>{r.order_id}</span></td>
                       <td><TermsBadge terms={r.payment_terms||('Net '+r.payment_net_days)}/></td>
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>
@@ -892,22 +1461,45 @@ export default function FinancePage() {
         </div>
       )}
 
+      {/* ── Tab: PO Requests ── */}
+      {tab==='po-requests' && (
+        <PORequestsTab
+          requests={poRequests}
+          onRefresh={()=>qc.invalidateQueries(['po-requests'])}
+        />
+      )}
+
       {/* ── Tab: History ── */}
       {tab==='history' && (
         <div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
+            <div style={{gridColumn:'1 / -1',display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr',gap:10,marginBottom:2}}>
+              <input className="input" placeholder="Search order, customer/supplier, PO, PI, ref..."
+                value={historyFilter.query}
+                onChange={e=>setHistoryFilter(f=>({...f, query:e.target.value}))}/>
+              <select className="input" value={historyFilter.method}
+                onChange={e=>setHistoryFilter(f=>({...f, method:e.target.value}))}>
+                <option value="all">All Methods</option>
+                {PAYMENT_METHODS.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <input className="input" type="date" value={historyFilter.from}
+                onChange={e=>setHistoryFilter(f=>({...f, from:e.target.value}))}/>
+              <input className="input" type="date" value={historyFilter.to}
+                onChange={e=>setHistoryFilter(f=>({...f, to:e.target.value}))}/>
+            </div>
             {/* Customer payments */}
             <div>
               <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:'var(--accent)'}}>
-                Customer Receipts ({history.customer?.length||0})
+                Customer Receipts ({filteredCustomerHistory.length})
               </div>
-              {(history.customer||[]).length === 0 ? (
+              {filteredCustomerHistory.length === 0 ? (
                 <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No customer payments recorded yet.</div>
               ) : (
                 <div style={{display:'grid',gap:8}}>
-                  {(history.customer||[]).slice(0,20).map(p=>(
+                  {filteredCustomerHistory.slice(0,50).map(p=>(
                     <div key={p.id} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
-                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12}}>
+                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
+                      onClick={()=>setHistoryDetail({ type:'customer', item:p })}>
                       <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
                         <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{p.order_id}</span>
                         <span style={{fontWeight:800,color:'var(--green)'}}>{fmtM(p.amount, p.currency)}</span>
@@ -915,6 +1507,7 @@ export default function FinancePage() {
                       <div style={{color:'var(--text2)'}}>
                         {p.payment_method} · Ref: {p.payment_ref||'—'} · {fmtDate(p.payment_date)}
                       </div>
+                      {p.po_number && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Customer PO: {p.po_number}</div>}
                       {p.pi_no && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>PI: {p.pi_no}</div>}
                     </div>
                   ))}
@@ -924,22 +1517,31 @@ export default function FinancePage() {
             {/* Supplier payments */}
             <div>
               <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:'var(--teal,#0d9488)'}}>
-                Supplier Payments ({history.supplier?.length||0})
+                Supplier Payments ({filteredSupplierHistory.length})
               </div>
-              {(history.supplier||[]).length === 0 ? (
+              {filteredSupplierHistory.length === 0 ? (
                 <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No supplier payments recorded yet.</div>
               ) : (
                 <div style={{display:'grid',gap:8}}>
-                  {(history.supplier||[]).slice(0,20).map(p=>(
+                  {filteredSupplierHistory.slice(0,50).map(p=>(
                     <div key={p.id} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
-                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12}}>
+                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
+                      onClick={()=>setHistoryDetail({ type:'supplier', item:p })}>
+                      {(() => {
+                        const displayAmount = p.paid_amount ?? p.amount ?? p.confirmed_price ?? 0;
+                        const displayCurrency = p.confirmed_currency || p.currency || 'INR';
+                        return (
                       <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
                         <span className="mono" style={{fontWeight:700,color:'var(--teal,#0d9488)'}}>{p.internal_po_no||p.supplier_order_id}</span>
-                        <span style={{fontWeight:800,color:'var(--green)'}}>{fmtM(p.paid_amount, p.confirmed_currency)}</span>
+                        <span style={{fontWeight:800,color:'var(--green)'}}>{fmtM(displayAmount, displayCurrency)}</span>
                       </div>
+                        );
+                      })()}
                       <div style={{color:'var(--text2)'}}>
                         Ref: {p.payment_ref||'—'} · {fmtDate(p.paid_at)}
                       </div>
+                      {p.po_no && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>PO: {p.po_no}</div>}
+                      {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Supplier Ref: {p.supplier_ref}</div>}
                     </div>
                   ))}
                 </div>
@@ -963,6 +1565,57 @@ export default function FinancePage() {
           item={viewPayModal.item}
           onClose={()=>setViewPayModal(null)}
           onSaved={()=>{ qc.invalidateQueries(['finance-customer']); setViewPayModal(null); }}
+        />
+      )}
+      {/* Release Payment Confirmation */}
+      {releaseConfirm && (
+        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setReleaseConfirm(null)}>
+          <div className="modal modal-sm">
+            <div className="modal-header">
+              <h2>🚀 Release</h2>
+              <button className="close-x" onClick={()=>setReleaseConfirm(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:14,marginBottom:10}}>
+                Are you sure you want to release payment for order{' '}
+                <strong style={{color:'var(--accent)'}}>{releaseConfirm.id}</strong>?
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',padding:'10px 12px',borderRadius:6,
+                background:'var(--surface2)',border:'1px solid var(--border)'}}>
+                Customer: <strong>{releaseConfirm.customer?.name || releaseConfirm.customer_id}</strong><br/>
+                Amount Paid: <strong style={{color:'var(--green)'}}>{fmtM(releaseConfirm.total_paid)}</strong>
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',marginTop:10}}>
+                This will mark the payment as fully released and move the order to procurement.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={()=>setReleaseConfirm(null)}>Cancel</button>
+              <button className="btn btn-primary"
+                style={{background:'var(--green)',borderColor:'var(--green)'}}
+                disabled={releaseMutation.isPending}
+                onClick={()=>releaseMutation.mutate(releaseConfirm.id)}>
+                {releaseMutation.isPending ? 'Releasing…' : '✅ Yes, Release'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {historyDetail && (
+        <HistoryDetailModal detail={historyDetail} onClose={()=>setHistoryDetail(null)} />
+      )}
+      {bankModal?.supplier && (
+        <SupplierBankDetailsModal
+          supplier={bankModal.supplier}
+          onClose={()=>setBankModal(null)}
+          onSaved={()=>setBankModal(null)}
+        />
+      )}
+      {customerBankModal && (
+        <CustomerBankDetailsModal
+          customer={customerBankModal}
+          onClose={()=>setCustomerBankModal(null)}
+          onSaved={()=>{ qc.invalidateQueries(['customers']); setCustomerBankModal(null); }}
         />
       )}
     </div>
