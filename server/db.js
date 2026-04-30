@@ -670,6 +670,31 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN expected_ship_date TEXT DEFAULT ''"); } catch(_) {}
   console.log('[DB] All migrations done');
+
+  // ── Seed default admin user if no users exist ─────────────────────────────
+  const userCount = await pool.query('SELECT COUNT(*) as n FROM users');
+  if (parseInt(userCount.rows[0].n) === 0) {
+    console.log('[DB] Seeding default users...');
+    const today = new Date().toISOString().slice(0,10);
+    const users = [
+      ['uadmin001', 'Administrator', 'admin',     'admin@ciflux.com',    'admin123',  'management', 'admin',   'active', today],
+      ['umgr001',   'Manager',       'manager',   'manager@ciflux.com',  'pass123',   'management', 'manager', 'active', today],
+      ['usales001', 'Sales User',    'sales1',    'sales1@ciflux.com',   'pass123',   'sales',      'user',    'active', today],
+      ['usrc001',   'Sourcing User', 'sourcing1', 'sourcing@ciflux.com', 'pass123',   'sourcing',   'user',    'active', today],
+      ['uprc001',   'Procure User',  'procure1',  'procure@ciflux.com',  'pass123',   'procurement','user',    'active', today],
+      ['uacc001',   'Accounts User', 'accounts1', 'accounts@ciflux.com', 'pass123',   'accounts',   'user',    'active', today],
+      ['uapp001',   'Approver User', 'approver1', 'approver@ciflux.com', 'pass123',   'approvers',  'user',    'active', today],
+    ];
+    for (const [id, name, username, email, password, department, role, status, created] of users) {
+      const hashed = bcrypt.hashSync(password, 10);
+      await pool.query(
+        'INSERT INTO users(id,name,username,email,password,department,role,status,created) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(username) DO NOTHING',
+        [id, name, username, email, hashed, department, role, status, created]
+      );
+    }
+    console.log('[DB] Default users seeded');
+  }
+
   return pool;
 }
 
