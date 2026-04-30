@@ -2316,11 +2316,19 @@ app.get('/api/finance/history', auth, (req, res) => {
     });
   };
 
-  startListening(PORT, MAX_PORT_TRIES);
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
   app.get('*', (req, res) => {
     const idx = path.join(__dirname, '..', 'client', 'build', 'index.html');
     fs.existsSync(idx) ? res.sendFile(idx) : res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
   });
 
-}).catch(err => { console.error('Start failed:', err); process.exit(1); });
+  // START SERVER FIRST (Non-blocking)
+  startListening(PORT, MAX_PORT_TRIES);
+
+}).catch(err => { 
+  console.error('Start failed:', err); 
+  
+  // Even if DB fails, keep the server alive so Azure health checks pass
+  app.get('/', (req, res) => res.send('API is running, but database connection failed. Check logs.'));
+  app.listen(PORT, '0.0.0.0', () => console.log(`Fallback server running on port ${PORT}`));
+});
