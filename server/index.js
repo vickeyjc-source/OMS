@@ -1236,6 +1236,39 @@ function getLanIp() {
   }
   return '127.0.0.1';
 }
+
+const MAX_PORT_TRIES = 10;
+const startListening = (port, triesLeft) => {
+  console.log('[STARTUP] PORT =', port);
+  const server = app.listen(port, '0.0.0.0', () => {
+    const ip = getLanIp();
+    console.log('\n' + '═'.repeat(52));
+    console.log('  ⚡  CIFLUX OMS v2  –  Electronic Components');
+    console.log('═'.repeat(52));
+    console.log(`  Local  →  http://localhost:${port}`);
+    console.log(`  LAN    →  http://${ip}:${port}`);
+    console.log('═'.repeat(52) + '\n');
+  });
+
+  server.on('error', (err) => {
+    if (err?.code === 'EADDRINUSE' && triesLeft > 0) {
+      const nextPort = port + 1;
+      console.error(`[STARTUP] Port ${port} is busy. Retrying on ${nextPort}...`);
+      return startListening(nextPort, triesLeft - 1);
+    }
+    throw err;
+  });
+};
+
+// Azure Health Check Probe
+app.get('/api/health', (req, res) => {
+  res.send('API is running');
+});
+
+// START SERVER FIRST (Non-blocking)
+startListening(PORT, MAX_PORT_TRIES);
+
+// THEN CONNECT TO DB
 initDb().then(() => {
   console.log('[STARTUP] DB ready — registering routes...');
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
@@ -2291,30 +2324,7 @@ app.get('/api/finance/history', auth, (req, res) => {
   res.json({ customer: custPmts, supplier: supPmts });
 });
 
-  console.log('[STARTUP] All routes registered — starting listener...');
-  const MAX_PORT_TRIES = 10;
-
-  const startListening = (port, triesLeft) => {
-    console.log('[STARTUP] PORT =', port);
-    const server = app.listen(port, '0.0.0.0', () => {
-      const ip = getLanIp();
-      console.log('\n' + '═'.repeat(52));
-      console.log('  ⚡  CIFLUX OMS v2  –  Electronic Components');
-      console.log('═'.repeat(52));
-      console.log(`  Local  →  http://localhost:${port}`);
-      console.log(`  LAN    →  http://${ip}:${port}`);
-      console.log('═'.repeat(52) + '\n');
-    });
-
-    server.on('error', (err) => {
-      if (err?.code === 'EADDRINUSE' && triesLeft > 0) {
-        const nextPort = port + 1;
-        console.error(`[STARTUP] Port ${port} is busy. Retrying on ${nextPort}...`);
-        return startListening(nextPort, triesLeft - 1);
-      }
-      throw err;
-    });
-  };
+  console.log('[STARTUP] All routes registered.');
 
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
   app.get('*', (req, res) => {
@@ -2322,13 +2332,6 @@ app.get('/api/finance/history', auth, (req, res) => {
     fs.existsSync(idx) ? res.sendFile(idx) : res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
   });
 
-  // START SERVER FIRST (Non-blocking)
-  startListening(PORT, MAX_PORT_TRIES);
-
 }).catch(err => { 
-  console.error('Start failed:', err); 
-  
-  // Even if DB fails, keep the server alive so Azure health checks pass
-  app.get('/', (req, res) => res.send('API is running, but database connection failed. Check logs.'));
-  app.listen(PORT, '0.0.0.0', () => console.log(`Fallback server running on port ${PORT}`));
+  console.error('Database connection or initialization failed:', err); 
 });
