@@ -14,6 +14,7 @@ const pool = new Pool({
   database: process.env.PG_DB       || 'ciflux_oms',
   user:     process.env.PG_USER     || 'ciflux',
   password: process.env.PG_PASSWORD || 'ciflux_pass',
+  ssl:      (process.env.PG_HOST || '').includes('azure') ? { rejectUnauthorized: false } : false
 });
 
 pool.on('error', (err) => {
