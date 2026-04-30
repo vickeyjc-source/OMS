@@ -85,7 +85,7 @@ const os   = require('os');
 const { initDb, all, run, get, saveNow, nextId, assembleOrder, assembleEnquiry } = require('./db');
 
 const app    = express();
-const PORT   = process.env.PORT || 8080;
+const PORT   = Number(process.env.BACKEND_PORT || process.env.PORT || 8080);
 const SECRET = 'ciflux-jwt-2024';
 
 app.use(cors({ origin: true, credentials: true }));
@@ -109,6 +109,13 @@ app.use(session({
 }));
 
 const BUILD = path.join(__dirname, '..', 'client', 'build');
+const PORTAL = path.join(__dirname, '..', 'portal', 'index.html');
+
+// Serve the portal landing page at the root URL
+if (fs.existsSync(PORTAL)) {
+  app.get('/', (req, res) => res.sendFile(PORTAL));
+}
+
 if (fs.existsSync(BUILD)) app.use(express.static(BUILD));
 
 // ── Disable caching for ALL /api routes ──────────────────────────────────────
@@ -2285,16 +2292,31 @@ app.get('/api/finance/history', auth, (req, res) => {
 });
 
   console.log('[STARTUP] All routes registered — starting listener...');
-  console.log('[STARTUP] PORT =', PORT);
-app.listen(PORT, '0.0.0.0', () => {
-    const ip = getLanIp();
-    console.log('\n' + '═'.repeat(52));
-    console.log('  ⚡  CIFLUX OMS v2  –  Electronic Components');
-    console.log('═'.repeat(52));
-    console.log(`  Local  →  http://localhost:${PORT}`);
-    console.log(`  LAN    →  http://${ip}:${PORT}`);
-    console.log('═'.repeat(52) + '\n');
-  });
+  const MAX_PORT_TRIES = 10;
+
+  const startListening = (port, triesLeft) => {
+    console.log('[STARTUP] PORT =', port);
+    const server = app.listen(port, '0.0.0.0', () => {
+      const ip = getLanIp();
+      console.log('\n' + '═'.repeat(52));
+      console.log('  ⚡  CIFLUX OMS v2  –  Electronic Components');
+      console.log('═'.repeat(52));
+      console.log(`  Local  →  http://localhost:${port}`);
+      console.log(`  LAN    →  http://${ip}:${port}`);
+      console.log('═'.repeat(52) + '\n');
+    });
+
+    server.on('error', (err) => {
+      if (err?.code === 'EADDRINUSE' && triesLeft > 0) {
+        const nextPort = port + 1;
+        console.error(`[STARTUP] Port ${port} is busy. Retrying on ${nextPort}...`);
+        return startListening(nextPort, triesLeft - 1);
+      }
+      throw err;
+    });
+  };
+
+  startListening(PORT, MAX_PORT_TRIES);
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
   app.get('*', (req, res) => {
     const idx = path.join(__dirname, '..', 'client', 'build', 'index.html');

@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ciflux Electronic — Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --primary: #4BD679;
+      --secondary: #13BCCF;
+      --white: #FFFFFF;
+      --black: #0D0D0D;
+      --surface: #F7F9FB;
+      --divider: #E0E0E0;
+      --text-primary: #1A1A1A;
+      --text-secondary: #6B7280;
+      --gradient: linear-gradient(90deg, #4BD679 0%, #13BCCF 100%);
+      --r: 18px;
+    }
+    html, body {
+      min-height: 100vh;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--surface);
+      color: var(--text-primary);
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 70% 55% at 15% 5%, rgba(75,214,121,0.10) 0%, transparent 60%),
+        radial-gradient(ellipse 55% 45% at 85% 95%, rgba(19,188,207,0.10) 0%, transparent 55%),
+        linear-gradient(180deg, #ffffff 0%, #f7f9fb 100%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.12;
+      pointer-events: none;
+      z-index: 0;
+      animation: drift 18s ease-in-out infinite alternate;
+    }
+    .orb-1 { width:500px;height:500px;background:var(--primary); top:-120px;left:-100px;animation-delay:0s; }
+    .orb-2 { width:420px;height:420px;background:var(--secondary);bottom:-100px;right:-80px;animation-delay:-6s; }
+    .orb-3 { width:300px;height:300px;background:var(--primary); top:55%;right:25%;animation-delay:-12s;opacity:.06; }
+    @keyframes drift {
+      0%   { transform: translate(0,0) scale(1); }
+      100% { transform: translate(40px,30px) scale(1.08); }
+    }
+    .page {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 80px 32px 80px;
+    }
+    /* Navbar */
+    .navbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 58px;
+      display: flex;
+      align-items: center;
+      padding: 0 36px;
+      background: rgba(255,255,255,0.82);
+      backdrop-filter: blur(18px);
+      border-bottom: 1px solid var(--divider);
+      z-index: 100;
+      animation: slideDown 0.5s ease both;
+    }
+    @keyframes slideDown {
+      from { transform: translateY(-100%); opacity: 0; }
+      to   { transform: translateY(0);     opacity: 1; }
+    }
+    .nav-logo { display:flex;align-items:center;gap:12px; }
+    .nav-logo img { height:26px;width:auto;display:block; }
+    .nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--primary);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--primary);
+      box-shadow: 0 0 8px rgba(75,214,121,0.45);
+      animation: blink 2.5s ease-in-out infinite;
+    }
+    @keyframes blink {
+      0%,100% { opacity:1; } 50% { opacity:0.35; }
+    }
+    /* Hero */
+    .hero {
+      text-align: center;
+      margin-top: 20px;
+      margin-bottom: 64px;
+      max-width: 660px;
+      width: 100%;
+      animation: fadeUp 0.7s ease 0.1s both;
+    }
+    @keyframes fadeUp {
+      from { opacity:0; transform:translateY(28px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    .hero-logo {
+      margin: 0 auto 28px;
+      height: 64px;
+      width: auto;
+      display: block;
+      filter: drop-shadow(0 10px 26px rgba(19,188,207,0.22));
+    }
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 16px;
+      border-radius: 99px;
+      border: 1px solid rgba(19,188,207,0.20);
+      background: rgba(19,188,207,0.08);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: var(--secondary);
+      margin-bottom: 22px;
+    }
+    .hero-title {
+      font-size: clamp(36px, 5vw, 56px);
+      font-weight: 900;
+      letter-spacing: -1.5px;
+      line-height: 1.08;
+      color: var(--black);
+      margin-bottom: 18px;
+    }
+    .hero-title .grad {
+      background: var(--gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero-sub {
+      font-size: 17px;
+      color: var(--text-secondary);
+      line-height: 1.65;
+      font-weight: 400;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    /* Section label */
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      width: 100%;
+      max-width: 1100px;
+      margin-bottom: 28px;
+      animation: fadeUp 0.7s ease 0.12s both;
+    }
+    .section-label-text {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .section-label-line { flex:1; height:1px; background:var(--divider); }
+    /* Cards */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+      width: 100%;
+      max-width: 1100px;
+    }
+    .card {
+      background: var(--white);
+      border: 1px solid var(--divider);
+      border-radius: var(--r);
+      padding: 36px 32px 30px;
+      display: flex;
+      flex-direction: column;
+      cursor: pointer;
+      text-decoration: none;
+      color: inherit;
+      position: relative;
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+      transition: transform 0.28s cubic-bezier(.34,1.56,.64,1), border-color 0.22s ease, box-shadow 0.28s ease;
+      animation: fadeUp 0.7s ease both;
+    }
+    .card:nth-child(1) { animation-delay:0.15s; }
+    .card:nth-child(2) { animation-delay:0.25s; }
+    .card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: var(--r);
+      background: radial-gradient(ellipse 80% 60% at 50% 0%, var(--glow, rgba(19,188,207,0.10)), transparent 70%);
+      opacity: 0;
+      transition: opacity 0.28s ease;
+      pointer-events: none;
+    }
+    .card:hover {
+      transform: translateY(-8px);
+      border-color: var(--card-accent, var(--secondary));
+      box-shadow: 0 18px 48px rgba(17,24,39,0.10), 0 0 0 1px rgba(19,188,207,0.08);
+    }
+    .card:hover::after { opacity: 1; }
+    .card-line {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--card-accent, var(--secondary)), transparent);
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+    .card:hover .card-line { opacity: 1; }
+    .card-icon {
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      margin-bottom: 22px;
+      background: var(--icon-bg, rgba(19,188,207,0.08));
+      border: 1px solid var(--icon-border, rgba(19,188,207,0.16));
+      flex-shrink: 0;
+    }
+    .card-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--card-accent, var(--secondary));
+      margin-bottom: 8px;
+    }
+    .card-title {
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--black);
+      letter-spacing: -0.4px;
+      line-height: 1.2;
+      margin-bottom: 12px;
+    }
+    .card-desc {
+      font-size: 14px;
+      color: var(--text-secondary);
+      line-height: 1.7;
+      flex: 1;
+    }
+    .card-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--divider);
+    }
+    .card-cta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--card-accent, var(--secondary));
+    }
+    .cta-arrow {
+      width: 30px; height: 30px;
+      border-radius: 50%;
+      background: var(--icon-bg, rgba(19,188,207,0.08));
+      border: 1px solid var(--icon-border, rgba(19,188,207,0.16));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.22s cubic-bezier(.34,1.56,.64,1), background 0.18s ease;
+    }
+    .cta-arrow svg { width:13px;height:13px; }
+    .card:hover .cta-arrow { transform: translateX(4px); }
+    .badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 99px;
+    }
+    .badge-live { background:rgba(75,214,121,0.12); color:#1f8f45; border:1px solid rgba(75,214,121,0.26); }
+    /* Footer */
+    .footer {
+      margin-top: 72px;
+      text-align: center;
+      color: var(--text-secondary);
+      font-size: 12px;
+      animation: fadeUp 0.7s ease 0.4s both;
+    }
+    .footer a { color: var(--text-primary); text-decoration:none; transition:color 0.15s; }
+    .footer a:hover { color: var(--secondary); }
+    /* Responsive */
+    @media (max-width: 900px) {
+      .cards { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 600px) {
+      .page { padding: 72px 18px 60px; }
+      .cards { grid-template-columns: 1fr; gap: 14px; }
+      .hero-title { font-size: 32px; }
+      .card { padding: 28px 22px 22px; }
+      .navbar { padding: 0 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="orb orb-1"></div>
+<div class="orb orb-2"></div>
+<div class="orb orb-3"></div>
+
+<nav class="navbar">
+  <div class="nav-logo">
+    <img src="/logo.png" alt="Ciflux" onerror="this.style.display='none'" />
+  </div>
+  <div class="nav-status">
+    <div class="status-dot"></div>
+    All systems operational
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="hero">
+    <img class="hero-logo" src="/logo.png" alt="Ciflux Electronic" onerror="this.style.display='none'" />
+    <div class="hero-eyebrow">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+        <circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M4 6h4M6 4v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      Internal Tools Portal
+    </div>
+    <div class="hero-title">
+      One place for<br/><span class="grad">all your tools</span>
+    </div>
+    <div class="hero-sub">
+      Access every business system, from order operations to the company storefront, in a single Ciflux hub.
+    </div>
+  </div>
+
+  <div class="section-label">
+    <div class="section-label-text">Available tools</div>
+    <div class="section-label-line"></div>
+  </div>
+
+  <div class="cards">
+
+     <a class="card" href="/app"
+       style="--card-accent:var(--primary);--glow:rgba(75,214,121,0.10);--icon-bg:rgba(75,214,121,0.08);--icon-border:rgba(75,214,121,0.16);">
+      <div class="card-line"></div>
+      <div class="card-icon">📦</div>
+      <div class="card-label">Operations</div>
+      <div class="card-title">Order Management System</div>
+      <div class="card-desc">
+        End-to-end order operations — enquiries, quotes, procurement, finance, inventory, and delivery all in one place.
+      </div>
+      <div class="card-footer">
+        <div class="card-cta">
+          Open OMS
+          <div class="cta-arrow">
+            <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 7h10M7 2l5 5-5 5"/>
+            </svg>
+          </div>
+        </div>
+        <span class="badge badge-live">Live</span>
+      </div>
+    </a>
+
+     <a class="card" href="https://cifluxelectronic.com" target="_blank" rel="noopener noreferrer"
+       style="--card-accent:var(--secondary);--glow:rgba(19,188,207,0.10);--icon-bg:rgba(19,188,207,0.08);--icon-border:rgba(19,188,207,0.16);">
+      <div class="card-line"></div>
+      <div class="card-icon">🌐</div>
+      <div class="card-label">Storefront</div>
+      <div class="card-title">Ciflux Website</div>
+      <div class="card-desc">
+        The public company website where customers discover products, reach out, and learn about Ciflux Electronic.
+      </div>
+      <div class="card-footer">
+        <div class="card-cta" style="color:var(--secondary);">
+          Visit Website
+          <div class="cta-arrow" style="background:rgba(19,188,207,0.08);border-color:rgba(19,188,207,0.16);">
+            <svg viewBox="0 0 14 14" fill="none" stroke="var(--secondary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2 7h10M7 2l5 5-5 5"/>
+            </svg>
+          </div>
+        </div>
+        <span class="badge badge-live">Live</span>
+      </div>
+    </a>
+
+  </div>
+
+  <div class="footer">
+    <div style="margin-bottom:5px">
+      Ciflux Electronic Pvt Ltd &nbsp;·&nbsp;
+      <a href="https://cifluxelectronic.com" target="_blank" rel="noopener noreferrer">cifluxelectronic.com</a>
+    </div>
+    <div>Internal use only — all access is private and controlled</div>
+  </div>
+
+</div>
+</body>
+</html>

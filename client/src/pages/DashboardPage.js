@@ -60,19 +60,50 @@ export default function DashboardPage() {
   const canSeeCustomer = user.perms?.canSeeCustomer !== false;
   const custName = id => canSeeCustomer ? (customers.find(c=>c.id===id)?.name||id) : '[Restricted]';
 
-  const openOrders = orders.filter(o=>o.status==='open');
-  const openValues = useMemo(()=>computeValues(openOrders),[openOrders]);
+  const openOrders = orders.filter(o => (o.status || '').toLowerCase() !== 'closed');
   const allValues  = useMemo(()=>computeValues(orders),[orders]);
   const shippedOrders = orders.filter(o=>(o.lineItems||[]).some(li=>['shipped'].includes(li.line_status)));
 
   const pipeline = [
-    {s:'open',       label:'Open',        count:summary.open||0},
+    {s:'open',       label:'Open',        count:openOrders.length},
     {s:'delivered',  label:'Delivered',   count:summary.delivered||0},
     {s:'closed',     label:'Closed',      count:summary.closed||0},
     {s:'hold',       label:'Hold',        count:summary.hold||0},
     {s:'failed',     label:'Failed',      count:summary.failed||0},
   ];
-  const maxPipe = Math.max(...pipeline.map(p=>p.count),1);
+  const totalPipe = pipeline.reduce((sum, p) => sum + p.count, 0);
+  const pipelineSegments = [
+    { key:'open',      label:'Open',      count:openOrders.length,    color:'var(--accent)' },
+    { key:'delivered', label:'Delivered', count:summary.delivered||0, color:'var(--green)' },
+    { key:'closed',    label:'Closed',    count:summary.closed||0,    color:'var(--teal)' },
+    { key:'hold',      label:'Hold',      count:summary.hold||0,      color:'var(--amber)' },
+    { key:'failed',    label:'Failed',    count:summary.failed||0,    color:'var(--red)' },
+  ];
+  const pipelineRing = useMemo(() => {
+    if (!totalPipe) return 'conic-gradient(var(--surface2) 0deg 360deg)';
+    let start = 0;
+    const slices = pipelineSegments
+      .filter(seg => seg.count > 0)
+      .map(seg => {
+        const deg = (seg.count / totalPipe) * 360;
+        const end = start + deg;
+        const out = `${seg.color} ${start}deg ${end}deg`;
+        start = end;
+        return out;
+      });
+    if (start < 360) slices.push(`var(--surface2) ${start}deg 360deg`);
+    return `conic-gradient(${slices.join(',')})`;
+  }, [pipelineSegments, totalPipe]);
+
+  const lineItemStatus = useMemo(() => {
+    return orders.reduce((acc, order) => {
+      (order.lineItems || []).forEach((li) => {
+        const s = (li.line_status || '').toLowerCase();
+        if (s) acc[s] = (acc[s] || 0) + 1;
+      });
+      return acc;
+    }, {});
+  }, [orders]);
 
   const fin = useMemo(()=>{
     if (!isAdmin) return null;
@@ -224,14 +255,13 @@ export default function DashboardPage() {
 
       <div className="stats-grid">
         <div className="stat-card stat-accent"><div className="stat-label">Total Orders</div><div className="stat-val">{summary.total||0}</div><div className="stat-sub">{summary.customers||0} customers · {summary.enquiries||0} enquiries</div></div>
-        <div className="stat-card stat-amber"><div className="stat-label">Open Orders</div><div className="stat-val" style={{color:'var(--amber)'}}>{summary.open||0}</div><div className="stat-sub">{summary.delayed||0} delayed past due date</div></div>
+        <div className="stat-card stat-amber"><div className="stat-label">Open Orders</div><div className="stat-val" style={{color:'var(--amber)'}}>{openOrders.length}</div><div className="stat-sub">Not closed orders · {summary.delayed||0} delayed</div></div>
         <div className="stat-card" style={{borderLeft:'3px solid var(--teal)'}}><div className="stat-label">In Shipping</div><div className="stat-val" style={{color:'var(--teal)'}}>{shippedOrders.length}</div><div className="stat-sub">Line items with Shipped status</div></div>
         <div className="stat-card stat-green"><div className="stat-label">Delivered</div><div className="stat-val" style={{color:'var(--green)'}}>{summary.delivered||0}</div><div className="stat-sub">{summary.total?Math.round(summary.delivered/summary.total*100):0}% success rate</div></div>
       </div>
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:14,marginBottom:14}}>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
         <div className="card card-sm" style={{marginBottom:0}}><div className="card-title" style={{marginBottom:10}}><span>💼 Portfolio Value</span></div><ValuePills totals={allValues} size={14}/><div style={{fontSize:11,color:'var(--text3)',marginTop:7}}>Across all {orders.length} orders</div></div>
-        <div className="card card-sm" style={{marginBottom:0}}><div className="card-title" style={{marginBottom:10}}><span>🔓 Open Orders Value</span></div><ValuePills totals={openValues} size={14}/><div style={{fontSize:11,color:'var(--text3)',marginTop:7}}>{openOrders.length} active orders</div></div>
         <div className="card card-sm" style={{marginBottom:0}}>
           <div className="card-title" style={{marginBottom:10}}><span>📩 Enquiry Pipeline</span></div>
           <div style={{display:'flex',gap:10}}>
@@ -268,17 +298,33 @@ export default function DashboardPage() {
         </div>
         <div className="card" style={{marginBottom:0}}>
           <div className="card-title">Order Pipeline</div>
-          {pipeline.map(p=>(
-            <div key={p.s} style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
-              <div style={{width:98,flexShrink:0}}><StatusBadge s={p.s}/></div>
-              <div className="progress-bar" style={{flex:1}}><div className="progress-fill" style={{width:`${p.count/maxPipe*100}%`,background:p.s==='delivered'||p.s==='closed'?'var(--green)':p.s==='failed'?'var(--red)':p.s==='hold'?'var(--amber)':'var(--accent)'}}/></div>
-              <div style={{fontSize:12,fontWeight:700,minWidth:20,textAlign:'right'}}>{p.count}</div>
+          <div style={{display:'grid',gridTemplateColumns:'160px 1fr',gap:14,alignItems:'center',marginBottom:10}}>
+            <div style={{display:'flex',justifyContent:'center'}}>
+              <div style={{position:'relative',width:146,height:146,borderRadius:'50%',background:pipelineRing,display:'grid',placeItems:'center'}}>
+                <div style={{width:96,height:96,borderRadius:'50%',background:'var(--surface)',border:'1px solid var(--border)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}}>
+                  <div style={{fontSize:22,fontWeight:800,color:'var(--text)'}}>{totalPipe}</div>
+                  <div style={{fontSize:10,color:'var(--text3)',fontWeight:600,letterSpacing:0.3}}>TOTAL ORDERS</div>
+                </div>
+              </div>
             </div>
-          ))}
+            <div style={{display:'grid',gap:8}}>
+              {pipelineSegments.map(seg => {
+                const pct = totalPipe ? Math.round((seg.count / totalPipe) * 100) : 0;
+                return (
+                  <div key={seg.key} style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{width:10,height:10,borderRadius:'50%',background:seg.color,flexShrink:0}}/>
+                    <span style={{fontSize:12,color:'var(--text2)',flex:1}}>{seg.label}</span>
+                    <span className="mono" style={{fontSize:12,fontWeight:700,minWidth:28,textAlign:'right'}}>{seg.count}</span>
+                    <span style={{fontSize:11,color:'var(--text3)',minWidth:34,textAlign:'right'}}>{pct}%</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
           <hr className="divider"/>
           <div style={{fontSize:12,color:'var(--text2)',fontWeight:600,marginBottom:8}}>Line Item Statuses</div>
           <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-            {[{l:'Negotiating',v:(summary.procurement||0)+'',c:'var(--purple)'},{l:'In Procurement',v:summary.procurement||0,c:'var(--accent)'},{l:'Shipped',v:summary.in_transit||0,c:'var(--teal)'},{l:'Delayed',v:summary.delayed||0,c:'var(--red)'}].map(s=>(
+            {[{l:'Negotiating',v:lineItemStatus.negotiating||0,c:'var(--purple)'},{l:'In Procurement',v:lineItemStatus.procurement||summary.procurement||0,c:'var(--accent)'},{l:'Shipped',v:lineItemStatus.shipped||summary.in_transit||0,c:'var(--teal)'},{l:'Delivered Hub',v:lineItemStatus.delivered_hub||summary.delivery_hub||0,c:'var(--green)'}].map(s=>(
               <div key={s.l} style={{flex:1,background:'var(--surface2)',borderRadius:'var(--r)',padding:'8px 10px',textAlign:'center',minWidth:60}}>
                 <div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.v}</div>
                 <div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>{s.l}</div>
@@ -354,7 +400,7 @@ export default function DashboardPage() {
                         return<tr key={cur}>
                           <td><span className="mono bold">{cur}</span></td>
                           <td className="mono bold" style={{fontSize:13}}>{displayVal(total,cur)}</td>
-                          <td className="mono" style={{color:'var(--amber)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='open')),cur)}</td>
+                          <td className="mono" style={{color:'var(--amber)',fontSize:12}}>{displayVal(val(orders.filter(o=>(o.status||'').toLowerCase()!=='closed')),cur)}</td>
                           <td className="mono" style={{color:'var(--green)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='delivered')),cur)}</td>
                           <td className="mono" style={{color:'var(--teal)',fontSize:12}}>{displayVal(val(orders.filter(o=>o.status==='closed')),cur)}</td>
                           <td className="mono" style={{color:'var(--red)',fontSize:12}}>{displayVal(val(orders.filter(o=>['failed','hold'].includes(o.status))),cur)}</td>

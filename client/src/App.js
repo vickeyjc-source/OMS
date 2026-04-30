@@ -85,7 +85,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <BrowserRouter basename="/app">
         <KeyboardProvider>
           <AppRoutes />
           <Toaster position="bottom-right" toastOptions={{ duration: 3500, style: { fontSize: 13 } }} />

@@ -962,6 +962,7 @@ export default function OrdersPage() {
     let list = [...orders];
     if (filter==='beyond_schedule') list = [...beyondSchedule];
     else if (filter==='due_soon')   list = [...dueSoon];
+    else if (filter==='open')       list = list.filter(o=>(o.status||'').toLowerCase()!=='closed');
     else if (filter!=='all')        list = list.filter(o=>o.status===filter);
     if (search) {
       const q = search.toLowerCase();
