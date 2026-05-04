@@ -413,7 +413,8 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const [plReviewed, setPlReviewed] = useState(false);
   const [invoiceRef, setInvoiceRef] = useState('');
   const [invoiceFile, setInvoiceFile] = useState(null);
-  const [invoiceB64, setInvoiceB64]   = useState('');
+  const [invoiceFileRef, setInvoiceFileRef] = useState('');
+  const [invoiceUploadStatus, setInvoiceUploadStatus] = useState('');
   const [ewayBill, setEwayBill]   = useState('');
   const [shipperId, setShipperId] = useState('');
   const [otherCarrierName, setOtherCarrierName] = useState('');
@@ -460,12 +461,28 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const subtotal       = selectedItems.reduce((s,li)=>s+availableQty(li)*(li.unit_price||0),0);
   const taxTotal       = selectedItems.reduce((s,li)=>s+availableQty(li)*(li.unit_price||0)*((li.tax_rate||0)/100),0);
   const grandTotal     = subtotal+taxTotal;
-  const handleInvoiceFile = (e) => {
+  const handleInvoiceFile = async (e) => {
     const file = e.target.files[0]; if(!file) return;
     setInvoiceFile(file);
-    const reader = new FileReader();
-    reader.onload = (ev) => setInvoiceB64(ev.target.result.split(',')[1]);
-    reader.readAsDataURL(file);
+    setInvoiceFileRef('');
+    setInvoiceUploadStatus('uploading');
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('entity_type', 'order');
+    formData.append('entity_id', order.id);
+    formData.append('field_name', 'invoice_file');
+    try {
+      const res = await api.post('/files', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
+      });
+      setInvoiceFileRef(res.data.id);
+      setInvoiceUploadStatus('uploaded');
+      toast.success('Invoice uploaded');
+    } catch(e) {
+      setInvoiceUploadStatus('error');
+      toast.error('Invoice upload failed: ' + (e.response?.data?.error || e.message));
+    }
   };
   const previewDS = () => {
     if (!invoiceRef.trim()) {
@@ -480,14 +497,14 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
     setPlPreviewed(true);
   };
   const canProceedShipping = awb.trim() && shipperId && (shipperId !== 'others' || otherCarrierName.trim());
-  const canProceedDocuments = dsReviewed && plReviewed && invoiceRef.trim() && (!ewayRequired||ewayBill.trim());
+  const canProceedDocuments = dsReviewed && plReviewed && invoiceRef.trim() && !['uploading','error'].includes(invoiceUploadStatus) && (!ewayRequired||ewayBill.trim());
   const handleDispatch = async () => {
     setSaving(true);
     try {
       await api.post('/orders/'+order.id+'/shipments', {
         type: selectedItems.length===allItems.length?'full':'partial',
         shipper_id:selectedCarrierForSave, tracking_no:awb, invoice_ref:invoiceRef,
-        invoice_file:invoiceB64, eway_bill:ewayBill, delivery_slip:'generated', packing_list:'generated', notes,
+        invoice_file:invoiceFileRef, eway_bill:ewayBill, delivery_slip:'generated', packing_list:'generated', notes,
         items: selectedItems.map(li=>({order_item_id:li.id,qty_shipped:availableQty(li)})),
       });
       toast.success(`✅ Shipment ${shipNo} dispatched!`);
@@ -590,7 +607,10 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Upload Invoice PDF (optional)</label>
                   <input type="file" accept=".pdf,.PDF" className="input" onChange={handleInvoiceFile} style={{padding:'6px'}}/>
-                  {invoiceFile&&<div style={{fontSize:11,color:'var(--green)',marginTop:2}}>✅ {invoiceFile.name}</div>}
+                  {invoiceFile&&<div style={{fontSize:11,color:invoiceUploadStatus==='error'?'var(--red)':invoiceUploadStatus==='uploading'?'var(--accent)':'var(--green)',marginTop:2}}>
+                    {invoiceUploadStatus==='uploading' ? 'Uploading… ' : invoiceUploadStatus==='error' ? 'Upload failed: ' : '✅ Uploaded: '}
+                    {invoiceFile.name}
+                  </div>}
                 </div>
               </div>
             </div>

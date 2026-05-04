@@ -18,6 +18,7 @@ const pool = new Pool({
 const TABLES = [
   'shipment_items',
   'shipments',
+  'app_files',
   'grn_records',
   'stock_inventory',
   'approval_actions',

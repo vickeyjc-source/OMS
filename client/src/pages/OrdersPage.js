@@ -87,6 +87,11 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
     enabled: !!order.enquiry_id,
     staleTime: 30000,
   });
+  const { data: orderFiles=[] } = useQuery({
+    queryKey: ['files', 'order', order.id],
+    queryFn: () => api.get('/files', { params: { entity_type:'order', entity_id:order.id } }).then(r => r.data),
+    staleTime: 30000,
+  });
 
   const [infoForm, setInfoForm] = useState({ enquiry_no:order.enquiry_no||'', quote_no:order.quote_no||'', tentative_date:order.tentative_date||'', po_number:order.po_number||'', notes:order.notes||'', delivery_address:order.delivery_address||'', allow_partial_shipment:order.allow_partial_shipment||0 });
   const [statusVal, setStatusVal] = useState(order.status);
@@ -549,6 +554,25 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
             )}
           </div>
 
+
+          {/* Stored files */}
+          {orderFiles.length > 0 && (
+            <div className="card card-sm">
+              <div className="card-title"><span>📎 Stored Files</span></div>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {orderFiles.map(f => (
+                  <div key={f.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                    <span style={{fontSize:14}}>📄</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{f.original_name}</div>
+                      <div style={{fontSize:10,color:'var(--text3)'}}>{f.field_name || 'file'} · {f.size_bytes ? (Number(f.size_bytes)/1024).toFixed(1)+' KB' : '—'}</div>
+                    </div>
+                    <a className="btn btn-xs" href={f.download_url} target="_blank" rel="noreferrer">Download</a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
                     {/* History */}
           <div className="card card-sm">

@@ -80,6 +80,8 @@ const cors     = require('cors');
 const session  = require('express-session');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
+const multer   = require('multer');
+const { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions } = require('@azure/storage-blob');
 const { v4: uuid } = require('uuid');
 const os   = require('os');
 const { initDb, all, run, get, saveNow, nextId, assembleOrder, assembleEnquiry } = require('./db');
@@ -153,6 +155,53 @@ function adminOnly(req, res, next) {
 const nowStr   = () => new Date().toISOString().slice(0,16).replace('T',' ');
 const todayStr = () => new Date().toISOString().slice(0,10);
 
+const FILE_UPLOAD_LIMIT_MB = Number(process.env.FILE_UPLOAD_LIMIT_MB || 25);
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: FILE_UPLOAD_LIMIT_MB * 1024 * 1024 },
+});
+
+function asyncRoute(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function safeFileName(name) {
+  return path.basename(name || 'file')
+    .replace(/[^\w.\-() ]+/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 180) || 'file';
+}
+
+let azureContainerClient = null;
+let azureSharedKeyCredential = null;
+function getAzureContainerClient() {
+  if (azureContainerClient) return azureContainerClient;
+  const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME || process.env.AZURE_BLOB_CONTAINER || 'oms-files';
+  const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+  if (connectionString) {
+    const service = BlobServiceClient.fromConnectionString(connectionString);
+    azureContainerClient = service.getContainerClient(containerName);
+    return azureContainerClient;
+  }
+  const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
+  const accountKey  = process.env.AZURE_STORAGE_ACCOUNT_KEY;
+  if (!accountName || !accountKey) {
+    throw new Error('Azure Blob Storage is not configured. Set AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME + AZURE_STORAGE_ACCOUNT_KEY.');
+  }
+  azureSharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
+  const service = new BlobServiceClient(`https://${accountName}.blob.core.windows.net`, azureSharedKeyCredential);
+  azureContainerClient = service.getContainerClient(containerName);
+  return azureContainerClient;
+}
+
+function fileDto(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    download_url: `/api/files/${row.id}/download`,
+  };
+}
+
 // Dept permissions
 const DEPT_PERMS = {
   management:  { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
@@ -211,6 +260,111 @@ app.get('/api/auth/me', auth, (req, res) => {
   const u = get('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [req.session.user.id]);
   res.json(u ? { ...u, perms: getPerms(u) } : req.session.user);
 });
+
+// ── FILES / AZURE BLOB STORAGE ─────────────────────────────────────────────
+app.post('/api/files', auth, upload.single('file'), asyncRoute(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'file is required' });
+
+  const entityType = (req.body.entity_type || '').trim();
+  const entityId   = (req.body.entity_id || '').trim();
+  const fieldName  = (req.body.field_name || '').trim();
+  const fileName   = safeFileName(req.file.originalname);
+  const container  = getAzureContainerClient();
+  await container.createIfNotExists();
+
+  const blobName = [
+    entityType || 'general',
+    entityId || 'unassigned',
+    `${Date.now()}-${uuid()}-${fileName}`,
+  ].join('/');
+  const blockBlob = container.getBlockBlobClient(blobName);
+  await blockBlob.uploadData(req.file.buffer, {
+    blobHTTPHeaders: {
+      blobContentType: req.file.mimetype || 'application/octet-stream',
+    },
+    metadata: {
+      originalName: fileName,
+      uploadedBy: req.session.user.id,
+      entityType: entityType || 'general',
+      entityId: entityId || '',
+      fieldName: fieldName || '',
+    },
+  });
+
+  const id = uuid();
+  run(`INSERT INTO app_files(id,original_name,mime_type,size_bytes,storage_provider,
+       container_name,blob_name,entity_type,entity_id,field_name,uploaded_by,uploaded_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [id, fileName, req.file.mimetype || '', req.file.size || 0, 'azure',
+     container.containerName, blobName, entityType, entityId, fieldName,
+     req.session.user.id, nowStr()]);
+  saveNow();
+  res.status(201).json(fileDto(get('SELECT * FROM app_files WHERE id=?', [id])));
+}));
+
+app.get('/api/files', auth, (req, res) => {
+  const { entity_type, entity_id, field_name } = req.query || {};
+  const where = [];
+  const params = [];
+  if (entity_type) { where.push('entity_type=?'); params.push(entity_type); }
+  if (entity_id)   { where.push('entity_id=?');   params.push(entity_id); }
+  if (field_name)  { where.push('field_name=?');  params.push(field_name); }
+  const sql = 'SELECT * FROM app_files' + (where.length ? ' WHERE ' + where.join(' AND ') : '') + ' ORDER BY uploaded_at DESC';
+  res.json(all(sql, params).map(fileDto));
+});
+
+app.get('/api/files/:id', auth, (req, res) => {
+  const f = get('SELECT * FROM app_files WHERE id=?', [req.params.id]);
+  if (!f) return res.status(404).json({ error: 'File not found' });
+  res.json(fileDto(f));
+});
+
+app.get('/api/files/:id/download', auth, asyncRoute(async (req, res) => {
+  const f = get('SELECT * FROM app_files WHERE id=?', [req.params.id]);
+  if (!f) return res.status(404).json({ error: 'File not found' });
+
+  const container = getAzureContainerClient();
+  const blob = container.getBlockBlobClient(f.blob_name);
+  const exists = await blob.exists();
+  if (!exists) return res.status(404).json({ error: 'Stored blob not found' });
+
+  res.setHeader('Content-Type', f.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFileName(f.original_name)}"`);
+  const download = await blob.download();
+  download.readableStreamBody.pipe(res);
+}));
+
+app.get('/api/files/:id/sas', auth, asyncRoute(async (req, res) => {
+  const f = get('SELECT * FROM app_files WHERE id=?', [req.params.id]);
+  if (!f) return res.status(404).json({ error: 'File not found' });
+  if (!azureSharedKeyCredential) getAzureContainerClient();
+  if (!azureSharedKeyCredential) {
+    return res.status(400).json({ error: 'SAS URLs require AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY. Use /download when configured by connection string.' });
+  }
+  const expiresOn = new Date(Date.now() + 10 * 60 * 1000);
+  const sas = generateBlobSASQueryParameters({
+    containerName: f.container_name,
+    blobName: f.blob_name,
+    permissions: BlobSASPermissions.parse('r'),
+    expiresOn,
+  }, azureSharedKeyCredential).toString();
+  const container = getAzureContainerClient();
+  const blob = container.getBlockBlobClient(f.blob_name);
+  res.json({ url: `${blob.url}?${sas}`, expires_on: expiresOn.toISOString() });
+}));
+
+app.delete('/api/files/:id', auth, asyncRoute(async (req, res) => {
+  const f = get('SELECT * FROM app_files WHERE id=?', [req.params.id]);
+  if (!f) return res.status(404).json({ error: 'File not found' });
+  const canDelete = f.uploaded_by === req.session.user.id || ['admin','manager'].includes(req.session.user.role);
+  if (!canDelete) return res.status(403).json({ error: 'Only uploader or manager can delete this file' });
+
+  const container = getAzureContainerClient();
+  await container.getBlockBlobClient(f.blob_name).deleteIfExists();
+  run('DELETE FROM app_files WHERE id=?', [req.params.id]);
+  saveNow();
+  res.json({ ok: true });
+}));
 
 // ── USERS ────────────────────────────────────────────────────
 app.get('/api/users', auth, (req, res) => {

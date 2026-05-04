@@ -196,6 +196,20 @@ async function createSchema() {
     CREATE TABLE IF NOT EXISTS app_settings (
       key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS app_files (
+      id TEXT PRIMARY KEY,
+      original_name TEXT NOT NULL,
+      mime_type TEXT DEFAULT '',
+      size_bytes BIGINT DEFAULT 0,
+      storage_provider TEXT NOT NULL DEFAULT 'azure',
+      container_name TEXT NOT NULL,
+      blob_name TEXT NOT NULL,
+      entity_type TEXT DEFAULT '',
+      entity_id TEXT DEFAULT '',
+      field_name TEXT DEFAULT '',
+      uploaded_by TEXT DEFAULT '',
+      uploaded_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS finance_queue (
       id TEXT PRIMARY KEY, supplier_order_id TEXT NOT NULL, order_id TEXT NOT NULL,
       supplier_id TEXT NOT NULL, amount NUMERIC, currency TEXT DEFAULT 'INR',

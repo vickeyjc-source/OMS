@@ -19,7 +19,7 @@ const PAYMENT_TERMS_GROUPS = [
 ];
 const ALL_PAYMENT_TERMS = PAYMENT_TERMS_GROUPS.flatMap(g=>g.terms);
 // ── PO Upload Widget ──────────────────────────────────────────────────────────
-function POUpload({ files, onChange }) {
+function POUpload({ files, onChange, orderId }) {
   const [dragging, setDragging] = useState(false);
   const [progress, setProgress] = useState({}); // filename → 0-100
   const inputRef = useRef();
@@ -27,17 +27,48 @@ function POUpload({ files, onChange }) {
   const processFiles = (incoming) => {
     const newFiles = Array.from(incoming).filter(f => !files.find(x => x.name === f.name));
     if (!newFiles.length) return;
-    // Simulate upload progress per file
+    const pendingFiles = newFiles.map(f => ({
+      tempId: `${f.name}-${f.size}-${Date.now()}-${Math.random()}`,
+      name: f.name,
+      size: f.size,
+      file: f,
+      status: 'uploading',
+    }));
+    onChange(prev => [...prev, ...pendingFiles]);
+
     newFiles.forEach(f => {
       setProgress(p => ({ ...p, [f.name]: 0 }));
-      let pct = 0;
+      let pct = 5;
       const iv = setInterval(() => {
-        pct += Math.floor(Math.random() * 25) + 10;
-        if (pct >= 100) { pct = 100; clearInterval(iv); }
+        pct = Math.min(90, pct + Math.floor(Math.random() * 18) + 7);
         setProgress(p => ({ ...p, [f.name]: pct }));
-      }, 150);
+      }, 180);
+
+      const pending = pendingFiles.find(x => x.file === f);
+      const formData = new FormData();
+      formData.append('file', f);
+      formData.append('entity_type', 'order');
+      formData.append('entity_id', orderId || 'unassigned');
+      formData.append('field_name', 'po_file');
+
+      api.post('/files', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
+      }).then(r => {
+        clearInterval(iv);
+        setProgress(p => ({ ...p, [f.name]: 100 }));
+        onChange(prev => prev.map(x => x.tempId === pending.tempId
+          ? { ...x, ...r.data, id: r.data.id, ref: r.data.id, status: 'uploaded', file: null }
+          : x));
+      }).catch(e => {
+        clearInterval(iv);
+        setProgress(p => ({ ...p, [f.name]: 0 }));
+        onChange(prev => prev.map(x => x.tempId === pending.tempId
+          ? { ...x, status: 'error', error: e.response?.data?.error || e.message }
+          : x));
+        toast.error('Upload failed: ' + f.name);
+      });
     });
-    onChange([...files, ...newFiles.map(f => ({ name: f.name, size: f.size, file: f, ref: f.name }))]);
   };
 
   const onDrop = useCallback(e => {
@@ -45,7 +76,7 @@ function POUpload({ files, onChange }) {
     processFiles(e.dataTransfer.files);
   }, [files]);
 
-  const remove = name => onChange(files.filter(f => f.name !== name));
+  const remove = file => onChange(files.filter(f => (f.id || f.tempId || f.name) !== (file.id || file.tempId || file.name)));
 
   return (
     <div>
@@ -76,23 +107,30 @@ function POUpload({ files, onChange }) {
       {files.length > 0 && (
         <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
           {files.map(f => (
-            <div key={f.name} style={{ background: 'var(--surface2)', borderRadius: 'var(--r-sm)', padding: '8px 12px', border: '1px solid var(--border)' }}>
+            <div key={f.id || f.tempId || f.name} style={{ background: 'var(--surface2)', borderRadius: 'var(--r-sm)', padding: '8px 12px', border: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: progress[f.name] < 100 ? 6 : 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ fontSize: 16 }}>📄</span>
                   <div>
                     <div style={{ fontSize: 12, fontWeight: 600 }}>{f.name}</div>
-                    <div style={{ fontSize: 10, color: 'var(--text3)' }}>{f.size ? (f.size / 1024).toFixed(1) + ' KB' : ''}</div>
+                    <div style={{ fontSize: 10, color: f.status === 'error' ? 'var(--red)' : 'var(--text3)' }}>
+                      {f.status === 'error' ? f.error : f.size ? (f.size / 1024).toFixed(1) + ' KB' : ''}
+                    </div>
                   </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {(progress[f.name] ?? 100) >= 100
+                  {f.status === 'error'
+                    ? <span style={{ fontSize: 11, color: 'var(--red)', fontWeight: 600 }}>Failed</span>
+                    : (progress[f.name] ?? 100) >= 100 && f.status === 'uploaded'
                     ? <span style={{ fontSize: 11, color: 'var(--green)', fontWeight: 600 }}>✓ Ready</span>
                     : <span style={{ fontSize: 11, color: 'var(--accent)' }}>{progress[f.name]}%</span>}
-                  <button onClick={() => remove(f.name)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 16, lineHeight: 1 }}>×</button>
+                  {f.download_url && (
+                    <a href={f.download_url} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>Download</a>
+                  )}
+                  <button onClick={() => remove(f)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 16, lineHeight: 1 }}>×</button>
                 </div>
               </div>
-              {(progress[f.name] ?? 100) < 100 && (
+              {f.status === 'uploading' && (
                 <div style={{ height: 4, borderRadius: 2, background: 'var(--border)', overflow: 'hidden' }}>
                   <div style={{ height: '100%', width: progress[f.name] + '%', background: 'var(--accent)', transition: 'width .15s', borderRadius: 2 }} />
                 </div>
@@ -482,7 +520,7 @@ export default function NewOrderPage() {
       ...form,
       id: orderId,
       status,
-      po_file_ref: poFiles.map(f=>f.name).join(', '),
+      po_file_ref: poFiles.filter(f=>f.status === 'uploaded').map(f=>f.id).join(','),
       lineItems: valid.map((i,idx) => ({ ...i, qty:Number(i.qty)||0, unit_price:Number(i.unit_price)||Number(i.quoted_price)||0, quoted_price:Number(i.quoted_price)||0, target_price:Number(i.target_price)||0, tax_rate:Number(i.tax_rate)||0, sort_order:idx+1 })),
       notes: form.notes,
       // FIX 1: save customer payment terms so Finance page can detect advance orders
@@ -495,6 +533,8 @@ export default function NewOrderPage() {
     // CHANGE 2: customer_ref is no longer mandatory — removed validation
     if (!isDraft && !form.po_number) { toast.error('PO Number is mandatory'); return false; }
     if (!isDraft && poFiles.length === 0) { toast.error('Please upload at least one PO file'); return false; }
+    if (poFiles.some(f => f.status === 'uploading')) { toast.error('Please wait for file upload to finish'); return false; }
+    if (poFiles.some(f => f.status === 'error')) { toast.error('Remove failed uploads and try again'); return false; }
     if (!isDraft && !form.tentative_date) { toast.error('Expected delivery date is required'); return false; }
     const valid = items.filter(i => i.component.trim());
     if (!valid.length) { toast.error('Add at least one line item'); return false; }
@@ -773,7 +813,7 @@ export default function NewOrderPage() {
           <span style={{ fontSize:11, fontWeight:400, color:'var(--text3)', marginLeft:8 }}>Mandatory — upload before creating the order</span>
         </div>
         <div style={{ marginBottom:16 }}>
-          <POUpload files={poFiles} onChange={setPoFiles} />
+          <POUpload files={poFiles} onChange={setPoFiles} orderId={orderId} />
         </div>
 
         {/* ── Line Items — read-only from enquiry/quote ── */}

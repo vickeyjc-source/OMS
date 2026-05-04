@@ -13,6 +13,7 @@
     "stop": "lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null; lsof -ti:3000 2>/dev/null | xargs kill -9 2>/dev/null; echo '■ Stopped all servers'"
   },
   "dependencies": {
+    "@azure/storage-blob": "^12.26.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "deasync": "^0.1.29",
