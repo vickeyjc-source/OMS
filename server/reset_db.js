@@ -39,7 +39,6 @@ const TABLES = [
   'enquiry_sourcing',
   'enquiry_items',
   'enquiries',
-  'po_requests',
   'supplier_linecards',
   'linecards',
   'shippers',

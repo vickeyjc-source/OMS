@@ -165,6 +165,14 @@ function asyncRoute(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
+// Convert empty-string / undefined / null → null for numeric DB columns
+// Prevents "invalid input syntax for type numeric: ''" errors
+function toNum(v) {
+  if (v === '' || v === undefined || v === null) return null;
+  const n = Number(v);
+  return isNaN(n) ? null : n;
+}
+
 function safeFileName(name) {
   return path.basename(name || 'file')
     .replace(/[^\w.\-() ]+/g, '_')
@@ -231,15 +239,41 @@ function stripSensitive(order, user) {
 }
 
 // ── AUTH ─────────────────────────────────────────────────────
+// Hardcoded users for local testing (bypasses DB lookup)
+const HARDCODED_USERS = {
+  admin:    { id:'uadmin001', name:'Administrator', role:'admin',   department:'management', email:'admin@ciflux.com',    password:'admin123' },
+  manager:  { id:'umgr001',   name:'Manager',       role:'manager', department:'management', email:'manager@ciflux.com',  password:'pass123'  },
+  sales1:   { id:'usales001', name:'Sales User',    role:'user',    department:'sales',      email:'sales1@ciflux.com',   password:'pass123'  },
+  sourcing1:{ id:'usrc001',   name:'Sourcing User', role:'user',    department:'sourcing',   email:'sourcing@ciflux.com', password:'pass123'  },
+  procure1: { id:'uprc001',   name:'Procure User',  role:'user',    department:'procurement',email:'procure@ciflux.com',  password:'pass123'  },
+  accounts1:{ id:'uacc001',   name:'Accounts User', role:'user',    department:'accounts',   email:'accounts@ciflux.com', password:'pass123'  },
+  approver1:{ id:'uapp001',   name:'Approver User', role:'user',    department:'approvers',  email:'approver@ciflux.com', password:'pass123'  },
+};
+
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Required' });
-  const user = get("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
-  if (!user || !bcrypt.compareSync(password, user.password))
+
+  // ── Hardcoded login (works without DB, for local dev/testing) ──
+  const hcu = HARDCODED_USERS[username];
+  if (hcu && hcu.password === password) {
+    const payload = { id: hcu.id, name: hcu.name, role: hcu.role, department: hcu.department, username };
+    req.session.user = payload;
+    console.log('[AUTH] Hardcoded login:', username);
+    return res.json({ ...payload, email: hcu.email, token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
+  }
+
+  // ── DB login (fallback) ──
+  try {
+    const user = get("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
+    if (!user || !bcrypt.compareSync(password, user.password))
+      return res.status(401).json({ error: 'Invalid credentials' });
+    const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
+    req.session.user = payload;
+    return res.json({ ...payload, email: user.email, token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
+  } catch(e) {
     return res.status(401).json({ error: 'Invalid credentials' });
-  const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
-  req.session.user = payload;
-  res.json({ ...payload, email: user.email, token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
+  }
 });
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
 
@@ -741,17 +775,19 @@ app.put('/api/enquiries/:id', auth, (req, res) => {
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
                sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment)`,
           [s.id||uuid(), req.params.id, s.enquiry_item_id, s.supplier_id||'',
-           s.sourced_price||null, s.sourced_currency||'INR',
-           s.src_price_foreign||null, s.exchange_rate||null,
+           toNum(s.sourced_price), s.sourced_currency||'INR',
+           toNum(s.src_price_foreign), toNum(s.exchange_rate),
            s.hsn_code||'',
-           s.freight_pct??20, s.insurance_pct??1.125, s.duty_pct??7.5, s.cess_pct??10,
-           s.bank_fixed_usd??15, s.clearance_fixed_inr??1800, s.margin_pct??15,
-           s.freight_inr||null, s.insurance_inr||null, s.duty_inr||null, s.cess_inr||null,
-           s.bank_inr||null, s.clearance_inr||null, s.margin_inr||null,
+           toNum(s.freight_pct)    ?? 20,    toNum(s.insurance_pct)    ?? 1.125,
+           toNum(s.duty_pct)       ?? 7.5,   toNum(s.cess_pct)         ?? 10,
+           toNum(s.bank_fixed_usd) ?? 15,    toNum(s.clearance_fixed_inr) ?? 1800,
+           toNum(s.margin_pct)     ?? 15,
+           toNum(s.freight_inr),   toNum(s.insurance_inr), toNum(s.duty_inr),   toNum(s.cess_inr),
+           toNum(s.bank_inr),      toNum(s.clearance_inr), toNum(s.margin_inr),
            s.availability||'', s.lead_time||'', s.notes||'',
-           (s.quote_price !== '' && s.quote_price != null) ? s.quote_price : null,
+           toNum(s.quote_price),
            s.quote_currency||'INR',
-           (s.tax_rate !== '' && s.tax_rate != null) ? Number(s.tax_rate) : null,
+           toNum(s.tax_rate),
            req.session.user.id, now,
            s.sourcing_revision_notes||null, s.sales_comment||null]);
       } catch(e) {

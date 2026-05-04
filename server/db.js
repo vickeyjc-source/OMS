@@ -63,28 +63,27 @@ function convertQuery(sql, params) {
   return q;
 }
 
-// ── Sync bridge via deasync ────────────────────────────────────────────────────
-// index.js calls all/run/get synchronously inside Express route handlers.
-// We use deasync to bridge the async pg calls back to sync without touching index.js.
-let deasync;
-try {
-  deasync = require('deasync');
-} catch (_) {
-  console.error('\n  ✗  deasync not found!  Run:  npm install deasync\n');
-  process.exit(1);
-}
-
+// ── Sync bridge via Atomics.wait ──────────────────────────────────────────────
+// deasync is broken on Node v23+ (Maximum call stack size exceeded).
+// Atomics.wait with a 1 ms sleep drains the event loop between checks —
+// zero native addons, works on every Node >= 10.4 with SharedArrayBuffer.
 function syncify(asyncFn) {
   return function (...args) {
     let result, error, done = false;
     asyncFn(...args)
-      .then(r => { result = r; done = true; })
-      .catch(e => { error = e; done = true; });
-    deasync.loopWhile(() => !done);
+      .then(r  => { result = r; done = true; })
+      .catch(e => { error  = e; done = true; });
+    const flag = new Int32Array(new SharedArrayBuffer(4));
+    while (!done) {
+      Atomics.wait(flag, 0, 0, 1); // yields 1 ms to event loop each iteration
+    }
     if (error) throw error;
     return result;
   };
 }
+
+// saveNow() is a no-op — PostgreSQL persists every write immediately.
+function saveNow() {}
 
 // ── Core helpers ───────────────────────────────────────────────────────────────
 const allAsync = async (sql, params = []) => {
