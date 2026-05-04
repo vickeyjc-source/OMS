@@ -86,7 +86,12 @@ const { initDb, all, run, get, saveNow, nextId, assembleOrder, assembleEnquiry }
 
 const app    = express();
 const PORT   = Number(process.env.BACKEND_PORT || process.env.PORT || 8080);
-const SECRET = 'ciflux-jwt-2024';
+const SECRET = process.env.JWT_SECRET;
+
+if (!SECRET) {
+  console.error('Missing required environment variable: JWT_SECRET');
+  process.exit(1);
+}
 
 app.use(cors({ origin: true, credentials: true }));
 
@@ -102,8 +107,13 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: '10mb' }));
+const SESSION_SECRET = process.env.SESSION_SECRET;
+if (!SESSION_SECRET) {
+  console.error('Missing required environment variable: SESSION_SECRET');
+  process.exit(1);
+}
 app.use(session({
-  secret: 'ciflux-session-2024',
+  secret: SESSION_SECRET,
   resave: false, saveUninitialized: false, rolling: true,
   cookie: { maxAge: 8*60*60*1000, httpOnly: true, sameSite: 'lax', secure: false }
 }));

@@ -8,12 +8,17 @@ const { v4: uuid } = require('uuid');
 
 // ── Connection pool ────────────────────────────────────────────────────────────
 // Configure via environment variables or a .env file (see .env.example).
+
+if (!process.env.PG_PASSWORD) {
+  console.error('Missing required environment variable: PG_PASSWORD');
+  process.exit(1);
+}
 const pool = new Pool({
   host:     process.env.PG_HOST     || 'localhost',
   port:     parseInt(process.env.PG_PORT || '5432'),
   database: process.env.PG_DB       || 'ciflux_oms',
   user:     process.env.PG_USER     || 'ciflux',
-  password: process.env.PG_PASSWORD || 'ciflux_pass',
+  password: process.env.PG_PASSWORD,
   ssl:      (process.env.PG_HOST || '').includes('azure') ? { rejectUnauthorized: false } : false
 });
 
