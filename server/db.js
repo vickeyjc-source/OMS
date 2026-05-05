@@ -113,37 +113,44 @@ function nextId(table, prefix, pad) {
   return `${prefix}${String(nums.length ? Math.max(...nums) + 1 : 1).padStart(pad,'0')}`;
 }
 
+async function nextIdAsync(table, prefix, pad) {
+  pad = pad || 3;
+  const rows = await allAsync(`SELECT id FROM ${table}`);
+  const nums = rows.map(r => parseInt((r.id.match(/\d+$/) || ['0'])[0])).filter(n => !isNaN(n));
+  return `${prefix}${String(nums.length ? Math.max(...nums) + 1 : 1).padStart(pad,'0')}`;
+}
+
 // ── assembleOrder / assembleEnquiry ───────────────────────────────────────────
-function assembleOrder(order) {
+async function assembleOrder(order) {
   const o = { ...order };
-  o.lineItems = all('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order', [o.id]);
-  const sos     = all('SELECT * FROM supplier_orders WHERE order_id=?', [o.id]);
+  o.lineItems = await allAsync('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order', [o.id]);
+  const sos     = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [o.id]);
   const soIds   = sos.map(s => s.id);
   const soItems = soIds.length
-    ? all('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
+    ? await allAsync('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
     : [];
   o.supplierOrders = sos.map(so => ({
     ...so,
     items: soItems.filter(i => i.supplier_order_id === so.id).map(i => i.item_id)
   }));
-  o.customerShipping = get('SELECT * FROM customer_shipping WHERE order_id=?', [o.id])
+  o.customerShipping = (await getAsync('SELECT * FROM customer_shipping WHERE order_id=?', [o.id]))
     || { status:'pending', shipper_id:'', tracking_no:'', delivery_date:'', comments:'' };
-  o.documents = get('SELECT * FROM order_documents WHERE order_id=?', [o.id])
+  o.documents = (await getAsync('SELECT * FROM order_documents WHERE order_id=?', [o.id]))
     || { delivery_slip:'', packing_list:'', invoice:'', eway_bill:'', po_file:'', comments:'' };
-  o.history = all('SELECT * FROM order_history WHERE order_id=? ORDER BY ts DESC', [o.id]);
-  const shipRows = all('SELECT * FROM shipments WHERE order_id=? ORDER BY shipment_no', [o.id]);
+  o.history = await allAsync('SELECT * FROM order_history WHERE order_id=? ORDER BY ts DESC', [o.id]);
+  const shipRows = await allAsync('SELECT * FROM shipments WHERE order_id=? ORDER BY shipment_no', [o.id]);
   const shipIds  = shipRows.map(s=>s.id);
-  const shipItemRows = shipIds.length ? all('SELECT * FROM shipment_items WHERE shipment_id IN ('+shipIds.map(()=>'?').join(',')+')', shipIds) : [];
+  const shipItemRows = shipIds.length ? await allAsync('SELECT * FROM shipment_items WHERE shipment_id IN ('+shipIds.map(()=>'?').join(',')+')', shipIds) : [];
   o.shipments  = shipRows.map(s=>({...s, items: shipItemRows.filter(i=>i.shipment_id===s.id)}));
-  o.grnRecords = all('SELECT * FROM grn_records WHERE order_id=? ORDER BY recorded_at', [o.id]);
+  o.grnRecords = await allAsync('SELECT * FROM grn_records WHERE order_id=? ORDER BY recorded_at', [o.id]);
   return o;
 }
 
-function assembleEnquiry(enq) {
+async function assembleEnquiry(enq) {
   const e = { ...enq };
-  e.items   = all('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [e.id]);
-  e.sourcing= all('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [e.id]);
-  e.history = all('SELECT * FROM enquiry_history WHERE enquiry_id=? ORDER BY ts DESC', [e.id]);
+  e.items   = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [e.id]);
+  e.sourcing= await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [e.id]);
+  e.history = await allAsync('SELECT * FROM enquiry_history WHERE enquiry_id=? ORDER BY ts DESC', [e.id]);
   if (e.charges && typeof e.charges === 'string') {
     try { e.charges = JSON.parse(e.charges); } catch(_) { e.charges = null; }
   }
@@ -249,6 +256,22 @@ async function createSchema() {
       recorded_by TEXT DEFAULT '',
       recorded_at TEXT NOT NULL,
       notes TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS po_requests (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      supplier_order_id TEXT DEFAULT '',
+      supplier_id TEXT NOT NULL,
+      supplier_name TEXT DEFAULT '',
+      order_ref TEXT DEFAULT '',
+      status TEXT DEFAULT 'pending',
+      requested_by TEXT DEFAULT '',
+      requested_at TEXT NOT NULL,
+      notes TEXT DEFAULT '',
+      fulfilled_by TEXT DEFAULT '',
+      fulfilled_at TEXT DEFAULT '',
+      supplier_ref TEXT DEFAULT '',
+      zoho_po_number TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS enquiries (
       id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, created_by TEXT NOT NULL,
@@ -708,26 +731,6 @@ async function initDb() {
     [id, name, username, email, hashedPassword, department, role, status, created]
   );
 
-  const userCount = await pool.query('SELECT COUNT(*) as n FROM users');
-  if (parseInt(userCount.rows[0].n) === 0) {
-    console.log('[DB] Seeding default users...');
-    const users = [
-      ['umgr001',   'Manager',       'manager',   'manager@ciflux.com',  'pass123',   'management', 'manager', 'active', today],
-      ['usales001', 'Sales User',    'sales1',    'sales1@ciflux.com',   'pass123',   'sales',      'user',    'active', today],
-      ['usrc001',   'Sourcing User', 'sourcing1', 'sourcing@ciflux.com', 'pass123',   'sourcing',   'user',    'active', today],
-      ['uprc001',   'Procure User',  'procure1',  'procure@ciflux.com',  'pass123',   'procurement','user',    'active', today],
-      ['uacc001',   'Accounts User', 'accounts1', 'accounts@ciflux.com', 'pass123',   'accounts',   'user',    'active', today],
-      ['uapp001',   'Approver User', 'approver1', 'approver@ciflux.com', 'pass123',   'approvers',  'user',    'active', today],
-    ];
-    for (const [id, name, username, email, password, department, role, status, created] of users) {
-      const hashed = bcrypt.hashSync(password, 10);
-      await pool.query(
-        'INSERT INTO users(id,name,username,email,password,department,role,status,created) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(username) DO NOTHING',
-        [id, name, username, email, hashed, department, role, status, created]
-      );
-    }
-    console.log('[DB] Default users seeded');
-  }
 
   const sections = [
     'dashboard','enquiries','new-enquiry','quotes','orders','new-order',
@@ -763,4 +766,4 @@ async function initDb() {
   return pool;
 }
 
-module.exports = { initDb, all, run, get, allAsync, runAsync, getAsync, saveNow, nextId, assembleOrder, assembleEnquiry };
+module.exports = { initDb, all, run, get, allAsync, runAsync, getAsync, saveNow, nextId, nextIdAsync, assembleOrder, assembleEnquiry };

@@ -60,12 +60,17 @@ psql postgres -c "CREATE DATABASE ciflux_oms OWNER ciflux;"
 psql postgres -c "GRANT ALL PRIVILEGES ON DATABASE ciflux_oms TO ciflux;"
 
 # 3. Create .env file in project root
-echo "PORT=8080
+echo "PORT=8081
 PG_HOST=localhost
 PG_PORT=5432
 PG_DB=ciflux_oms
 PG_USER=ciflux
-PG_PASSWORD=ciflux_pass" > .env
+PG_PASSWORD=ciflux_pass
+JWT_SECRET=replace_with_a_long_random_secret
+SESSION_SECRET=replace_with_another_long_random_secret
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=...
+AZURE_STORAGE_CONTAINER_NAME=oms-files
+FILE_UPLOAD_LIMIT_MB=25" > .env
 
 # 4. Install dependencies
 npm install && cd client && npm install && cd ..
@@ -77,7 +82,7 @@ cd client && npm run build && cd ..
 npm run dev
 ```
 
-Open → **http://localhost:8080**
+Open → **http://localhost:3000/app**
 
 ---
 
@@ -100,7 +105,14 @@ PG_PORT=5432
 PG_DB=ciflux_oms
 PG_USER=ciflux
 PG_PASSWORD=ciflux_pass
+JWT_SECRET=replace_with_a_long_random_secret
+SESSION_SECRET=replace_with_another_long_random_secret
+AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=...
+AZURE_STORAGE_CONTAINER_NAME=oms-files
+FILE_UPLOAD_LIMIT_MB=25
 ```
+
+For Azure Blob Storage you can use `AZURE_STORAGE_CONNECTION_STRING`, or use `AZURE_STORAGE_ACCOUNT_NAME` plus `AZURE_STORAGE_ACCOUNT_KEY` instead. Keep the container private; downloads go through the authenticated backend endpoint `/api/files/:id/download`.
 
 Then:
 ```bat

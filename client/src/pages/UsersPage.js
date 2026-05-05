@@ -390,25 +390,6 @@ export default function UsersPage() {
         </table>
       </div>
 
-      <div className="card" style={{maxWidth:700}}>
-        <div className="card-title">Department Permissions</div>
-        <table>
-          <thead><tr><th>Department</th><th>See All Orders</th><th>Procurement Prices</th><th>Customer Details</th><th>Can Approve</th></tr></thead>
-          <tbody>
-            {[
-              ['management','✅','✅','✅','✅'],
-              ['sales','Own only','❌','✅','❌'],
-              ['sourcing','Assigned','✅','❌','❌'],
-              ['procurement','Assigned','✅','❌','❌'],
-              ['accounts','✅','✅','✅','❌'],
-              ['logistics','Assigned','❌','❌','❌'],
-              ['approvers','✅','✅','✅','✅'],
-            ].map(([dept,...perms])=>(
-              <tr key={dept}><td><DeptBadge dept={dept} /></td>{perms.map((p,i)=><td key={i}>{p}</td>)}</tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
       <SectionPermissions />
       {modal!==null&&<UserModal u={Object.keys(modal).length?modal:null} onClose={()=>setModal(null)} />}
       {me.role==='admin'&&<DangerZone />}
