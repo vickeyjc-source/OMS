@@ -335,13 +335,17 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             toast.error('Failed to update revision quote: ' + (e.response?.data?.error || e.message));
           }
         } else {
-          // Standard workflow: create a new Quote record
-          // FIX: replaced timestamp suffix (collision-prone) with sequential counter per enquiry
-          // quotes prop is in scope — count existing quotes for this enquiry to get next seq
-          const existingForEnq = (quotes||[]).filter(q => q.enquiry_id === enq.id);
-          const nextSeq = existingForEnq.length + 1;
-          const enqNum  = enq.id.replace(/[^0-9]/g, '').padStart(3, '0');
-          const quoteNo = 'QT-' + enqNum + '-' + String(nextSeq).padStart(3, '0');
+          // Standard workflow: create a new Quote record with FY-based sequential number
+          let quoteNo = '';
+          try {
+            const nextRes = await api.get('/next-quote-no');
+            quoteNo = nextRes.data.quote_no;
+          } catch(_) {
+            const y = new Date().getFullYear(); const m = new Date().getMonth() + 1;
+            const s = m >= 4 ? y : y - 1;
+            const fy = String(s).slice(2) + String(s+1).slice(2);
+            quoteNo = `QT-${fy}-${String((quotes||[]).length + 1).padStart(4,'0')}`;
+          }
           try {
             await api.post('/quotes', {
               enquiry_id:       enq.id,

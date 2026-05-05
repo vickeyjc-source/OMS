@@ -305,9 +305,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                           _comment: '',
                         });
                       } catch(_) {}
-                      window.location.href = '/finance';
                     }}>
-                    {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Go to Finance →'}
+                    {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Send to Finance'}
                   </button>
                 </div>
               )}

@@ -815,7 +815,7 @@ app.get('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
 app.post('/api/enquiries', auth, asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.customer_id) return res.status(400).json({ error: 'Customer required' });
-  const id  = await nextIdAsync('enquiries','ENQ-');
+  const id  = await nextEnqNoAsync();
   const now = nowStr();
   const initStatus = ['sourcing','draft'].includes(d.status) ? d.status : 'new';
   const initSourNo = initStatus === 'sourcing' ? await nextSourNoAsync() : '';
@@ -861,6 +861,25 @@ function parsePaymentTerms(termsText) {
   return { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 };
 }
 
+// Financial year string: Apr–Mar cycle → e.g. May 2025 → "2526", Feb 2025 → "2425"
+function financialYear() {
+  const now = new Date();
+  const m = now.getMonth() + 1; // 1-indexed
+  const y = now.getFullYear();
+  const start = m >= 4 ? y : y - 1;
+  return String(start).slice(2) + String(start + 1).slice(2);
+}
+
+// Generate next ENQ number: ENQ-2425-0001
+async function nextEnqNoAsync() {
+  const fy = financialYear();
+  const prefix = `ENQ-${fy}-`;
+  const rows = await allAsync("SELECT id FROM enquiries WHERE id LIKE ?", [prefix + '%']);
+  const nums = rows.map(r => parseInt((r.id||'').slice(prefix.length))).filter(n => !isNaN(n) && n > 0);
+  const next = nums.length ? Math.max(...nums) + 1 : 1;
+  return prefix + String(next).padStart(4, '0');
+}
+
 // Generate next internal PO number CFPO0001+
 async function nextPoNoAsync() {
   const rows = await allAsync("SELECT internal_po_no FROM supplier_orders WHERE internal_po_no IS NOT NULL AND internal_po_no != ''");
@@ -869,12 +888,14 @@ async function nextPoNoAsync() {
   return 'CFPO' + String(next).padStart(4,'0');
 }
 
-// Generate next SOUR number when enquiry moves to sourcing
+// Generate next SRC number: SRC-2425-0001
 async function nextSourNoAsync() {
-  const rows = await allAsync("SELECT sourcing_no FROM enquiries WHERE sourcing_no != '' AND sourcing_no IS NOT NULL");
-  const nums = rows.map(r => parseInt((r.sourcing_no||'').replace(/[^0-9]/g,''))).filter(n=>!isNaN(n)&&n>0);
-  const next  = nums.length ? Math.max(...nums) + 1 : 1;
-  return 'SOUR' + String(next).padStart(3,'0');
+  const fy = financialYear();
+  const prefix = `SRC-${fy}-`;
+  const rows = await allAsync("SELECT sourcing_no FROM enquiries WHERE sourcing_no LIKE ?", [prefix + '%']);
+  const nums = rows.map(r => parseInt((r.sourcing_no||'').slice(prefix.length))).filter(n => !isNaN(n) && n > 0);
+  const next = nums.length ? Math.max(...nums) + 1 : 1;
+  return prefix + String(next).padStart(4, '0');
 }
 
 app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
@@ -970,6 +991,15 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
 }));
 
 // ── QUOTES ───────────────────────────────────────────────────
+// Returns next QT number: QT-2425-0001
+app.get('/api/next-quote-no', auth, asyncRoute(async (req, res) => {
+  const fy = financialYear();
+  const prefix = `QT-${fy}-`;
+  const rows = await allAsync("SELECT quote_no FROM quotes WHERE quote_no LIKE ?", [prefix + '%']);
+  const nums = rows.map(r => parseInt((r.quote_no||'').slice(prefix.length))).filter(n => !isNaN(n) && n > 0);
+  const next = nums.length ? Math.max(...nums) + 1 : 1;
+  res.json({ quote_no: prefix + String(next).padStart(4, '0') });
+}));
 app.get('/api/quotes', auth, asyncRoute(async (req, res) => res.json(await allAsync('SELECT * FROM quotes ORDER BY created_at DESC'))));
 app.post('/api/quotes', auth, asyncRoute(async (req, res) => {
   const d = req.body;
