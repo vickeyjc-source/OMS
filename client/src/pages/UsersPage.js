@@ -6,6 +6,7 @@ import api from '../utils/api';
 import { initials, DEPARTMENTS, DEPT_LABEL, DEPT_COLOR, DeptBadge } from '../utils/helpers';
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import { SECTION_DEFINITIONS } from '../utils/sections';
 
 function UserModal({ u, onClose }) {
   const qc = useQueryClient();
@@ -259,6 +260,96 @@ function DangerZone() {
   );
 }
 
+const ROLES = [
+  { value: 'user', label: 'User' },
+  { value: 'manager', label: 'Manager' },
+  { value: 'admin', label: 'Admin' },
+];
+
+function SectionPermissions() {
+  const qc = useQueryClient();
+  const [role, setRole] = useState('user');
+  const [department, setDepartment] = useState('sales');
+  const { data } = useQuery({
+    queryKey: ['section-permissions', role, department],
+    queryFn: () => api.get('/section-permissions', { params: { role, department } }).then(r => r.data),
+  });
+  const serverByKey = Object.fromEntries((data?.sections || []).map(s => [s.key, s]));
+  const sections = SECTION_DEFINITIONS.map(s => ({ ...s, enabled: Boolean(serverByKey[s.key]?.enabled) }));
+  const grouped = sections.reduce((acc, section) => {
+    const group = section.group || 'Sections';
+    acc[group] = acc[group] || [];
+    acc[group].push(section);
+    return acc;
+  }, {});
+
+  const save = useMutation({
+    mutationFn: nextSections => api.put('/section-permissions', { role, department, sections: nextSections }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['section-permissions', role, department] });
+      qc.invalidateQueries({ queryKey: ['users'] });
+      toast.success('Section permissions synced');
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Permission sync failed'),
+  });
+
+  const toggle = (key) => {
+    const next = sections.map(s => s.key === key ? { ...s, enabled: !s.enabled } : s);
+    save.mutate(next.map(({ key, enabled }) => ({ key, enabled })));
+  };
+
+  return (
+    <div className="card" style={{marginTop:18}}>
+      <div className="flex-between" style={{gap:16,alignItems:'flex-start',marginBottom:16}}>
+        <div>
+          <div className="card-title" style={{marginBottom:4}}>Section Permissions</div>
+          <div style={{fontSize:13,color:'var(--text2)'}}>Choose role and department, then enable the sections that this team should access.</div>
+        </div>
+        <div className="form-grid-2" style={{maxWidth:520,margin:0}}>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Choose Role</label>
+            <select className="input" value={role} onChange={e=>setRole(e.target.value)}>
+              {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Department</label>
+            <select className="input" value={department} onChange={e=>setDepartment(e.target.value)}>
+              {DEPARTMENTS.map(d=><option key={d} value={d}>{DEPT_LABEL[d]}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="section-permission-list">
+        {Object.entries(grouped).map(([group, rows]) => (
+          <div key={group} className="section-permission-group">
+            <div className="section-permission-group-title">{group}</div>
+            {rows.map(section => (
+              <div key={section.key} className="section-permission-row">
+                <div>
+                  <div className="section-permission-name">{section.label}</div>
+                  <div className="section-permission-path">{section.path}</div>
+                </div>
+                <button
+                  type="button"
+                  className={`toggle-switch ${section.enabled ? 'on' : ''}`}
+                  aria-pressed={section.enabled}
+                  onClick={() => toggle(section.key)}
+                  disabled={save.isPending}
+                  title={section.enabled ? 'Enabled' : 'Disabled'}
+                >
+                  <span />
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function UsersPage() {
   const { user: me } = useAuth();
   const [modal, setModal] = useState(null);
@@ -318,6 +409,7 @@ export default function UsersPage() {
           </tbody>
         </table>
       </div>
+      <SectionPermissions />
       {modal!==null&&<UserModal u={Object.keys(modal).length?modal:null} onClose={()=>setModal(null)} />}
       {me.role==='admin'&&<DangerZone />}
     </div>

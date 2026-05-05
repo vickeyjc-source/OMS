@@ -28,6 +28,7 @@ import DeletedBinPage from './pages/DeletedBinPage';
 import FinancePage from './pages/FinancePage'; // Finance module
 import TaxSettingsPage from './pages/TaxSettingsPage'; // Tax Settings
 import InventoryPage from './pages/InventoryPage'; // Stock Inventory
+import { canAccessSection } from './utils/sections';
 
 function Spinner() {
   return (
@@ -47,6 +48,15 @@ function RequireAuth({ children, adminOnly }) {
   return children;
 }
 
+function RequireSection({ section, children, adminOnly }) {
+  const { user, loading } = useAuth();
+  if (loading) return <Spinner />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (adminOnly && !['admin','manager'].includes(user.role)) return <Navigate to="/" replace />;
+  if (!canAccessSection(user, section)) return <Navigate to="/" replace />;
+  return children;
+}
+
 function AppRoutes() {
   const { user, loading } = useAuth();
   if (loading) return <Spinner />;
@@ -54,28 +64,28 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
-        <Route index element={<DashboardPage />} />
-        <Route path="enquiries" element={<EnquiriesPage />} />
-        <Route path="enquiries/new" element={<NewEnquiryPage />} />
-        <Route path="enquiries/:id" element={<EnquiryDetailPage />} />
-        <Route path="quotes" element={<QuotesPage />} />
-        <Route path="orders" element={<OrdersPage />} />
-        <Route path="orders/new" element={<NewOrderPage />} />
-        <Route path="customers" element={<CustomersPage />} />
-        <Route path="suppliers" element={<SuppliersPage />} />
-        <Route path="linecards" element={<LineCardsPage />} />
-        <Route path="users" element={<RequireAuth adminOnly><UsersPage /></RequireAuth>} />
-        <Route path="settings" element={<RequireAuth adminOnly><SettingsPage /></RequireAuth>} />
-        <Route path="tax-settings" element={<RequireAuth adminOnly><TaxSettingsPage /></RequireAuth>} />
-        <Route path="delivery-hub" element={<DeliveryHubPage />} />
-        <Route path="approvals" element={<RequireAuth adminOnly><ApprovalsPage /></RequireAuth>} />
-        <Route path="reports" element={<ReportsPage />} />
-        <Route path="sourcing-bin" element={<SourcingBinPage />} />
-        <Route path="procurement-bin" element={<ProcurementBinPage />} />
-        <Route path="closed-bin" element={<ClosedBinPage />} />
-        <Route path="deleted-bin" element={<DeletedBinPage />} />
-        <Route path="finance" element={<FinancePage />} />
-        <Route path="inventory" element={<InventoryPage />} />
+        <Route index element={<RequireSection section="dashboard"><DashboardPage /></RequireSection>} />
+        <Route path="enquiries" element={<RequireSection section="enquiries"><EnquiriesPage /></RequireSection>} />
+        <Route path="enquiries/new" element={<RequireSection section="new-enquiry"><NewEnquiryPage /></RequireSection>} />
+        <Route path="enquiries/:id" element={<RequireSection section="enquiries"><EnquiryDetailPage /></RequireSection>} />
+        <Route path="quotes" element={<RequireSection section="quotes"><QuotesPage /></RequireSection>} />
+        <Route path="orders" element={<RequireSection section="orders"><OrdersPage /></RequireSection>} />
+        <Route path="orders/new" element={<RequireSection section="new-order"><NewOrderPage /></RequireSection>} />
+        <Route path="customers" element={<RequireSection section="customers"><CustomersPage /></RequireSection>} />
+        <Route path="suppliers" element={<RequireSection section="suppliers"><SuppliersPage /></RequireSection>} />
+        <Route path="linecards" element={<RequireSection section="linecards"><LineCardsPage /></RequireSection>} />
+        <Route path="users" element={<RequireSection section="users" adminOnly><UsersPage /></RequireSection>} />
+        <Route path="settings" element={<RequireSection section="settings" adminOnly><SettingsPage /></RequireSection>} />
+        <Route path="tax-settings" element={<RequireSection section="tax-settings" adminOnly><TaxSettingsPage /></RequireSection>} />
+        <Route path="delivery-hub" element={<RequireSection section="delivery-hub"><DeliveryHubPage /></RequireSection>} />
+        <Route path="approvals" element={<RequireSection section="approvals"><ApprovalsPage /></RequireSection>} />
+        <Route path="reports" element={<RequireSection section="reports"><ReportsPage /></RequireSection>} />
+        <Route path="sourcing-bin" element={<RequireSection section="sourcing-bin"><SourcingBinPage /></RequireSection>} />
+        <Route path="procurement-bin" element={<RequireSection section="procurement-bin"><ProcurementBinPage /></RequireSection>} />
+        <Route path="closed-bin" element={<RequireSection section="closed-bin"><ClosedBinPage /></RequireSection>} />
+        <Route path="deleted-bin" element={<RequireSection section="deleted-bin"><DeletedBinPage /></RequireSection>} />
+        <Route path="finance" element={<RequireSection section="finance"><FinancePage /></RequireSection>} />
+        <Route path="inventory" element={<RequireSection section="inventory"><InventoryPage /></RequireSection>} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/' : '/login'} replace />} />
     </Routes>

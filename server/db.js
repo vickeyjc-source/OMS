@@ -160,6 +160,15 @@ async function createSchema() {
       role TEXT NOT NULL DEFAULT 'user',
       status TEXT NOT NULL DEFAULT 'active', created TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS section_permissions (
+      role TEXT NOT NULL,
+      department TEXT NOT NULL,
+      section_key TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT DEFAULT '',
+      PRIMARY KEY (role, department, section_key)
+    );
     CREATE TABLE IF NOT EXISTS customers (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, contact TEXT, email TEXT,
       phone TEXT, city TEXT, state TEXT, country TEXT DEFAULT 'India',
@@ -713,7 +722,38 @@ async function initDb() {
     console.log('[DB] Default users seeded');
   }
 
+  const sections = [
+    'dashboard','enquiries','new-enquiry','quotes','orders','new-order',
+    'sourcing-bin','procurement-bin','delivery-hub','inventory','closed-bin',
+    'deleted-bin','finance','customers','suppliers','linecards','users',
+    'approvals','settings','tax-settings','reports',
+  ];
+  const departments = ['sales','sourcing','procurement','accounts','logistics','approvers','management'];
+  const defaults = {
+    sales: ['dashboard','enquiries','new-enquiry','quotes','orders','new-order','closed-bin','customers','suppliers','linecards','reports'],
+    sourcing: ['dashboard','enquiries','sourcing-bin','closed-bin','suppliers','linecards','reports'],
+    procurement: ['dashboard','orders','procurement-bin','delivery-hub','inventory','closed-bin','suppliers','linecards','reports'],
+    accounts: ['dashboard','orders','finance','customers','suppliers','closed-bin','reports'],
+    logistics: ['dashboard','orders','delivery-hub','closed-bin','reports'],
+    approvers: ['dashboard','orders','approvals','closed-bin','reports'],
+    management: sections,
+  };
+  const now = new Date().toISOString().slice(0,16).replace('T',' ');
+  for (const role of ['user','manager','admin']) {
+    for (const department of departments) {
+      const allowed = role === 'user' ? (defaults[department] || defaults.sales) : sections;
+      for (const section of sections) {
+        await pool.query(
+          `INSERT INTO section_permissions(role,department,section_key,enabled,updated_at,updated_by)
+           VALUES($1,$2,$3,$4,$5,$6)
+           ON CONFLICT(role,department,section_key) DO NOTHING`,
+          [role, department, section, allowed.includes(section) ? 1 : 0, now, 'system']
+        );
+      }
+    }
+  }
+
   return pool;
 }
 
-module.exports = { initDb, all, run, get, saveNow, nextId, assembleOrder, assembleEnquiry };
+module.exports = { initDb, all, run, get, allAsync, runAsync, getAsync, saveNow, nextId, assembleOrder, assembleEnquiry };

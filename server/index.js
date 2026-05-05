@@ -84,7 +84,7 @@ const multer   = require('multer');
 const { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions } = require('@azure/storage-blob');
 const { v4: uuid } = require('uuid');
 const os   = require('os');
-const { initDb, all, run, get, saveNow, nextId, assembleOrder, assembleEnquiry } = require('./db');
+const { initDb, all, run, get, allAsync, runAsync, getAsync, saveNow, nextId, assembleOrder, assembleEnquiry } = require('./db');
 
 const app    = express();
 const PORT   = Number(process.env.BACKEND_PORT || process.env.PORT || 8080);
@@ -143,7 +143,17 @@ function auth(req, res, next) {
   if (req.session?.user) return next();
   const h = req.headers.authorization;
   if (h?.startsWith('Bearer ')) {
-    try { req.session.user = jwt.verify(h.slice(7), SECRET); return next(); } catch {}
+    try {
+      const decoded = jwt.verify(h.slice(7), SECRET);
+      getAsync('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [decoded.id])
+        .then(fresh => {
+          if (!fresh || fresh.status !== 'active') return res.status(401).json({ error: 'Unauthorized' });
+          req.session.user = { id: fresh.id, name: fresh.name, role: fresh.role, department: fresh.department, username: fresh.username };
+          next();
+        })
+        .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+      return;
+    } catch {}
   }
   return res.status(401).json({ error: 'Unauthorized' });
 }
@@ -210,6 +220,77 @@ function fileDto(row) {
   };
 }
 
+const SECTION_DEFINITIONS = [
+  { key: 'dashboard', label: 'Dashboard' },
+  { key: 'enquiries', label: 'Enquiries' },
+  { key: 'new-enquiry', label: 'New Enquiry' },
+  { key: 'quotes', label: 'Quotes' },
+  { key: 'orders', label: 'All Orders' },
+  { key: 'new-order', label: 'New Order' },
+  { key: 'sourcing-bin', label: 'Sourcing Bin' },
+  { key: 'procurement-bin', label: 'Procurement Bin' },
+  { key: 'delivery-hub', label: 'Delivery Hub' },
+  { key: 'inventory', label: 'Stock Inventory' },
+  { key: 'closed-bin', label: 'Closed Bin' },
+  { key: 'deleted-bin', label: 'Deleted Bin' },
+  { key: 'finance', label: 'Finance' },
+  { key: 'customers', label: 'Customers' },
+  { key: 'suppliers', label: 'Suppliers' },
+  { key: 'linecards', label: 'Line Cards' },
+  { key: 'users', label: 'User Management', adminOnly: true },
+  { key: 'approvals', label: 'Approvals' },
+  { key: 'settings', label: 'Settings', adminOnly: true },
+  { key: 'tax-settings', label: 'Tax Settings', adminOnly: true },
+  { key: 'reports', label: 'Reports' },
+];
+const SECTION_KEYS = SECTION_DEFINITIONS.map(s => s.key);
+const ADMIN_SECTION_KEYS = SECTION_DEFINITIONS.filter(s => s.adminOnly).map(s => s.key);
+
+async function getAllowedSections(user) {
+  if (!user) return [];
+  if (user.role === 'admin') return SECTION_KEYS;
+  const rows = await allAsync(
+    'SELECT section_key FROM section_permissions WHERE role=? AND department=? AND enabled=1',
+    [user.role || 'user', user.department || 'sales']
+  );
+  return rows.map(r => r.section_key);
+}
+
+async function userDto(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    email: user.email || '',
+    role: user.role,
+    department: user.department,
+    status: user.status,
+    perms: getPerms(user),
+    allowedSections: await getAllowedSections(user),
+  };
+}
+
+async function canAccessSection(user, sectionKey) {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  if (ADMIN_SECTION_KEYS.includes(sectionKey)) return false;
+  return (await getAllowedSections(user)).includes(sectionKey);
+}
+
+function sectionGate(sectionKey) {
+  return async (req, res, next) => {
+    try {
+      if (!(await canAccessSection(req.session.user, sectionKey))) {
+        return res.status(403).json({ error: 'Section access denied' });
+      }
+      next();
+    } catch (e) {
+      next(e);
+    }
+  };
+}
+
 // Dept permissions
 const DEPT_PERMS = {
   management:  { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
@@ -239,61 +320,36 @@ function stripSensitive(order, user) {
 }
 
 // ── AUTH ─────────────────────────────────────────────────────
-// Hardcoded users for local testing (bypasses DB lookup)
-const HARDCODED_USERS = {
-  admin:    { id:'uadmin001', name:'Administrator', role:'admin',   department:'management', email:'admin@ciflux.com',    password:'admin123' },
-  manager:  { id:'umgr001',   name:'Manager',       role:'manager', department:'management', email:'manager@ciflux.com',  password:'pass123'  },
-  sales1:   { id:'usales001', name:'Sales User',    role:'user',    department:'sales',      email:'sales1@ciflux.com',   password:'pass123'  },
-  sourcing1:{ id:'usrc001',   name:'Sourcing User', role:'user',    department:'sourcing',   email:'sourcing@ciflux.com', password:'pass123'  },
-  procure1: { id:'uprc001',   name:'Procure User',  role:'user',    department:'procurement',email:'procure@ciflux.com',  password:'pass123'  },
-  accounts1:{ id:'uacc001',   name:'Accounts User', role:'user',    department:'accounts',   email:'accounts@ciflux.com', password:'pass123'  },
-  approver1:{ id:'uapp001',   name:'Approver User', role:'user',    department:'approvers',  email:'approver@ciflux.com', password:'pass123'  },
-};
-
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Required' });
 
-  // ── Hardcoded login (works without DB, for local dev/testing) ──
-  const hcu = HARDCODED_USERS[username];
-  if (hcu && hcu.password === password) {
-    const payload = { id: hcu.id, name: hcu.name, role: hcu.role, department: hcu.department, username };
-    req.session.user = payload;
-    console.log('[AUTH] Hardcoded login:', username);
-    return res.json({ ...payload, email: hcu.email, token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
-  }
-
-  // ── DB login (fallback) ──
-  try {
-    const user = get("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
-    if (!user || !bcrypt.compareSync(password, user.password))
-      return res.status(401).json({ error: 'Invalid credentials' });
-    const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
-    req.session.user = payload;
-    return res.json({ ...payload, email: user.email, token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
-  } catch(e) {
+  const user = await getAsync("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
+  if (!user || !bcrypt.compareSync(password, user.password))
     return res.status(401).json({ error: 'Invalid credentials' });
-  }
-});
+  const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
+  req.session.user = payload;
+  return res.json({ ...(await userDto(user)), token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
+}));
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
 
 // Verify a manager/admin username+password — used to unlock locked quote/order edits
-app.post('/api/auth/verify-manager', auth, (req, res) => {
+app.post('/api/auth/verify-manager', auth, asyncRoute(async (req, res) => {
   const { username, password } = req.body;
   if (!password) return res.status(400).json({ error: 'Password required' });
   // Look up by provided username (must be manager/admin), fallback to session user
   const user = username
-    ? get("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username])
-    : get('SELECT * FROM users WHERE id=?', [req.session.user.id]);
+    ? await getAsync("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username])
+    : await getAsync('SELECT * FROM users WHERE id=?', [req.session.user.id]);
   if (!user) return res.status(401).json({ error: 'User not found' });
   if (!['admin','manager'].includes(user.role)) return res.status(403).json({ error: 'Only managers or admins can unlock' });
   if (!bcrypt.compareSync(password, user.password)) return res.status(401).json({ error: 'Incorrect password' });
   res.json({ ok: true, name: user.name, role: user.role });
-});
-app.get('/api/auth/me', auth, (req, res) => {
-  const u = get('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [req.session.user.id]);
-  res.json(u ? { ...u, perms: getPerms(u) } : req.session.user);
-});
+}));
+app.get('/api/auth/me', auth, asyncRoute(async (req, res) => {
+  const u = await getAsync('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [req.session.user.id]);
+  res.json(u ? await userDto(u) : { ...req.session.user, allowedSections: await getAllowedSections(req.session.user) });
+}));
 
 // ── FILES / AZURE BLOB STORAGE ─────────────────────────────────────────────
 app.post('/api/files', auth, upload.single('file'), asyncRoute(async (req, res) => {
@@ -401,31 +457,85 @@ app.delete('/api/files/:id', auth, asyncRoute(async (req, res) => {
 }));
 
 // ── USERS ────────────────────────────────────────────────────
-app.get('/api/users', auth, (req, res) => {
-  res.json(all('SELECT id,name,username,email,role,department,status,created FROM users ORDER BY department,name'));
-});
-app.post('/api/users', adminOnly, (req, res) => {
+app.get('/api/users', auth, asyncRoute(async (req, res) => {
+  res.json(await allAsync('SELECT id,name,username,email,role,department,status,created FROM users ORDER BY department,name'));
+}));
+app.post('/api/users', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.name || !d.username || !d.password) return res.status(400).json({ error: 'Required' });
-  if (get('SELECT id FROM users WHERE username=?', [d.username])) return res.status(409).json({ error: 'Username exists' });
+  if (await getAsync('SELECT id FROM users WHERE username=?', [d.username])) return res.status(409).json({ error: 'Username exists' });
   const id = 'u' + uuid().slice(0,8);
-  run('INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?)',
+  await runAsync('INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?)',
     [id, d.name, d.username, d.email||'', bcrypt.hashSync(d.password,10), d.department||'sales', d.role||'user', d.status||'active', todayStr()]);
   saveNow(); res.json({ id });
-});
-app.put('/api/users/:id', adminOnly, (req, res) => {
-  const u = get('SELECT * FROM users WHERE id=?', [req.params.id]);
+}));
+app.put('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
+  const u = await getAsync('SELECT * FROM users WHERE id=?', [req.params.id]);
   if (!u) return res.status(404).json({ error: 'Not found' });
   const d = req.body;
-  run('UPDATE users SET name=?,username=?,email=?,password=?,department=?,role=?,status=? WHERE id=?',
+  await runAsync('UPDATE users SET name=?,username=?,email=?,password=?,department=?,role=?,status=? WHERE id=?',
     [d.name||u.name, d.username||u.username, d.email||u.email,
      d.password ? bcrypt.hashSync(d.password,10) : u.password,
      d.department||u.department, d.role||u.role, d.status||u.status, req.params.id]);
   saveNow(); res.json({ ok: true });
+}));
+app.delete('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
+  await runAsync('DELETE FROM users WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
+}));
+
+// ── SECTION PERMISSIONS ──────────────────────────────────────
+app.get('/api/section-permissions', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
+  const { role = 'user', department = 'sales' } = req.query || {};
+  const rows = await allAsync(
+    'SELECT role,department,section_key,enabled,updated_at,updated_by FROM section_permissions WHERE role=? AND department=? ORDER BY section_key',
+    [role, department]
+  );
+  const byKey = Object.fromEntries(rows.map(r => [r.section_key, Number(r.enabled) === 1]));
+  res.json({
+    role,
+    department,
+    sections: SECTION_DEFINITIONS.map(s => ({ ...s, enabled: Boolean(byKey[s.key]) })),
+  });
+}));
+
+app.put('/api/section-permissions', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
+  const { role = 'user', department = 'sales', sections = [] } = req.body || {};
+  if (!['user','manager','admin'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  if (!department) return res.status(400).json({ error: 'Department required' });
+  if (!Array.isArray(sections)) return res.status(400).json({ error: 'Sections must be a list' });
+  const requested = new Map(sections.map(s => [s.key, Boolean(s.enabled)]));
+  const now = nowStr();
+  for (const section of SECTION_DEFINITIONS) {
+    const enabled = requested.has(section.key) ? requested.get(section.key) : false;
+    await runAsync(
+      `INSERT INTO section_permissions(role,department,section_key,enabled,updated_at,updated_by)
+       VALUES(?,?,?,?,?,?)
+       ON CONFLICT(role,department,section_key) DO UPDATE SET
+         enabled=EXCLUDED.enabled,
+         updated_at=EXCLUDED.updated_at,
+         updated_by=EXCLUDED.updated_by`,
+      [role, department, section.key, enabled ? 1 : 0, now, req.session.user.id]
+    );
+  }
+  saveNow();
+  res.json({ ok: true, role, department });
+}));
+
+app.get('/api/sections', adminOnly, sectionGate('users'), (req, res) => {
+  res.json(SECTION_DEFINITIONS);
 });
-app.delete('/api/users/:id', adminOnly, (req, res) => {
-  run('DELETE FROM users WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
-});
+
+app.use('/api/customers', auth, sectionGate('customers'));
+app.use('/api/linecards', auth, sectionGate('linecards'));
+app.use('/api/suppliers', auth, sectionGate('suppliers'));
+app.use('/api/enquiries', auth, sectionGate('enquiries'));
+app.use('/api/quotes', auth, sectionGate('quotes'));
+app.use('/api/orders', auth, sectionGate('orders'));
+app.use('/api/approvals', auth, sectionGate('approvals'));
+app.use('/api/inventory', auth, sectionGate('inventory'));
+app.use('/api/settings', auth, sectionGate('settings'));
+app.use('/api/finance', auth, sectionGate('finance'));
+app.use('/api/finance-queue', auth, sectionGate('finance'));
 
 // ── CUSTOMERS ────────────────────────────────────────────────
 app.get('/api/customers', auth, (req, res) => {
