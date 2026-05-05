@@ -87,7 +87,7 @@ const os   = require('os');
 const { initDb, all, run, get, allAsync, runAsync, getAsync, saveNow, nextId, assembleOrder, assembleEnquiry } = require('./db');
 
 const app    = express();
-const PORT   = Number(process.env.BACKEND_PORT || process.env.PORT || 8080);
+const PORT   = Number(process.env.BACKEND_PORT || process.env.PORT || 8081);
 const SECRET = process.env.JWT_SECRET;
 
 if (!SECRET) {
@@ -128,7 +128,17 @@ if (fs.existsSync(PORTAL)) {
   app.get('/', (req, res) => res.sendFile(PORTAL));
 }
 
-if (fs.existsSync(BUILD)) app.use(express.static(BUILD));
+if (fs.existsSync(BUILD)) {
+  app.use('/app', express.static(BUILD));
+  app.use(express.static(BUILD));
+}
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/app/api')) {
+    req.url = req.url.replace(/^\/app/, '');
+  }
+  next();
+});
 
 // ── Disable caching for ALL /api routes ──────────────────────────────────────
 app.use('/api', (req, res, next) => {
@@ -136,6 +146,10 @@ app.use('/api', (req, res, next) => {
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
   next();
+});
+
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, host: req.hostname, path: req.path, time: new Date().toISOString() });
 });
 
 // ── Helpers ──────────────────────────────────────────────────
@@ -147,14 +161,23 @@ function auth(req, res, next) {
       const decoded = jwt.verify(h.slice(7), SECRET);
       getAsync('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [decoded.id])
         .then(fresh => {
-          if (!fresh || fresh.status !== 'active') return res.status(401).json({ error: 'Unauthorized' });
+          if (!fresh || fresh.status !== 'active') {
+            console.log(`[AUTH] BEARER FAILED path=${req.path} id=${decoded.id || 'unknown'} status=${fresh?.status || 'missing'}`);
+            return res.status(401).json({ error: 'Unauthorized' });
+          }
           req.session.user = { id: fresh.id, name: fresh.name, role: fresh.role, department: fresh.department, username: fresh.username };
           next();
         })
-        .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+        .catch(err => {
+          console.log(`[AUTH] BEARER ERROR path=${req.path} err=${err?.message || 'unknown'}`);
+          res.status(401).json({ error: 'Unauthorized' });
+        });
       return;
-    } catch {}
+    } catch (err) {
+      console.log(`[AUTH] BEARER PARSE FAILED path=${req.path} err=${err?.message || 'invalid token'}`);
+    }
   }
+  console.log(`[AUTH] UNAUTHORIZED path=${req.path} user=${req.session?.user?.id || 'none'} authHeader=${!!h}`);
   return res.status(401).json({ error: 'Unauthorized' });
 }
 function adminOnly(req, res, next) {
@@ -322,13 +345,19 @@ function stripSensitive(order, user) {
 // ── AUTH ─────────────────────────────────────────────────────
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Required' });
+  if (!username || !password) {
+    console.log(`[AUTH] LOGIN FAILED reason=MissingCredentials body=${JSON.stringify({ username: !!username, password: !!password })}`);
+    return res.status(400).json({ error: 'Required' });
+  }
 
   const user = await getAsync("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
-  if (!user || !bcrypt.compareSync(password, user.password))
+  if (!user || !bcrypt.compareSync(password, user.password)) {
+    console.log(`[AUTH] LOGIN FAILED username=${username} reason=InvalidCredentials`);
     return res.status(401).json({ error: 'Invalid credentials' });
+  }
   const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
   req.session.user = payload;
+  console.log(`[AUTH] LOGIN SUCCESS id=${user.id} username=${username} role=${user.role}`);
   return res.json({ ...(await userDto(user)), token: jwt.sign(payload, SECRET, { expiresIn: '8h' }) });
 }));
 app.post('/api/auth/logout', (req, res) => { req.session.destroy(() => res.json({ ok: true })); });
@@ -348,6 +377,7 @@ app.post('/api/auth/verify-manager', auth, asyncRoute(async (req, res) => {
 }));
 app.get('/api/auth/me', auth, asyncRoute(async (req, res) => {
   const u = await getAsync('SELECT id,name,username,email,role,department,status FROM users WHERE id=?', [req.session.user.id]);
+  console.log(`[AUTH] ME SUCCESS id=${req.session.user.id} path=${req.path}`);
   res.json(u ? await userDto(u) : { ...req.session.user, allowedSections: await getAllowedSections(req.session.user) });
 }));
 
@@ -546,14 +576,25 @@ app.get('/api/customers', auth, (req, res) => {
 });
 app.post('/api/customers', auth, (req, res) => {
   const d = req.body;
-  if (!d.name) return res.status(400).json({ error: 'Name required' });
-  const id = nextId('customers','CFCUST',4);
-  run('INSERT INTO customers VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-    [id,d.name,d.contact||'',d.email||'',d.phone||'',d.city||'',d.state||'',d.country||'India',d.gstin||'',d.status||'active',todayStr()]);
-  // Extended fields
-  const ext = buildCustomerExt(d);
-  run('UPDATE customers SET ' + ext.sets + ' WHERE id=?', [...ext.vals, id]);
-  saveNow(); res.json({ id });
+  const userId = req.session?.user?.id || 'unknown';
+  if (!d.name) {
+    console.log(`[CUSTOMER CREATE] FAILED user=${userId} reason=Name required`);
+    return res.status(400).json({ error: 'Name required' });
+  }
+  try {
+    const id = nextId('customers','CFCUST',4);
+    run('INSERT INTO customers VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      [id,d.name,d.contact||'',d.email||'',d.phone||'',d.city||'',d.state||'',d.country||'India',d.gstin||'',d.status||'active',todayStr()]);
+    // Extended fields
+    const ext = buildCustomerExt(d);
+    run('UPDATE customers SET ' + ext.sets + ' WHERE id=?', [...ext.vals, id]);
+    saveNow();
+    console.log(`[CUSTOMER CREATE] SUCCESS user=${userId} id=${id} name=${d.name}`);
+    res.json({ id });
+  } catch (err) {
+    console.error(`[CUSTOMER CREATE] FAILED user=${userId} error=${err.message || 'unknown error'}`);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 app.put('/api/customers/:id', auth, (req, res) => {
   const c = get('SELECT * FROM customers WHERE id=?', [req.params.id]);

@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import fs from 'fs'
 import path from 'path'
 
-const backendPort = process.env.BACKEND_PORT || process.env.VITE_BACKEND_PORT || '8080'
+const backendPort = process.env.BACKEND_PORT || process.env.VITE_BACKEND_PORT || '8081'
 
 // Plugin: serve portal landing page at "/" in dev, redirect to /app
 function portalPlugin() {
