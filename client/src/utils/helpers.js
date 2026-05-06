@@ -1,5 +1,9 @@
 // client/src/utils/helpers.js  v2
 export const initials = n => n.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+export const maskName = n => {
+  if (!n) return '—';
+  return n.split(' ').map(w => w.length <= 1 ? w : w[0] + '*'.repeat(w.length - 1)).join(' ');
+};
 export const fmt = n => new Intl.NumberFormat('en-IN').format(n||0);
 export const fmtCur = (n, c='INR') => c==='USD'?`$${fmt(n)}`:c==='EUR'?`€${fmt(n)}`:c==='GBP'?`£${fmt(n)}`:`₹${fmt(n)}`;
 export const today = () => new Date().toISOString().slice(0,10);

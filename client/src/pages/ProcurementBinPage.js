@@ -377,9 +377,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       qc.invalidateQueries(['orders']);
       onSaved();
       if (anyBlocked) {
-        // ADDED: supplier advance terms → navigate to Finance (same pattern as customer advance in OrdersPage)
-        toast.success('✅ PO raised — Advance payment required. Sending to Finance...');
-        setTimeout(() => { window.location.href = '/finance?tab=sup-advance'; }, 1500);
+        toast.success('✅ PO raised — Advance payment required. Finance team notified.');
       } else {
         toast.success(`✅ ${Object.keys(bySupplier).length} PO(s) raised!`);
       }
@@ -790,8 +788,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             {isBlocked&&(
               <button className="btn btn-sm"
                 style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',fontWeight:700}}
-                onClick={()=>window.location.href='/finance'}>
-                💰 Go to Finance →
+                onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
+                💰 Notify Finance
               </button>
             )}
             <POStatusBadge status={form.status}/>
@@ -1309,8 +1307,8 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
               <button className="btn btn-sm"
                 style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
                   fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
-                onClick={()=>window.location.href='/finance'}>
-                💰 Go to Finance →
+                onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
+                💰 Notify Finance
               </button>
             </div>
           )}
@@ -1914,8 +1912,8 @@ export default function ProcurementBinPage() {
                       <button className="btn btn-sm"
                         style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
                           fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
-                        onClick={()=>window.location.href='/finance'}>
-                        💰 Go to Finance →
+                        onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
+                        💰 Notify Finance
                       </button>
                     </div>
                   )}

@@ -3,7 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { StatusBadge, ENQ_STATUSES, DaysBadge, fmtDateTime } from '../utils/helpers';
+import { StatusBadge, ENQ_STATUSES, DaysBadge, fmtDateTime, maskName } from '../utils/helpers';
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import { ALL_CURRENCIES, fmtC } from '../utils/currencies';
@@ -449,7 +449,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 </span>
               </>}
             </div>
-            <h2 style={{marginBottom:0}}>🔍 {custName(enq.customer_id)}</h2>
+            <h2 style={{marginBottom:0}}>🔍 {maskName(custName(enq.customer_id))}</h2>
             <div style={{ fontSize:12, color:'var(--text3)', marginTop:2 }}>
               {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''} ·
               Priority: <strong style={{ color: enq.priority==='urgent'?'var(--red)':enq.priority==='high'?'var(--amber)':'inherit' }}>{enq.priority}</strong> ·
@@ -499,7 +499,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
           {/* Enquiry Info + Notes */}
           <div style={{ background:'var(--accent-lt)', border:'1px solid rgba(27,79,158,.2)', borderRadius:'var(--r-sm)', padding:'9px 14px', marginBottom:14, fontSize:12, display:'flex', gap:20, flexWrap:'wrap' }}>
-            <span>📋 <strong>Customer:</strong> {custName(enq.customer_id)}</span>
+            <span>📋 <strong>Customer:</strong> {maskName(custName(enq.customer_id))}</span>
             {enq.notes && <span>📝 <strong>Notes:</strong> {enq.notes}</span>}
             <span style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:8 }}>
               <label className="label" style={{ margin:0 }}>Assigned:</label>
@@ -1403,7 +1403,7 @@ export default function SourcingBinPage() {
                     )}
                   </td>
                   {/* Customer */}
-                  <td style={{fontWeight:600}}>{custName(enq.customer_id)}</td>
+                  <td style={{fontWeight:600}}>{maskName(custName(enq.customer_id))}</td>
                   {/* Items */}
                   <td>
                     <div style={{display:'flex',alignItems:'center',gap:6}}>
