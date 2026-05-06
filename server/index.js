@@ -637,6 +637,34 @@ function buildCustomerExt(d) {
 app.delete('/api/customers/:id', auth, asyncRoute(async (req, res) => {
   await runAsync('DELETE FROM customers WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
 }));
+// Customer template download
+app.get('/api/customers/template', auth, (req, res) => {
+  const headers = [
+    'company_name*','first_name','last_name','email','phone','mobile',
+    'customer_scope','country','city','state','street1','pincode',
+    'gstin','pan','vat_number','payment_terms','currency',
+    'bank_account_name','bank_account_no','bank_name','bank_ifsc',
+    'bank_swift','bank_iban','remarks'
+  ];
+  const example1 = [
+    'Acme Corp','John','Doe','john@acme.com','+91-9876543210','+91-9876543210',
+    'domestic','India','Mumbai','Maharashtra','123 Main Street','400001',
+    '22AAAAA0000A1Z5','ABCDE1234F','','Net 30','INR',
+    'John Doe','1234567890','HDFC Bank','HDFC0001234',
+    '','','Sample domestic customer'
+  ];
+  const example2 = [
+    'Global Inc','Jane','Smith','jane@global.com','+1-555-123-4567','+1-555-123-4567',
+    'international','USA','New York','New York','456 Park Avenue','10001',
+    '','','US123456789','Net 60','USD',
+    'Jane Smith','987654321','Bank of America','',
+    'BOFAUS3N','GB29NWBK60161331926819','Sample international customer'
+  ];
+  const csv = [headers, example1, example2].map(r => r.join(',')).join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="ciflux_customer_template.csv"');
+  res.send(csv);
+});
 // Bulk import customers
 app.post('/api/customers/bulk', auth, asyncRoute(async (req, res) => {
   const rows = req.body.rows;
@@ -738,6 +766,34 @@ app.put('/api/suppliers/:id', auth, asyncRoute(async (req, res) => {
 app.delete('/api/suppliers/:id', auth, asyncRoute(async (req, res) => {
   await runAsync('DELETE FROM suppliers WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
 }));
+// Supplier template download
+app.get('/api/suppliers/template', auth, (req, res) => {
+  const headers = [
+    'name*','type','first_name','last_name','email','phone','mobile',
+    'website','city','state','country','gstin','pan','vat_number',
+    'payment_terms','currency',
+    'bank_account_name','bank_account_no','bank_name','bank_ifsc',
+    'bank_swift','bank_iban','notes'
+  ];
+  const example1 = [
+    'Relia Components','domestic','Rajesh','Kumar','rajesh@relia.com',
+    '+91-9876543210','+91-9876543210','www.relia.com','Delhi','Delhi','India',
+    '07AAAAA0000A1Z1','PQRDE5678F','','Net 30','INR',
+    'Rajesh Kumar','9876543210','SBI','SBIN0001234',
+    '','','Reliable component supplier'
+  ];
+  const example2 = [
+    'Tech Parts USA','international','Bob','Johnson','bob@techparts.com',
+    '+1-555-987-6543','+1-555-987-6543','www.techparts.com','Chicago','Illinois','USA',
+    '','','US987654321','Net 60','USD',
+    'Bob Johnson','5678901234','Chase Bank','',
+    'CHASUS33','US12345678901234567890','US electronics supplier'
+  ];
+  const csv = [headers, example1, example2].map(r => r.join(',')).join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="ciflux_supplier_template.csv"');
+  res.send(csv);
+});
 // Bulk import suppliers
 app.post('/api/suppliers/bulk', auth, asyncRoute(async (req, res) => {
   const rows = req.body.rows;

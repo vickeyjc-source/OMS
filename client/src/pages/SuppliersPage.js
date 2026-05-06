@@ -107,12 +107,22 @@ function BulkUpload({ onClose, onDone }) {
           {!result ? (
             <>
               <div style={{background:'var(--accent-lt)',borderRadius:'var(--r-sm)',padding:'10px 14px',marginBottom:16,fontSize:12}}>
-                Upload a CSV with columns: <strong>name, type (domestic/international), contact, email, phone, website, city, state, country, gstin, vat_number, payment_terms, currency, notes</strong>
+                <strong>How to use:</strong> Download the CSV template, fill in your suppliers (one per row), then upload here.
+                Columns marked <strong>*</strong> are required.
+                <div style={{marginTop:8}}>
+                  <a href="/api/suppliers/template" download style={{color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                    ⬇ Download Supplier Template (CSV)
+                  </a>
+                </div>
+                <div style={{marginTop:6,color:'var(--text3)'}}>
+                  Columns: name*, type (domestic/international), first_name, last_name, email, phone, mobile, website, city, state, country, gstin, pan, vat_number, payment_terms, currency, bank_account_name, bank_account_no, bank_name, bank_ifsc, bank_swift, bank_iban, notes
+                </div>
               </div>
               <div onClick={()=>inputRef.current.click()} style={{border:'2px dashed var(--border-md)',borderRadius:'var(--r)',padding:'24px',textAlign:'center',cursor:'pointer',background:'var(--surface2)',marginBottom:16}}>
                 <div style={{fontSize:28,marginBottom:6}}>📂</div>
                 <div style={{fontWeight:600,color:'var(--text2)'}}>Click to select CSV file</div>
-                <input ref={inputRef} type="file" accept=".csv" style={{display:'none'}} onChange={e=>{if(e.target.files[0])parse(e.target.files[0]);}}/>
+                <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>Fill the downloaded template, then upload here</div>
+                <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" style={{display:'none'}} onChange={e=>{if(e.target.files[0])parse(e.target.files[0]);}}/>
               </div>
               {loading && <div style={{textAlign:'center'}}>Parsing…</div>}
               {rows.length>0 && (
@@ -541,6 +551,9 @@ export default function SuppliersPage() {
           ))}
         </div>
         <div style={{display:'flex',gap:8}}>
+          <a href="/api/suppliers/template" download style={{textDecoration:'none'}}>
+            <button className="btn" style={{fontSize:12}}>⬇ Download Template</button>
+          </a>
           <button className="btn" onClick={()=>setShowBulk(true)} style={{fontSize:12}}>📤 Bulk Import</button>
           <button className="btn btn-primary" onClick={()=>setModal({})}>+ Add Supplier</button>
         </div>

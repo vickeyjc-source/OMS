@@ -229,8 +229,16 @@ function BulkUpload({ onClose, onDone }) {
           {!result ? (
             <>
               <div style={{background:'var(--accent-lt)',borderRadius:'var(--r-sm)',padding:'10px 14px',marginBottom:16,fontSize:12}}>
-                <strong>How to use:</strong> Download the Excel template, fill in your customers (one per row), save as CSV, then upload here.
-                <br/>Columns marked * are required.
+                <strong>How to use:</strong> Download the CSV template, fill in your customers (one per row), then upload here.
+                Columns marked <strong>*</strong> are required.
+                <div style={{marginTop:8}}>
+                  <a href="/api/customers/template" download style={{color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                    ⬇ Download Customer Template (CSV)
+                  </a>
+                </div>
+                <div style={{marginTop:6,color:'var(--text3)'}}>
+                  Columns: company_name*, first_name, last_name, email, phone, mobile, customer_scope (domestic/international), country, city, state, street1, pincode, gstin, pan, vat_number, payment_terms, currency, bank_account_name, bank_account_no, bank_name, bank_ifsc, bank_swift, bank_iban, remarks
+                </div>
               </div>
               <div onClick={()=>inputRef.current.click()} style={{border:'2px dashed var(--border-md)',borderRadius:'var(--r)',padding:'24px',textAlign:'center',cursor:'pointer',background:'var(--surface2)',marginBottom:16}}>
                 <div style={{fontSize:28,marginBottom:6}}>📂</div>
@@ -828,7 +836,7 @@ export default function CustomersPage() {
           <input className="search-input" placeholder="Search by name, CFCUST no., email, GSTIN…" value={search} onChange={e=>setSearch(e.target.value)} />
         </div>
         <div style={{display:'flex',gap:8}}>
-          <a href="/ciflux_customer_bulk_import.xlsx" download style={{textDecoration:'none'}}>
+          <a href="/api/customers/template" download style={{textDecoration:'none'}}>
             <button className="btn" style={{fontSize:12}}>⬇ Download Template</button>
           </a>
           <button className="btn" onClick={()=>setShowBulk(true)} style={{fontSize:12}}>📤 Bulk Import</button>
