@@ -7,6 +7,7 @@ import { fmtDateTime } from '../utils/helpers';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import { AddressForm, PhoneField, CountrySelect, StateSelect, CitySelect } from '../components/AddressForm';
 import { ALL_CURRENCIES } from '../utils/currencies';
+import { AddLinecardModal } from './NewEnquiryPage';
 const SALUTATIONS = ['Mr.','Ms.','Mrs.','Dr.','Prof.'];
 const GST_TREATMENTS = ['Registered Business – Regular','Registered Business – Composition','Unregistered Business','Overseas','Special Economic Zone'];
 
@@ -177,6 +178,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
   });
   const [tab, setTab] = useState('details');
   const [lcSearch, setLcSearch] = useState('');
+  const [addLcModal, setAddLcModal] = useState(false);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   const intl = isIntl(form);
@@ -431,26 +433,39 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
           {/* ── Line Cards ── */}
           {tab==='linecards' && (
             <div style={{paddingTop:16}}>
-              <div style={{display:'flex',flexWrap:'wrap',gap:4,minHeight:44,padding:10,border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)',marginBottom:12}}>
+              <div style={{display:'flex',flexWrap:'wrap',gap:4,minHeight:44,padding:10,border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)',marginBottom:24}}>
                 {selectedLcs.length===0&&<span style={{fontSize:12,color:'var(--text3)'}}>No line cards assigned — search below</span>}
                 {selectedLcs.map(lid=>(
                   <span key={lid} className="lc-chip">{lcName(lid)}<button className="lc-chip-x" onClick={()=>removeLc(lid)}>×</button></span>
                 ))}
               </div>
-              <div className="form-group">
-                <label className="label">Search &amp; Add Line Card</label>
-                <input className="input" placeholder="Type brand / manufacturer name…" value={lcSearch} onChange={e=>setLcSearch(e.target.value)}/>
-              </div>
-              {lcSearch&&availableLcs.length>0&&(
-                <div style={{border:'1px solid var(--border)',borderRadius:'var(--r-sm)',maxHeight:200,overflowY:'auto',background:'var(--surface)'}}>
+              <div style={{padding:'16px', border:'1px solid var(--border)', borderRadius:'var(--r-sm)', background:'var(--surface2)'}}>
+                <div className="form-group" style={{ marginBottom: lcSearch ? 12 : 0 }}>
+                  <label className="label">Search &amp; Add Line Card</label>
+                  <div style={{display:'flex',gap:8}}>
+                    <input className="input" placeholder="Type brand / manufacturer name…" value={lcSearch} onChange={e=>setLcSearch(e.target.value)}/>
+                    <button className="btn" onClick={()=>setAddLcModal(true)}>+ New</button>
+                  </div>
+                </div>
+                {lcSearch&&availableLcs.length>0&&(
+                  <div style={{border:'1px solid var(--border)',borderRadius:'var(--r-sm)',maxHeight:200,overflowY:'auto',background:'var(--surface)',boxShadow:'0 4px 12px rgba(0,0,0,0.05)'}}>
                   {availableLcs.map(lc=>(
                     <div key={lc.id} style={{padding:'8px 12px',cursor:'pointer',fontSize:13,borderBottom:'1px solid var(--border)'}} onClick={()=>{addLc(lc.id);setLcSearch('');}}>
                       <span className="bold">{lc.name}</span> <span style={{fontSize:11,color:'var(--text3)'}}>{lc.category}</span>
                     </div>
                   ))}
+                  <div style={{padding:'8px 12px',cursor:'pointer',fontSize:12,fontWeight:600,color:'var(--accent)',borderTop:'1px solid var(--border)',background:'var(--accent-lt)'}} onClick={()=>setAddLcModal(true)}>
+                    + Add "{lcSearch}" as new Line Card
+                  </div>
                 </div>
-              )}
-              {lcSearch&&availableLcs.length===0&&<div style={{fontSize:12,color:'var(--text3)',marginTop:6}}>No matching line cards found</div>}
+                )}
+                {lcSearch&&availableLcs.length===0&&(
+                  <div style={{fontSize:12,color:'var(--text3)',display:'flex',alignItems:'center',gap:8}}>
+                  No matching line cards found
+                  <button className="btn btn-xs" onClick={()=>setAddLcModal(true)}>+ Add "{lcSearch}"</button>
+                </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -508,6 +523,17 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
         onConfirm={() => { setConfirmDelete(false); deleteMutation.mutate(); }}
         onCancel={() => setConfirmDelete(false)}
         loading={deleteMutation.isPending}
+      />
+    )}
+    {addLcModal && (
+      <AddLinecardModal
+        prefillName={lcSearch}
+        onClose={() => setAddLcModal(false)}
+        onSaved={(newId) => {
+          addLc(newId);
+          setAddLcModal(false);
+          setLcSearch('');
+        }}
       />
     )}
     </>
@@ -582,9 +608,9 @@ export default function SuppliersPage() {
                 <td className="mono" style={{fontSize:11}}>{s.gstin||s.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
                 <td style={{fontSize:12}}>{s.currency||'INR'}</td>
                 <td style={{maxWidth:180}}>
-                  {(s.linecards||[]).slice(0,3).map(lid=><span key={lid} className="lc-chip" style={{margin:1}}>{lcName(lid)}</span>)}
-                  {(s.linecards||[]).length>3&&<span className="badge badge-gray">+{s.linecards.length-3}</span>}
-                  {!(s.linecards||[]).length&&<span className="muted">—</span>}
+                  {(s.linecards||[]).length > 0 
+                    ? <span className="badge badge-blue" style={{fontWeight: 600}}>{s.linecards.length}</span>
+                    : <span className="muted">—</span>}
                 </td>
                 <td style={{fontSize:11,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.payment_terms||'—'}</td>
                 <td>{s.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
