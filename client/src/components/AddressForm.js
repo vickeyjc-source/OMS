@@ -1,7 +1,7 @@
 // client/src/components/AddressForm.js
 // Reusable address form — Country → State (reactive) → City (reactive)
-// Phone field: manual country code, no auto-sync
-import React, { useState, useMemo, useEffect } from 'react';
+// Phone field: searchable country code picker
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Country, State, City } from 'country-state-city';
 
 // ── All countries (loaded once) ───────────────────────────────────────────────
@@ -24,19 +24,35 @@ export function dialCodeForCountry(country) {
   return c && c.phonecode ? '+' + c.phonecode : '';
 }
 
-// ── Phone Field — shows flag + code only (no country name) ───────────────────
-// domestic: shows a fixed 🇮🇳 +91 badge (no dropdown)
-// excludeIndia: dropdown with all countries except India (for international)
-// default: full dropdown
+// ── Phone Field — searchable country code picker ──────────────────────────────
+// domestic: fixed 🇮🇳 +91 badge, no dropdown
+// excludeIndia: all countries except India
+// default: all countries, India pinned first
 export function PhoneField({ value, onChange, domestic, excludeIndia }) {
   const parts = (value || '').match(/^(\+\d{1,4})\s?(.*)$/) || [];
   const [dialCode, setDialCode] = useState(parts[1] || '+91');
   const [num, setNum] = useState(parts[2] || (value && !value.startsWith('+') ? value : ''));
 
+  const [open, setOpen] = useState(false);
+  const [codeSearch, setCodeSearch] = useState('');
+  const dropRef = useRef(null);
+  const searchRef = useRef(null);
+
   const visibleCodes = useMemo(
     () => excludeIndia ? PHONE_CODES.filter(p => p.isoCode !== 'IN') : PHONE_CODES,
     [excludeIndia]
   );
+
+  // Filter by typed query — match country name, ISO code (e.g. "IN"), or dial code
+  const filteredCodes = useMemo(() => {
+    const q = codeSearch.trim().toLowerCase();
+    if (!q) return visibleCodes;
+    return visibleCodes.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      p.isoCode.toLowerCase().includes(q) ||
+      p.code.includes(q)
+    );
+  }, [codeSearch, visibleCodes]);
 
   // Switching to domestic → force +91
   useEffect(() => {
@@ -57,36 +73,117 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [excludeIndia]);
 
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (dropRef.current && !dropRef.current.contains(e.target)) {
+        setOpen(false);
+        setCodeSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  // Focus search input when dropdown opens
+  useEffect(() => {
+    if (open) setTimeout(() => searchRef.current?.focus(), 50);
+  }, [open]);
+
   const effectiveCode = domestic
     ? '+91'
     : (excludeIndia && dialCode === '+91' ? (visibleCodes[0]?.code || '') : dialCode);
 
+  const selectedEntry = PHONE_CODES.find(p => p.code === effectiveCode);
+
+  const selectCode = (code) => {
+    setDialCode(code);
+    setNum(num);
+    onChange(code + ' ' + num);
+    setOpen(false);
+    setCodeSearch('');
+  };
+
   const update = (code, n) => { setDialCode(code); setNum(n); onChange(code + ' ' + n); };
+
   return (
-    <div className="field-wrap" style={{display:'flex',gap:0,border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'hidden',background:'var(--surface)'}}>
+    <div className="field-wrap" style={{display:'flex',gap:0,border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'visible',background:'var(--surface)',position:'relative'}}>
       {domestic ? (
         <span style={{display:'flex',alignItems:'center',padding:'6px 10px',fontSize:12,fontWeight:600,
           background:'var(--surface2)',borderRight:'1px solid var(--border-md)',whiteSpace:'nowrap',
-          userSelect:'none',color:'var(--text1)'}}>
+          userSelect:'none',color:'var(--text1)',borderRadius:'var(--r-sm) 0 0 var(--r-sm)'}}>
           🇮🇳 +91
         </span>
       ) : (
-        <select
-          value={effectiveCode}
-          onChange={e => update(e.target.value, num)}
-          style={{border:'none',background:'var(--surface2)',padding:'6px 4px',fontSize:12,fontWeight:600,
-            cursor:'pointer',minWidth:72,borderRight:'1px solid var(--border-md)'}}>
-          {visibleCodes.map(p => (
-            <option key={p.code + p.isoCode} value={p.code}>{p.flag} {p.code}</option>
-          ))}
-        </select>
+        <div ref={dropRef} style={{position:'relative',flexShrink:0}}>
+          {/* Trigger button */}
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            style={{display:'flex',alignItems:'center',gap:4,padding:'6px 8px',fontSize:12,fontWeight:600,
+              background:'var(--surface2)',border:'none',borderRight:'1px solid var(--border-md)',
+              cursor:'pointer',whiteSpace:'nowrap',color:'var(--text1)',height:'100%',
+              borderRadius:'var(--r-sm) 0 0 var(--r-sm)',minWidth:72}}>
+            <span>{selectedEntry?.flag}</span>
+            <span>{effectiveCode}</span>
+            <span style={{fontSize:9,color:'var(--text3)',marginLeft:1}}>▾</span>
+          </button>
+
+          {/* Dropdown */}
+          {open && (
+            <div style={{
+              position:'absolute',top:'calc(100% + 4px)',left:0,zIndex:999,
+              background:'var(--surface)',border:'1px solid var(--border-md)',
+              borderRadius:'var(--r-sm)',boxShadow:'0 6px 20px rgba(0,0,0,0.12)',
+              width:260,maxHeight:300,display:'flex',flexDirection:'column',overflow:'hidden',
+            }}>
+              {/* Search input */}
+              <div style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>
+                <input
+                  ref={searchRef}
+                  value={codeSearch}
+                  onChange={e => setCodeSearch(e.target.value)}
+                  placeholder="Type country name or code (e.g. IN, india, US)…"
+                  style={{width:'100%',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',
+                    padding:'5px 8px',fontSize:12,background:'var(--surface)',color:'var(--text1)',
+                    outline:'none',boxSizing:'border-box'}}
+                />
+              </div>
+              {/* Results list */}
+              <div style={{overflowY:'auto',flex:1}}>
+                {filteredCodes.length === 0 ? (
+                  <div style={{padding:'10px 12px',fontSize:12,color:'var(--text3)'}}>No match</div>
+                ) : filteredCodes.map(p => (
+                  <div
+                    key={p.code + p.isoCode}
+                    onClick={() => selectCode(p.code)}
+                    style={{
+                      display:'flex',alignItems:'center',gap:8,padding:'7px 12px',
+                      cursor:'pointer',fontSize:12,
+                      background: p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent',
+                      color: p.code === effectiveCode ? 'var(--accent)' : 'var(--text1)',
+                    }}
+                    onMouseEnter={e => { if (p.code !== effectiveCode) e.currentTarget.style.background = 'var(--surface2)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent'; }}
+                  >
+                    <span style={{fontSize:16,lineHeight:1}}>{p.flag}</span>
+                    <span style={{fontWeight:600,minWidth:40}}>{p.code}</span>
+                    <span style={{color:'var(--text2)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</span>
+                    <span style={{fontSize:10,color:'var(--text3)',fontFamily:'monospace'}}>{p.isoCode}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
       )}
       <input
         className="input"
         value={num}
         onChange={e => update(effectiveCode, e.target.value)}
         placeholder="Phone number"
-        style={{border:'none',borderRadius:0,flex:1}}
+        style={{border:'none',borderRadius:'0 var(--r-sm) var(--r-sm) 0',flex:1}}
       />
     </div>
   );

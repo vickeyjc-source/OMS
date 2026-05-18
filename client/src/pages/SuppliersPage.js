@@ -148,7 +148,7 @@ function BulkUpload({ onClose, onDone }) {
 }
 
 // ── Supplier Modal ─────────────────────────────────────────────────────────────
-export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
+export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTab }) {
   const qc = useQueryClient();
   const isNew = !supplier?.id;
   const isIntl = (f) => f.type === 'international';
@@ -176,7 +176,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved }) {
     try { sa = JSON.parse(supplier.shipping_addresses||'[]'); } catch(_){}
     return {...blank,...supplier, contact_persons:cp, shipping_addresses:sa, linecards:supplier.linecards||[]};
   });
-  const [tab, setTab] = useState('details');
+  const [tab, setTab] = useState(initialTab || 'details');
   const [lcSearch, setLcSearch] = useState('');
   const [addLcModal, setAddLcModal] = useState(false);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
@@ -545,11 +545,21 @@ export default function SuppliersPage() {
   const [search,   setSearch]   = useState('');
   const [filter,   setFilter]   = useState('all');
   const [modal,    setModal]    = useState(null);
+  const [modalTab, setModalTab] = useState(null); // pre-select tab when opening modal
   const [showBulk, setShowBulk] = useState(false);
   const qc = useQueryClient();
   const { data: suppliers=[] } = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data) });
   const { data: linecards=[] } = useQuery({ queryKey:['linecards'], queryFn:()=>api.get('/linecards').then(r=>r.data) });
   const lcName = id => linecards.find(l=>l.id===id)?.name||id;
+
+  // Build a map: supplier id → array of line card names (for search + display)
+  const supplierLcNames = React.useMemo(() => {
+    const map = {};
+    suppliers.forEach(s => {
+      map[s.id] = (s.linecards||[]).map(lid => (linecards.find(l=>l.id===lid)?.name||'').toLowerCase());
+    });
+    return map;
+  }, [suppliers, linecards]);
 
   const filtered = suppliers.filter(s => {
     if (filter!=='all'&&s.type!==filter) return false;
@@ -559,8 +569,18 @@ export default function SuppliersPage() {
            (s.contact||'').toLowerCase().includes(q) ||
            (s.supplier_no||'').toLowerCase().includes(q) ||
            (s.email||'').toLowerCase().includes(q) ||
-           (s.gstin||'').toLowerCase().includes(q);
+           (s.gstin||'').toLowerCase().includes(q) ||
+           (supplierLcNames[s.id]||[]).some(n => n.includes(q));
   }).sort((a,b)=>(b.created||b.created_at||'').localeCompare(a.created||a.created_at||''));
+
+  // Detect if the current search matched via line card name (to show lc tab hint)
+  const isLcSearch = search.trim().length > 0 && (() => {
+    const q = search.toLowerCase();
+    return linecards.some(l => l.name.toLowerCase().includes(q));
+  })();
+
+  const openModal = (s, tab = null) => { setModal(s); setModalTab(tab); };
+  const closeModal = () => { setModal(null); setModalTab(null); };
 
   return (
     <div>
@@ -568,8 +588,13 @@ export default function SuppliersPage() {
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           <div className="search-wrap">
             <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
-            <input className="search-input" placeholder="Search by name, CFSUP no., email, GSTIN…" value={search} onChange={e=>setSearch(e.target.value)}/>
+            <input className="search-input" placeholder="Search by name, supplier no., email, GSTIN, or line card…" value={search} onChange={e=>setSearch(e.target.value)}/>
           </div>
+          {isLcSearch && (
+            <span style={{fontSize:11,color:'var(--accent)',background:'var(--accent-lt)',padding:'2px 8px',borderRadius:999,whiteSpace:'nowrap'}}>
+              🏷 Line card match
+            </span>
+          )}
           {['all','domestic','international'].map(f=>(
             <span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>
               {f==='all'?'All':f==='domestic'?'🇮🇳 India':'🌐 International'}
@@ -581,7 +606,7 @@ export default function SuppliersPage() {
             <button className="btn" style={{fontSize:12}}>⬇ Download Template</button>
           </a>
           <button className="btn" onClick={()=>setShowBulk(true)} style={{fontSize:12}}>📤 Bulk Import</button>
-          <button className="btn btn-primary" onClick={()=>setModal({})}>+ Add Supplier</button>
+          <button className="btn btn-primary" onClick={()=>openModal({})}>+ Add Supplier</button>
         </div>
       </div>
 
@@ -595,7 +620,13 @@ export default function SuppliersPage() {
           </tr></thead>
           <tbody>
             {filtered.length===0&&<tr><td colSpan={11}><div className="empty-state"><div className="empty-icon">🏭</div><div>No suppliers found</div></div></td></tr>}
-            {filtered.map(s=>(
+            {filtered.map(s=>{
+              // Detect if this supplier matched via a line card search
+              const lcMatchedBySearch = isLcSearch && (() => {
+                const q = search.toLowerCase();
+                return (supplierLcNames[s.id]||[]).some(n => n.includes(q));
+              })();
+              return (
               <tr key={s.id}>
                 <td><span className="mono" style={{fontWeight:700,color:'var(--accent)',fontSize:12}}>{s.supplier_no||s.id}</span></td>
                 <td>
@@ -608,23 +639,33 @@ export default function SuppliersPage() {
                 <td className="mono" style={{fontSize:11}}>{s.gstin||s.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
                 <td style={{fontSize:12}}>{s.currency||'INR'}</td>
                 <td style={{maxWidth:180}}>
-                  {(s.linecards||[]).length > 0 
-                    ? <span className="badge badge-blue" style={{fontWeight: 600}}>{s.linecards.length}</span>
+                  {(s.linecards||[]).length > 0
+                    ? <span
+                        className="badge badge-blue"
+                        style={{fontWeight:600, cursor: lcMatchedBySearch ? 'pointer' : 'default',
+                          outline: lcMatchedBySearch ? '2px solid var(--accent)' : 'none'}}
+                        title={lcMatchedBySearch ? `Click to open Line Cards tab` : `${s.linecards.length} line card(s)`}
+                        onClick={lcMatchedBySearch ? e => { e.stopPropagation(); openModal(s,'linecards'); } : undefined}
+                      >{s.linecards.length}{lcMatchedBySearch ? ' 🏷' : ''}</span>
                     : <span className="muted">—</span>}
                 </td>
                 <td style={{fontSize:11,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.payment_terms||'—'}</td>
                 <td>{s.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
                 <td style={{fontSize:11,color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(s.created||s.created_at)}</td>
-                <td style={{textAlign:'right'}}>
-                  <button className="btn btn-xs btn-primary" onClick={()=>setModal(s)}>✏ Manage</button>
+                <td style={{textAlign:'right',display:'flex',gap:4,justifyContent:'flex-end'}}>
+                  {lcMatchedBySearch && (
+                    <button className="btn btn-xs" style={{fontSize:10}} onClick={()=>openModal(s,'linecards')} title="Open Line Cards tab">🏷 Line Cards</button>
+                  )}
+                  <button className="btn btn-xs btn-primary" onClick={()=>openModal(s)}>✏ Manage</button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
 
-      {modal!==null&&<SupplierModal supplier={Object.keys(modal).length?modal:null} linecards={linecards} onClose={()=>setModal(null)}/>}
+      {modal!==null&&<SupplierModal supplier={Object.keys(modal).length?modal:null} linecards={linecards} initialTab={modalTab} onClose={closeModal}/>}
       {showBulk&&<BulkUpload onClose={()=>setShowBulk(false)} onDone={()=>{qc.invalidateQueries(['suppliers']);setShowBulk(false);}}/>}
     </div>
   );
