@@ -2,6 +2,7 @@
 // Reusable address form — Country → State (reactive) → City (reactive)
 // Phone field: searchable country code picker
 import React, { useState, useMemo, useEffect, useRef } from 'react';
+import ReactDOM from 'react-dom';
 import { Country, State, City } from 'country-state-city';
 
 // ── All countries (loaded once) ───────────────────────────────────────────────
@@ -35,7 +36,7 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
 
   const [open, setOpen] = useState(false);
   const [codeSearch, setCodeSearch] = useState('');
-  const dropRef = useRef(null);
+  const triggerBtnRef = useRef(null);
   const searchRef = useRef(null);
 
   const visibleCodes = useMemo(
@@ -73,19 +74,6 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [excludeIndia]);
 
-  // Close dropdown on outside click
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e) => {
-      if (dropRef.current && !dropRef.current.contains(e.target)) {
-        setOpen(false);
-        setCodeSearch('');
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
-
   // Focus search input when dropdown opens
   useEffect(() => {
     if (open) setTimeout(() => searchRef.current?.focus(), 50);
@@ -107,8 +95,10 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
 
   const update = (code, n) => { setDialCode(code); setNum(n); onChange(code + ' ' + n); };
 
+  const closePhone = () => { setOpen(false); setCodeSearch(''); };
+
   return (
-    <div className="field-wrap" style={{display:'flex',gap:0,border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',overflow:'visible',background:'var(--surface)',position:'relative'}}>
+    <div className="field-wrap" style={{display:'flex',gap:0,border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',background:'var(--surface)'}}>
       {domestic ? (
         <span style={{display:'flex',alignItems:'center',padding:'6px 10px',fontSize:12,fontWeight:600,
           background:'var(--surface2)',borderRight:'1px solid var(--border-md)',whiteSpace:'nowrap',
@@ -116,66 +106,56 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
           🇮🇳 +91
         </span>
       ) : (
-        <div ref={dropRef} style={{position:'relative',flexShrink:0}}>
-          {/* Trigger button */}
+        <div style={{flexShrink:0,display:'flex'}}>
           <button
+            ref={triggerBtnRef}
             type="button"
             onClick={() => setOpen(o => !o)}
             style={{display:'flex',alignItems:'center',gap:4,padding:'6px 8px',fontSize:12,fontWeight:600,
               background:'var(--surface2)',border:'none',borderRight:'1px solid var(--border-md)',
-              cursor:'pointer',whiteSpace:'nowrap',color:'var(--text1)',height:'100%',
+              cursor:'pointer',whiteSpace:'nowrap',color:'var(--text1)',
               borderRadius:'var(--r-sm) 0 0 var(--r-sm)',minWidth:72}}>
             <span>{selectedEntry?.flag}</span>
             <span>{effectiveCode}</span>
             <span style={{fontSize:9,color:'var(--text3)',marginLeft:1}}>▾</span>
           </button>
 
-          {/* Dropdown */}
-          {open && (
-            <div style={{
-              position:'absolute',top:'calc(100% + 4px)',left:0,zIndex:999,
-              background:'var(--surface)',border:'1px solid var(--border-md)',
-              borderRadius:'var(--r-sm)',boxShadow:'0 6px 20px rgba(0,0,0,0.12)',
-              width:260,maxHeight:300,display:'flex',flexDirection:'column',overflow:'hidden',
-            }}>
-              {/* Search input */}
-              <div style={{padding:'8px 10px',borderBottom:'1px solid var(--border)'}}>
-                <input
-                  ref={searchRef}
-                  value={codeSearch}
-                  onChange={e => setCodeSearch(e.target.value)}
-                  placeholder="Type country name or code (e.g. IN, india, US)…"
-                  style={{width:'100%',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',
-                    padding:'5px 8px',fontSize:12,background:'var(--surface)',color:'var(--text1)',
-                    outline:'none',boxSizing:'border-box'}}
-                />
-              </div>
-              {/* Results list */}
-              <div style={{overflowY:'auto',flex:1}}>
-                {filteredCodes.length === 0 ? (
-                  <div style={{padding:'10px 12px',fontSize:12,color:'var(--text3)'}}>No match</div>
-                ) : filteredCodes.map(p => (
-                  <div
-                    key={p.code + p.isoCode}
-                    onClick={() => selectCode(p.code)}
-                    style={{
-                      display:'flex',alignItems:'center',gap:8,padding:'7px 12px',
-                      cursor:'pointer',fontSize:12,
-                      background: p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent',
-                      color: p.code === effectiveCode ? 'var(--accent)' : 'var(--text1)',
-                    }}
-                    onMouseEnter={e => { if (p.code !== effectiveCode) e.currentTarget.style.background = 'var(--surface2)'; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent'; }}
-                  >
-                    <span style={{fontSize:16,lineHeight:1}}>{p.flag}</span>
-                    <span style={{fontWeight:600,minWidth:40}}>{p.code}</span>
-                    <span style={{color:'var(--text2)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</span>
-                    <span style={{fontSize:10,color:'var(--text3)',fontFamily:'monospace'}}>{p.isoCode}</span>
-                  </div>
-                ))}
-              </div>
+          <PortalDropdown triggerRef={triggerBtnRef} open={open} onClose={closePhone} minWidth={260}>
+            <div style={{padding:'8px 10px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+              <input
+                ref={searchRef}
+                value={codeSearch}
+                onChange={e => setCodeSearch(e.target.value)}
+                placeholder="Type country name or code (e.g. IN, india, US)…"
+                style={{width:'100%',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',
+                  padding:'5px 8px',fontSize:12,background:'var(--surface)',color:'var(--text1)',
+                  outline:'none',boxSizing:'border-box'}}
+              />
             </div>
-          )}
+            <div style={{overflowY:'auto',flex:1}}>
+              {filteredCodes.length === 0 ? (
+                <div style={{padding:'10px 12px',fontSize:12,color:'var(--text3)'}}>No match</div>
+              ) : filteredCodes.map(p => (
+                <div
+                  key={p.code + p.isoCode}
+                  onClick={() => selectCode(p.code)}
+                  style={{
+                    display:'flex',alignItems:'center',gap:8,padding:'7px 12px',
+                    cursor:'pointer',fontSize:12,
+                    background: p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent',
+                    color: p.code === effectiveCode ? 'var(--accent)' : 'var(--text1)',
+                  }}
+                  onMouseEnter={e => { if (p.code !== effectiveCode) e.currentTarget.style.background = 'var(--surface2)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = p.code === effectiveCode ? 'var(--accent-lt)' : 'transparent'; }}
+                >
+                  <span style={{fontSize:16,lineHeight:1}}>{p.flag}</span>
+                  <span style={{fontWeight:600,minWidth:40}}>{p.code}</span>
+                  <span style={{color:'var(--text2)',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</span>
+                  <span style={{fontSize:10,color:'var(--text3)',fontFamily:'monospace'}}>{p.isoCode}</span>
+                </div>
+              ))}
+            </div>
+          </PortalDropdown>
         </div>
       )}
       <input
@@ -189,48 +169,203 @@ export function PhoneField({ value, onChange, domestic, excludeIndia }) {
   );
 }
 
-// ── Country Select ─────────────────────────────────────────────────────────────
-export function CountrySelect({ value, onChange, style, className }) {
-  return (
-    <select className={className || 'input'} value={value || ''} onChange={e => onChange(e.target.value)} style={style}>
-      <option value="">— Select Country —</option>
-      {ALL_COUNTRIES.map(c => (
-        <option key={c.isoCode} value={c.name}>{c.flag} {c.name}</option>
-      ))}
-    </select>
+// ── Portal dropdown — renders into document.body to escape overflow:hidden parents ──
+function PortalDropdown({ triggerRef, open, onClose, children, minWidth }) {
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const dropH = 300;
+    const top = spaceBelow < dropH + 8 ? rect.top - dropH - 4 : rect.bottom + 4;
+    setPos({ top: top + window.scrollY, left: rect.left + window.scrollX, width: rect.width });
+  }, [open, triggerRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (triggerRef.current && triggerRef.current.contains(e.target)) return;
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      onClose();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open, onClose, triggerRef]);
+
+  if (!open) return null;
+  return ReactDOM.createPortal(
+    <div ref={panelRef} style={{
+      position:'absolute', top: pos.top, left: pos.left,
+      width: Math.max(pos.width, minWidth || 240),
+      zIndex: 99999,
+      background:'var(--surface)', border:'1px solid var(--border-md)',
+      borderRadius:'var(--r-sm)', boxShadow:'0 6px 24px rgba(0,0,0,0.15)',
+      maxHeight: 300, display:'flex', flexDirection:'column', overflow:'hidden',
+    }}>
+      {children}
+    </div>,
+    document.body
   );
 }
 
-// ── State Select — disabled until country chosen; dropdown only ───────────────
+// ── Shared searchable dropdown shell ─────────────────────────────────────────
+function SearchDropdown({ triggerLabel, placeholder, items, value, onSelect, disabled, disabledText, style, allowManual, manualValue, onManualChange }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState('');
+  const triggerRef = useRef(null);
+  const searchRef = useRef(null);
+
+  const close = () => { setOpen(false); setQ(''); };
+
+  const filtered = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return items;
+    return items.filter(item => item.label.toLowerCase().includes(query));
+  }, [q, items]);
+
+  useEffect(() => {
+    if (open) setTimeout(() => searchRef.current?.focus(), 50);
+  }, [open]);
+
+  if (disabled) {
+    return (
+      <div className="input" style={{opacity:0.45,cursor:'not-allowed',display:'flex',alignItems:'center',
+        fontSize:13,color:'var(--text3)',...(style||{})}}>
+        {disabledText}
+      </div>
+    );
+  }
+
+  // No items in list → free text input
+  if (!items.length) {
+    return (
+      <input className="input" value={manualValue ?? value ?? ''} onChange={e => onManualChange ? onManualChange(e.target.value) : onSelect(e.target.value)}
+        placeholder={placeholder} style={style} />
+    );
+  }
+
+  const select = (v) => { onSelect(v); close(); };
+
+  return (
+    <div style={{position:'relative', ...(style||{})}}>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="input"
+        style={{display:'flex',alignItems:'center',gap:6,width:'100%',textAlign:'left',
+          cursor:'pointer',justifyContent:'space-between',padding:'6px 10px'}}>
+        <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:13,
+          color: value ? 'var(--text1)' : 'var(--text3)'}}>
+          {triggerLabel || <span style={{color:'var(--text3)'}}>{placeholder.split('(')[0].trim()}</span>}
+        </span>
+        <span style={{fontSize:9,color:'var(--text3)',flexShrink:0}}>▾</span>
+      </button>
+
+      <PortalDropdown triggerRef={triggerRef} open={open} onClose={close}>
+        <div style={{padding:'8px 10px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+          <input
+            ref={searchRef}
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder={placeholder}
+            style={{width:'100%',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',
+              padding:'5px 8px',fontSize:12,background:'var(--surface)',color:'var(--text1)',
+              outline:'none',boxSizing:'border-box'}}
+          />
+        </div>
+        <div style={{overflowY:'auto',flex:1}}>
+          {allowManual && (
+            <div style={{padding:'6px 10px',borderBottom:'1px solid var(--border)'}}>
+              <input
+                value={manualValue ?? ''}
+                onChange={e => { onManualChange(e.target.value); }}
+                onKeyDown={e => { if (e.key === 'Enter' && manualValue) { select(manualValue); } }}
+                placeholder="Or type manually and press Enter…"
+                style={{width:'100%',border:'1px solid var(--border-md)',borderRadius:'var(--r-sm)',
+                  padding:'4px 8px',fontSize:12,background:'var(--surface)',color:'var(--text1)',
+                  outline:'none',boxSizing:'border-box'}}
+              />
+            </div>
+          )}
+          {filtered.length === 0
+            ? <div style={{padding:'10px 12px',fontSize:12,color:'var(--text3)'}}>No match</div>
+            : filtered.map(item => (
+              <div
+                key={item.key}
+                onClick={() => select(item.value)}
+                style={{
+                  display:'flex',alignItems:'center',gap:8,padding:'7px 12px',
+                  cursor:'pointer',fontSize:12,
+                  background: item.value === value ? 'var(--accent-lt)' : 'transparent',
+                  color: item.value === value ? 'var(--accent)' : 'var(--text1)',
+                }}
+                onMouseEnter={e => { if (item.value !== value) e.currentTarget.style.background = 'var(--surface2)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = item.value === value ? 'var(--accent-lt)' : 'transparent'; }}
+              >
+                {item.prefix && <span style={{fontSize:16,lineHeight:1,flexShrink:0}}>{item.prefix}</span>}
+                <span style={{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item.label}</span>
+                {item.suffix && <span style={{fontSize:10,color:'var(--text3)',fontFamily:'monospace',flexShrink:0}}>{item.suffix}</span>}
+              </div>
+            ))
+          }
+        </div>
+      </PortalDropdown>
+    </div>
+  );
+}
+
+// ── Country Select ─────────────────────────────────────────────────────────────
+export function CountrySelect({ value, onChange, style, className }) {
+  const selected = ALL_COUNTRIES.find(c => c.name === value);
+  const items = useMemo(() => ALL_COUNTRIES.map(c => ({
+    key: c.isoCode, value: c.name, label: c.name, prefix: c.flag, suffix: c.isoCode,
+  })), []);
+
+  const triggerLabel = selected
+    ? <span style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:16}}>{selected.flag}</span><span>{selected.name}</span><span style={{fontSize:10,color:'var(--text3)',fontFamily:'monospace'}}>{selected.isoCode}</span></span>
+    : null;
+
+  return (
+    <SearchDropdown
+      triggerLabel={triggerLabel}
+      placeholder="Type country name or code (e.g. IN, india, US)…"
+      items={items}
+      value={value}
+      onSelect={onChange}
+      style={style}
+    />
+  );
+}
+
+// ── State Select ──────────────────────────────────────────────────────────────
 export function StateSelect({ country, value, onChange, style }) {
   const states = useMemo(() => {
     const co = ALL_COUNTRIES.find(c => c.name === country);
     return co ? State.getStatesOfCountry(co.isoCode) : [];
   }, [country]);
 
-  if (!country) {
-    return (
-      <select className="input" disabled style={{...(style||{}),opacity:0.45}}>
-        <option>— Select Country First —</option>
-      </select>
-    );
-  }
-  // Country chosen but package has no states (edge case) — allow text input
-  if (!states.length) {
-    return (
-      <input className="input" value={value || ''} onChange={e => onChange(e.target.value)}
-        placeholder="State / Province" style={style} />
-    );
-  }
+  const items = useMemo(() => states.map(s => ({
+    key: s.isoCode, value: s.name, label: s.name, suffix: s.isoCode,
+  })), [states]);
+
   return (
-    <select className="input" value={value || ''} onChange={e => onChange(e.target.value)} style={style}>
-      <option value="">— Select State —</option>
-      {states.map(s => <option key={s.isoCode} value={s.name}>{s.name}</option>)}
-    </select>
+    <SearchDropdown
+      triggerLabel={value || null}
+      placeholder="Type state / province name…"
+      items={items}
+      value={value}
+      onSelect={onChange}
+      disabled={!country}
+      disabledText="— Select Country First —"
+      style={style}
+    />
   );
 }
 
-// ── City Select — disabled until state chosen; "Other" reveals text input ─────
+// ── City Select ───────────────────────────────────────────────────────────────
 export function CitySelect({ country, state, value, onChange, style }) {
   const cities = useMemo(() => {
     const co = ALL_COUNTRIES.find(c => c.name === country);
@@ -240,59 +375,31 @@ export function CitySelect({ country, state, value, onChange, style }) {
     return City.getCitiesOfState(co.isoCode, st.isoCode);
   }, [country, state]);
 
-  // showOther: true when user explicitly picks "Other" or current value isn’t in the list
-  const valueInList = cities.some(c => c.name === value);
-  const [showOther, setShowOther] = useState(() => !!value && cities.length > 0 && !valueInList);
+  const [manual, setManual] = useState('');
 
-  // Reset showOther when state/country changes (cities list changes)
-  const prevCitiesKey = React.useRef(country + '|' + state);
+  // Reset manual when state/country changes
+  const prevKey = useRef(country + '|' + state);
   const newKey = country + '|' + state;
-  if (prevCitiesKey.current !== newKey) {
-    prevCitiesKey.current = newKey;
-    // eslint-disable-next-line no-unused-expressions
-    showOther && setShowOther(false);
-  }
+  if (prevKey.current !== newKey) { prevKey.current = newKey; }
 
-  if (!state) {
-    return (
-      <select className="input" disabled style={{...(style||{}),opacity:0.45}}>
-        <option>— Select State First —</option>
-      </select>
-    );
-  }
-  // State chosen but package has no cities — allow text input directly
-  if (!cities.length) {
-    return (
-      <input className="input" value={value || ''} onChange={e => onChange(e.target.value)}
-        placeholder="City" style={style} />
-    );
-  }
+  const items = useMemo(() => cities.map(c => ({
+    key: c.name + c.stateCode, value: c.name, label: c.name,
+  })), [cities]);
+
   return (
-    <div>
-      <select className="input"
-        value={showOther ? '__other__' : (valueInList ? value : '')}
-        onChange={e => {
-          if (e.target.value === '__other__') {
-            setShowOther(true);
-            onChange('');
-          } else {
-            setShowOther(false);
-            onChange(e.target.value);
-          }
-        }}
-        style={style}>
-        <option value="">— Select City —</option>
-        {cities.map(c => <option key={c.name + c.stateCode} value={c.name}>{c.name}</option>)}
-        <option value="__other__">＋ Other (enter manually)</option>
-      </select>
-      {showOther && (
-        <input className="input" value={value || ''}
-          onChange={e => onChange(e.target.value)}
-          placeholder="Enter city name"
-          autoFocus
-          style={{marginTop:6, ...(style||{})}} />
-      )}
-    </div>
+    <SearchDropdown
+      triggerLabel={value || null}
+      placeholder="Type city name…"
+      items={items}
+      value={value}
+      onSelect={onChange}
+      disabled={!state}
+      disabledText="— Select State First —"
+      style={style}
+      allowManual={cities.length > 0}
+      manualValue={manual}
+      onManualChange={(v) => { setManual(v); onChange(v); }}
+    />
   );
 }
 
