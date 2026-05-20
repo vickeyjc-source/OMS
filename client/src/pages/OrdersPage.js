@@ -8,7 +8,7 @@ import { printDoc, generateOrderPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
-const LINE_STATUS_BADGE = { negotiating:'badge-purple', procurement:'badge-blue', payment:'badge-amber', shipped:'badge-teal', delivered:'badge-green' };
+const LINE_STATUS_BADGE = { negotiating:'badge-green', confirmed:'badge-green', procurement:'badge-blue', payment:'badge-amber', shipped:'badge-teal', delivered:'badge-green' };
 
 const PAYMENT_TERMS_GROUPS = [
   { group:'Advance Payment', terms:['Advance Payment (AP) – Full payment before shipment','Partial Advance – 30% upfront, 70% on delivery','Partial Advance – 50% upfront, 50% on delivery','Cash in Advance (CIA) – 100% before dispatch','Cash Before Shipment (CBS) – Payment before goods ship','Cash on Delivery (COD)','Cash Against Delivery (CAD)'] },
@@ -30,7 +30,7 @@ const isPartialAdvance = t => t && t.toLowerCase().includes('partial advance');
 
 const PAYMENT_METHODS = ['Bank Transfer','Cash','Bank Remittance','NEFT / RTGS','SWIFT / Wire Transfer','UPI','Cheque'];
 const BALANCE_TIMINGS = ['On Delivery','Before Delivery','Post Delivery','After 7 Days of Delivery','After 15 Days of Delivery','After 30 Days of Delivery','Against Documents','On Acceptance'];
-const LINE_STATUS_LABEL = { negotiating:'Negotiating', procurement:'Procurement', payment:'Payment', shipped:'Shipped', delivered:'Delivered' };
+const LINE_STATUS_LABEL = { negotiating:'Confirmed', confirmed:'Confirmed', procurement:'Procurement', payment:'Payment', shipped:'Shipped', delivered:'Delivered' };
 const LineStatusBadge = ({ s }) => <span className={`badge ${LINE_STATUS_BADGE[s]||'badge-gray'}`}>{LINE_STATUS_LABEL[s]||s}</span>;
 
 function ShipperSelect({ value, onChange, shippers }) {
@@ -555,23 +555,56 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
 
 
           {/* Stored files */}
-          {orderFiles.length > 0 && (
-            <div className="card card-sm">
-              <div className="card-title"><span>📎 Stored Files</span></div>
-              <div style={{display:'flex',flexDirection:'column',gap:6}}>
-                {orderFiles.map(f => (
-                  <div key={f.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
-                    <span style={{fontSize:14}}>📄</span>
-                    <div style={{flex:1,minWidth:0}}>
-                      <div style={{fontSize:12,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{f.original_name}</div>
-                      <div style={{fontSize:10,color:'var(--text3)'}}>{f.field_name || 'file'} · {f.size_bytes ? (Number(f.size_bytes)/1024).toFixed(1)+' KB' : '—'}</div>
-                    </div>
-                    <a className="btn btn-xs" href={f.download_url} target="_blank" rel="noreferrer">Download</a>
+          <div className="card card-sm">
+            <div className="card-title"><span>📎 Stored Files</span></div>
+            <div style={{display:'flex',flexDirection:'column',gap:6}}>
+              {orderFiles.map(f => (
+                <div key={f.id} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                  <span style={{fontSize:14}}>📄</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:700,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{f.original_name}</div>
+                    <div style={{fontSize:10,color:'var(--text3)'}}>{f.field_name || 'file'} · {f.size_bytes ? (Number(f.size_bytes)/1024).toFixed(1)+' KB' : '—'}</div>
                   </div>
-                ))}
+                  <a className="btn btn-xs" href={f.download_url} target="_blank" rel="noreferrer">Download</a>
+                  <button className="btn btn-xs" style={{color:'var(--red)',borderColor:'var(--red)',fontWeight:600}}
+                    onClick={async()=>{
+                      if (!window.confirm(`Delete "${f.original_name}"?`)) return;
+                      try {
+                        await api.delete('/files/' + f.id);
+                        qc.invalidateQueries(['files','order',order.id]);
+                        toast.success('File deleted');
+                      } catch(e) { toast.error(e.response?.data?.error||'Delete failed'); }
+                    }}>🗑 Delete</button>
+                </div>
+              ))}
+              {orderFiles.length === 0 && <div style={{fontSize:12,color:'var(--text3)',padding:'6px 0'}}>No files uploaded yet.</div>}
+              {/* Upload new file */}
+              <div style={{marginTop:6}}>
+                <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:12,
+                  padding:'6px 12px',borderRadius:'var(--r-sm)',border:'1.5px dashed var(--border)',
+                  background:'var(--surface)',color:'var(--text2)',fontWeight:500}}>
+                  <span>📤 Upload File</span>
+                  <input type="file" style={{display:'none'}}
+                    onChange={async e => {
+                      const file = e.target.files[0]; if (!file) return;
+                      const duplicate = orderFiles.find(f => f.original_name === file.name);
+                      if (duplicate) { toast.error(`A file named "${file.name}" already exists. Rename it before uploading.`); e.target.value=''; return; }
+                      const formData = new FormData();
+                      formData.append('file', file);
+                      formData.append('entity_type', 'order');
+                      formData.append('entity_id', order.id);
+                      formData.append('field_name', 'po_file');
+                      try {
+                        await api.post('/files', formData, { headers:{'Content-Type':'multipart/form-data'}, timeout:120000 });
+                        qc.invalidateQueries(['files','order',order.id]);
+                        toast.success('File uploaded');
+                      } catch(err) { toast.error(err.response?.data?.error||'Upload failed'); }
+                      e.target.value = '';
+                    }}/>
+                </label>
               </div>
             </div>
-          )}
+          </div>
 
                     {/* History */}
           <div className="card card-sm">
@@ -712,7 +745,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
 
 function EditLineItems({ order, suppliers, canSeeProcPrice, onSave, onCancel }) {
   const [items, setItems] = useState(order.lineItems?.map(li=>({...li}))||[]);
-  const add = () => setItems(p=>[...p,{id:'new_'+Date.now(),component:'',manufacturer:'',ipn:'',qty:0,unit_price:0,procurement_price:0,currency:'INR',order_date:'',delivery_date:'',supplier_id:'',line_status:'negotiating'}]);
+  const add = () => setItems(p=>[...p,{id:'new_'+Date.now(),component:'',manufacturer:'',ipn:'',qty:0,unit_price:0,procurement_price:0,currency:'INR',order_date:'',delivery_date:'',supplier_id:'',line_status:'confirmed'}]);
   const rm  = idx => setItems(p=>p.filter((_,i)=>i!==idx));
   const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
   return (
@@ -807,7 +840,7 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh, vie
   const setF = (k,v) => setForm(f=>({...f,[k]:v}));
 
   const [items, setItems] = useState(order.lineItems?.map(li=>({...li}))||[]);
-  const addItem    = () => setItems(p=>[...p,{id:'new_'+Date.now(),component:'',manufacturer:'',ipn:'',qty:0,unit_price:0,procurement_price:0,currency:'INR',order_date:'',delivery_date:'',supplier_id:'',line_status:'negotiating'}]);
+  const addItem    = () => setItems(p=>[...p,{id:'new_'+Date.now(),component:'',manufacturer:'',ipn:'',qty:0,unit_price:0,procurement_price:0,currency:'INR',order_date:'',delivery_date:'',supplier_id:'',line_status:'confirmed'}]);
   const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
   const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
 
@@ -839,7 +872,7 @@ function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh, vie
     { key:'currency',         label:'Cur.',           flex:'0.6 1 56px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.currency||'INR'}</span>:<select className="input" value={li.currency||'INR'} onChange={e=>upd(idx,'currency',e.target.value)}>{['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}</select> },
     { key:'delivery_date',    label:'Del. Date',      flex:'1 1 100px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.delivery_date||'—'}</span>:<input className="input" type="date" value={li.delivery_date||''} onChange={e=>upd(idx,'delivery_date',e.target.value)}/> },
     { key:'supplier_id',      label:'Supplier',       flex:'1.5 1 110px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{suppliers.find(s=>String(s.id)===String(li.supplier_id))?.name||'—'}</span>:<select className="input" value={li.supplier_id||''} onChange={e=>upd(idx,'supplier_id',e.target.value)}><option value="">— Select —</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select> },
-    { key:'line_status',      label:'Status',         flex:'1 1 88px', render:(li,idx)=>viewOnly?<LineStatusBadge s={li.line_status||'negotiating'}/>:<select className="input" value={li.line_status||'negotiating'} onChange={e=>upd(idx,'line_status',e.target.value)}>{[{v:'negotiating',l:'Negotiating'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}</select> },
+    { key:'line_status',      label:'Status',         flex:'1 1 88px', render:(li,idx)=>viewOnly?<LineStatusBadge s={li.line_status||'confirmed'}/>:<select className="input" value={li.line_status||'confirmed'} onChange={e=>upd(idx,'line_status',e.target.value)}>{[{v:'confirmed',l:'Confirmed'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}</select> },
   ];
 
   return (
@@ -918,6 +951,17 @@ export default function OrdersPage() {
   const [filter, setFilter]     = useState('all');
   const [selected, setSelected] = useState(null);
   const [managing, setManaging] = useState(null);
+  const [seenOrders, setSeenOrders] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('seen_orders')||'[]')); } catch(_) { return new Set(); }
+  });
+  const markOrderSeen = (id) => {
+    setSeenOrders(prev => {
+      const next = new Set(prev); next.add(id);
+      localStorage.setItem('seen_orders', JSON.stringify([...next]));
+      window.dispatchEvent(new Event('seen-updated'));
+      return next;
+    });
+  };
   const [expanded, setExpanded] = useState({});       // order id → bool
   const [sortCol,  setSortCol]  = useState('created_at');
   const [sortDir,  setSortDir]  = useState('desc');
@@ -1000,7 +1044,14 @@ export default function OrdersPage() {
     }
     if (dateFrom) list = list.filter(o=>(o.created_at||'')>=dateFrom);
     if (dateTo)   list = list.filter(o=>(o.created_at||'')<=dateTo+'T23:59');
+    const isOpen = s => ['open','draft'].includes(s);
     list.sort((a,b)=>{
+      // open/draft always first unless user is sorting by status
+      if (sortCol !== 'status') {
+        const ap = isOpen(a.status) ? 0 : 1;
+        const bp = isOpen(b.status) ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+      }
       let av='', bv='';
       if (sortCol==='id')           { av=a.id; bv=b.id; }
       else if (sortCol==='enquiry') { av=a.enquiry_no||''; bv=b.enquiry_no||''; }
@@ -1116,13 +1167,13 @@ export default function OrdersPage() {
               const isOpen  = !!expanded[o.id];
               const delayed = isDelayed(o);
               const multiItem = items.length > 1;
-              // First item (or summary) shown in collapsed row
               const firstItem = items[0];
+              const isUnseen = ['open','draft'].includes(o.status) && !seenOrders.has(o.id);
 
               return (
                 <React.Fragment key={o.id}>
                   {/* ── Main row ── */}
-                  <tr style={{background: isOpen?'var(--accent-lt)':undefined}}>
+                  <tr style={{background: isOpen?'var(--accent-lt)':isUnseen?'#f0f7ff':undefined}}>
                     {/* Expand toggle */}
                     <td style={{textAlign:'center',padding:'4px 6px'}}>
                       {multiItem && (
@@ -1239,11 +1290,11 @@ export default function OrdersPage() {
                         )}
                         <button className="btn btn-xs"
                           style={{background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}
-                          onClick={()=>setManaging(o)}>
+                          onClick={()=>{setManaging(o);markOrderSeen(o.id);}}>
                           👁 View
                         </button>
                         <button className="btn btn-xs btn-primary"
-                          onClick={()=>setSelected(o)}>
+                          onClick={()=>{setSelected(o);markOrderSeen(o.id);}}>
                         ✏ Manage
                         </button>
                       </div>

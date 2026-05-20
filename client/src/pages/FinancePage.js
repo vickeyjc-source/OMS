@@ -66,7 +66,7 @@ function generatePIHtml(order, customer, settings) {
   const coBankIFSC = (settings||{}).bank_ifsc       || 'IDFB0080174';
   const coBankSwift= (settings||{}).bank_swift      || '';
   const custName  = customer?.name || '—';
-  const custAddr  = [customer?.billing_street1, customer?.billing_street2, customer?.billing_city, customer?.billing_state].filter(Boolean).join(', ') || '—';
+  const custAddr  = [customer?.billing_attention, customer?.billing_street1, customer?.billing_street2].filter(Boolean).join(', ') || '—';
   const custGstin = customer?.gstin || '—';
   const custPhone = customer?.mobile || customer?.phone || '—';
   const total     = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
@@ -90,7 +90,7 @@ function generatePIHtml(order, customer, settings) {
     </tr>`;
   }).join('');
 
-  const custAddr2 = [customer?.billing_city, customer?.billing_state, customer?.billing_country].filter(Boolean).join(', ') || '';
+  const custAddr2 = [customer?.billing_city, customer?.billing_state, customer?.billing_pincode, customer?.billing_country].filter(Boolean).join(', ') || '';
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Proforma Invoice — ${piNo}</title>
   <style>
@@ -476,9 +476,12 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
 function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const qc = useQueryClient();
   const { user } = useAuth();
+  const netAmount = type === 'supplier-net'
+    ? String(Math.max(0, (parseFloat(item.confirmed_price)||0) - (parseFloat(item.net_total_paid)||0)) || item.confirmed_price || '')
+    : '';
   const [form, setForm] = useState({
-    amount: type === 'customer' ? String(item.balance_due||item.order_total||'') : String(item.amount||''),
-    currency: type === 'customer' ? 'INR' : (item.currency||'INR'),
+    amount: type === 'customer' ? String(item.balance_due||item.order_total||'') : type === 'supplier-net' ? netAmount : String(item.amount||''),
+    currency: type === 'customer' ? 'INR' : (item.confirmed_currency||item.currency||'INR'),
     payment_method: '', payment_ref: '', payment_date: today(), notes: '',
     customer_po_no: type === 'customer' ? (item.po_number || '') : '',
     zoho_po_number: item.zoho_po_number || '',
@@ -492,7 +495,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
       ? api.post('/finance/customer-pay/'+item.id, d)
       : type === 'supplier-advance'
         ? api.put('/finance/supplier-pay/'+item.id, d)
-        : api.put('/finance/supplier-net-pay/'+item.supplier_order_id||item.id, d),
+        : api.put('/finance/supplier-net-pay/'+(item.supplier_order_id||item.id), d),
     onSuccess: () => {
       qc.invalidateQueries(['finance-customer']);
       qc.invalidateQueries(['finance-supplier']);
@@ -578,8 +581,15 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Amount <span className="req">*</span></label>
-              <input className="input" type="number" step="0.01" value={form.amount}
-                onChange={e=>set('amount',e.target.value)} placeholder="0.00"/>
+              {type === 'supplier-net' ? (
+                <div style={{padding:'8px 12px',borderRadius:'var(--r-sm)',background:'var(--surface2)',
+                  border:'1px solid var(--border)',fontSize:13,fontFamily:'DM Mono,monospace',fontWeight:700}}>
+                  {fmtM(parseFloat(form.amount)||0, form.currency)}
+                </div>
+              ) : (
+                <input className="input" type="number" step="0.01" value={form.amount}
+                  onChange={e=>set('amount',e.target.value)} placeholder="0.00"/>
+              )}
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Currency</label>
@@ -1066,7 +1076,7 @@ export default function FinancePage() {
     { k:'cust-advance', l:`🧾 Customer Advance (${custAdvance.length})` },
     { k:'cust-net',     l:`📅 Customer Net/Other (${custNet.length + custOther.length})` },
     { k:'sup-advance',  l:`💸 Supplier Advance (${supAdvance.length})` },
-    { k:'sup-net',      l:`📅 Supplier Net (${supNet.length})` },
+    { k:'sup-net',      l:`📅 Supplier Net (${supNet.filter(r=>r.status!=='paid').length})` },
     { k:'po-requests',  l:`📋 PO Requests (${pendingPORequests.length})` },
     { k:'history',      l:'✅ History' },
   ];
@@ -1403,7 +1413,7 @@ export default function FinancePage() {
             Supplier POs on net payment terms — track due dates and record settlements.
           </div>
           {supLoading ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>Loading…</div> :
-          filterSup(supNet).length === 0 ? (
+          filterSup(supNet.filter(r=>r.status!=='paid')).length === 0 ? (
             <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
               <div style={{fontSize:32,marginBottom:8}}>✅</div>No net-term supplier payments pending
             </div>
@@ -1411,15 +1421,22 @@ export default function FinancePage() {
             <table className="table">
               <thead><tr>
                 <th>PO No.</th><th>Supplier</th><th>Order</th><th>Terms</th>
-                <th style={{textAlign:'right'}}>Amount</th>
+                <th style={{textAlign:'right'}}>Total Amount</th>
+                <th style={{textAlign:'right'}}>Paid</th>
+                <th style={{textAlign:'right'}}>Balance</th>
                 <th>Due Date</th><th>Status</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
-                {filterSup(supNet).map(r=>{
+                {filterSup(supNet.filter(r=>r.status!=='paid')).map(r=>{
                   const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                   const daysLeft = r.payment_due_date ? daysDiff(r.payment_due_date) : null;
+                  const isPaid = r.status === 'paid';
+                  const isPartial = r.status === 'partial_paid';
+                  const total   = parseFloat(r.confirmed_price)||0;
+                  const paid    = parseFloat(r.net_total_paid)||0;
+                  const balance = Math.max(0, total - paid);
                   return (
-                    <tr key={r.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.id}</span></td>
                       <td style={{fontWeight:500}}>
                         {displayName}
@@ -1428,7 +1445,14 @@ export default function FinancePage() {
                       <td><span className="mono" style={{fontSize:11}}>{r.order_id}</span></td>
                       <td><TermsBadge terms={r.payment_terms||('Net '+r.payment_net_days)}/></td>
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>
-                        {fmtM(r.confirmed_price, r.confirmed_currency)}
+                        {fmtM(total, r.confirmed_currency)}
+                      </td>
+                      <td style={{textAlign:'right',fontFamily:'monospace',color:paid>0?'var(--green)':'var(--text3)'}}>
+                        {paid > 0 ? fmtM(paid, r.confirmed_currency) : '—'}
+                      </td>
+                      <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
+                        color:balance>0?'var(--amber,#d97706)':'var(--green)'}}>
+                        {balance > 0 ? fmtM(balance, r.confirmed_currency) : '✓ Nil'}
                       </td>
                       <td>
                         {r.payment_due_date ? (
@@ -1440,17 +1464,18 @@ export default function FinancePage() {
                       </td>
                       <td>
                         <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,
-                          background:r.status==='paid'?'var(--green-lt)':'var(--surface2)',
-                          color:r.status==='paid'?'var(--green)':'var(--text3)',fontWeight:600}}>
-                          {r.status||'pending'}
+                          background:isPartial?'var(--amber-lt,#fffbeb)':'var(--surface2)',
+                          color:isPartial?'var(--amber,#d97706)':'var(--text3)',fontWeight:600,
+                          border:isPartial?'1px solid var(--amber,#d97706)33':undefined}}>
+                          {isPartial ? 'partial paid' : (r.status||'pending')}
                         </span>
                       </td>
                       <td style={{textAlign:'right'}}>
-                        {r.status !== 'paid' && (
-                          <button className="btn btn-xs btn-primary"
-                            onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
-                            style={{fontSize:11}}>💸 Record Settlement</button>
-                        )}
+                        <button className="btn btn-xs btn-primary"
+                          onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
+                          style={{fontSize:11}}>
+                          {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
+                        </button>
                       </td>
                     </tr>
                   );
@@ -1528,20 +1553,43 @@ export default function FinancePage() {
                       border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
                       onClick={()=>setHistoryDetail({ type:'supplier', item:p })}>
                       {(() => {
-                        const displayAmount = p.paid_amount ?? p.amount ?? p.confirmed_price ?? 0;
-                        const displayCurrency = p.confirmed_currency || p.currency || 'INR';
-                        return (
-                      <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-                        <span className="mono" style={{fontWeight:700,color:'var(--teal,#0d9488)'}}>{p.internal_po_no||p.supplier_order_id}</span>
-                        <span style={{fontWeight:800,color:'var(--green)'}}>{fmtM(displayAmount, displayCurrency)}</span>
-                      </div>
-                        );
+                        const cur       = p.confirmed_currency || p.currency || 'INR';
+                        const thisAmt   = parseFloat(p.amount) || 0;
+                        const grandTotal= parseFloat(p.grand_total) || 0;
+                        const remaining = parseFloat(p.remaining_snapshot) ?? Math.max(0, grandTotal - thisAmt);
+                        const isPartial = p.payment_kind === 'net' && remaining > 0;
+                        return (<>
+                          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                            <span className="mono" style={{fontWeight:700,color:'var(--teal,#0d9488)'}}>{p.internal_po_no||p.supplier_order_id}</span>
+                            <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                              {isPartial
+                                ? <span style={{fontSize:10,padding:'1px 7px',borderRadius:99,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700}}>partial</span>
+                                : p.payment_kind==='net' && <span style={{fontSize:10,padding:'1px 7px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:700}}>settled</span>
+                              }
+                              <span style={{fontWeight:800,color:'var(--green)',fontSize:14}}>{fmtM(thisAmt, cur)}</span>
+                            </div>
+                          </div>
+                          {p.supplier_name && <div style={{fontWeight:600,color:'var(--text2)',marginBottom:2}}>{p.supplier_name}</div>}
+                          <div style={{color:'var(--text2)'}}>Ref: {p.payment_ref||'—'} · {fmtDate(p.paid_at||p.payment_date)}</div>
+                          {p.payment_kind === 'net' && grandTotal > 0 && (
+                            <div style={{marginTop:6,padding:'5px 8px',borderRadius:4,
+                              background: remaining > 0 ? 'var(--amber-lt,#fffbeb)' : 'var(--green-lt)',
+                              display:'flex',gap:16,flexWrap:'wrap'}}>
+                              <span style={{fontSize:11,color:'var(--text2)'}}>
+                                Total due: <strong>{fmtM(grandTotal, cur)}</strong>
+                              </span>
+                              <span style={{fontSize:11,color:'var(--green)',fontWeight:700}}>
+                                Paid: {fmtM(parseFloat(p.total_paid_snapshot)||thisAmt, cur)}
+                              </span>
+                              {remaining > 0
+                                ? <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:700}}>Still needed: {fmtM(remaining, cur)}</span>
+                                : <span style={{fontSize:11,color:'var(--green)',fontWeight:700}}>✓ Fully settled</span>
+                              }
+                            </div>
+                          )}
+                          {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>PI: {p.supplier_ref}{p.zoho_po_number ? ` · Zoho: ${p.zoho_po_number}` : ''}</div>}
+                        </>);
                       })()}
-                      <div style={{color:'var(--text2)'}}>
-                        Ref: {p.payment_ref||'—'} · {fmtDate(p.paid_at)}
-                      </div>
-                      {p.po_no && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>PO: {p.po_no}</div>}
-                      {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Supplier Ref: {p.supplier_ref}</div>}
                     </div>
                   ))}
                 </div>

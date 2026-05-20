@@ -100,6 +100,34 @@ function cur(n, c) {
 }
 function today() { return new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }); }
 
+function buildCustAddr(c) {
+  if (!c) return '—';
+  const parts = [
+    c.billing_attention,
+    c.billing_street1,
+    c.billing_street2,
+    c.billing_city,
+    c.billing_state,
+    c.billing_pincode,
+    c.billing_country,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : (c.city ? [c.city, c.state, c.country].filter(Boolean).join(', ') : '—');
+}
+
+function buildSupAddr(s) {
+  if (!s) return '—';
+  const parts = [
+    s.billing_attention,
+    s.billing_street1,
+    s.billing_street2,
+    s.billing_city || s.city,
+    s.billing_state || s.state,
+    s.billing_pincode,
+    s.billing_country || s.country,
+  ].filter(Boolean);
+  return parts.length ? parts.join(', ') : '—';
+}
+
 // ─── 1. ORDER SUMMARY PDF ────────────────────────────────────────────────────
 export function generateOrderPDF(order, customer) {
   const items = order.lineItems || [];
@@ -118,7 +146,7 @@ export function generateOrderPDF(order, customer) {
     </tr>`;
   }).join('');
 
-  const custAddr = customer ? [customer.billing_street1, customer.billing_street2, customer.billing_city, customer.billing_state, customer.billing_country].filter(Boolean).join(', ') : '—';
+  const custAddr = buildCustAddr(customer);
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Order Summary — ${order.id}</title>
   <style>${PDF_CSS}</style></head><body>
@@ -145,11 +173,11 @@ export function generateOrderPDF(order, customer) {
       <td style="width:50%;border:none;padding:0 0 0 8px;vertical-align:top">
         <div class="section-title">CUSTOMER</div>
         <table style="margin-top:0">
-          <tr><td class="label" style="width:40%">Name</td><td>${customer?.name || order.customer_id}</td></tr>
+          <tr><td class="label" style="width:40%">Name</td><td style="font-weight:700">${customer?.name || order.customer_id}</td></tr>
           <tr><td class="label">GSTIN</td><td>${customer?.gstin || '—'}</td></tr>
           <tr><td class="label">Phone</td><td>${customer?.mobile || customer?.phone || '—'}</td></tr>
           <tr><td class="label">Email</td><td>${customer?.email || '—'}</td></tr>
-          <tr><td class="label">Address</td><td>${custAddr}</td></tr>
+          <tr><td class="label">Billing Address</td><td>${custAddr}</td></tr>
           <tr><td class="label">Delivery To</td><td>${order.delivery_address || custAddr || '—'}</td></tr>
         </table>
       </td>
@@ -239,10 +267,11 @@ export function generateEnquiryPDF(enq, customer) {
       <td style="width:50%;border:none;padding:0 0 0 8px;vertical-align:top">
         <div class="section-title">CUSTOMER</div>
         <table style="margin-top:0">
-          <tr><td class="label" style="width:40%">Name</td><td>${customer?.name || enq.customer_id}</td></tr>
+          <tr><td class="label" style="width:40%">Name</td><td style="font-weight:700">${customer?.name || enq.customer_id}</td></tr>
           <tr><td class="label">GSTIN</td><td>${customer?.gstin || '—'}</td></tr>
           <tr><td class="label">Phone</td><td>${customer?.mobile || customer?.phone || '—'}</td></tr>
           <tr><td class="label">Email</td><td>${customer?.email || '—'}</td></tr>
+          <tr><td class="label">Address</td><td>${buildCustAddr(customer)}</td></tr>
         </table>
       </td>
     </tr>
@@ -307,7 +336,7 @@ export function generateQuotePDF(quote, customer) {
     <td colspan="4" class="right">${inr(c.amount)}</td>
   </tr>`).join('');
 
-  const custAddr = customer ? [customer.billing_street1, customer.billing_street2, customer.billing_city, customer.billing_state].filter(Boolean).join(', ') : '—';
+  const custAddr = buildCustAddr(customer);
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Quote — ${quote.quote_no}</title>
   <style>${PDF_CSS}</style></head><body>
@@ -408,7 +437,7 @@ export function generateSupplierPOPDF(po, order, supplier, enquiry) {
     <td class="center">${li.date_code || '—'}</td>
   </tr>`).join('');
 
-  const supAddr = supplier ? [supplier.address, supplier.city, supplier.state, supplier.country].filter(Boolean).join(', ') : '—';
+  const supAddr = buildSupAddr(supplier);
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Purchase Order — ${po.internal_po_no || po.id}</title>
   <style>${PDF_CSS}</style></head><body>

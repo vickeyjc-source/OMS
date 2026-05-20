@@ -536,9 +536,9 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                       <td style={{minWidth:160}}>
                         <div>
                           <input className="input" value={a.supplier_ref||''}
-                            onChange={e=>setA(li.id,'supplier_ref',e.target.value)}
+                            readOnly
                             placeholder="Supplier PI No. *"
-                            style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':undefined}}/>
+                            style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':'var(--green)',background:'var(--surface2)',cursor:'not-allowed'}}/>
                           {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
                           {a.supplier_id && !a.supplier_ref && (
                             poRequests[li.id]==='sent' ? (
@@ -647,9 +647,17 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               🔄 Refresh
             </button>
             {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
-            {!readOnly && <button className="btn btn-primary" disabled={saving||Object.keys(grouped).length===0} onClick={handleSave}>
-              {saving?'Saving POs…':`📤 ${Object.keys(grouped).length>0?'Save':'Generate'} PO Allocation`}
-            </button>}
+            {!readOnly && (() => {
+              const missingPI = (order.lineItems||[]).some(li => alloc[li.id]?.supplier_id && !alloc[li.id]?.supplier_ref);
+              return (
+                <button className="btn btn-primary"
+                  disabled={saving || Object.keys(grouped).length === 0 || missingPI}
+                  title={missingPI ? 'Supplier PI required for all assigned rows — request from Finance' : undefined}
+                  onClick={handleSave}>
+                  {saving ? 'Saving POs…' : `📤 ${Object.keys(grouped).length > 0 ? 'Save' : 'Generate'} PO Allocation`}
+                </button>
+              );
+            })()}
           </div>
         </div>
       </div>
@@ -750,6 +758,11 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     // Validate PI mandatory for advance/split
     if (isAdvanceOrSplit && !form.supplier_ref?.trim()) {
       toast.error('Supplier PI Number is required for advance/split payment terms');
+      return;
+    }
+    // AWB is mandatory when shipping details section is visible (confirmed or beyond)
+    if (['confirmed','in_transit','partially_received','received'].includes(form.status) && !form.tracking_no?.trim()) {
+      toast.error('AWB / Tracking number is required');
       return;
     }
     setSaving(true);
@@ -1064,7 +1077,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr',gap:10,marginTop:8}}>
                 <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Tracking / AWB</label>
+                  <label className="label">Tracking / AWB <span style={{color:'var(--red)',marginLeft:2}}>*</span></label>
                   <input className="input" value={form.tracking_no}
                     onChange={e=>{
                       set('tracking_no',e.target.value);
@@ -1073,8 +1086,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                         set('status','in_transit');
                       }
                     }}
-                    placeholder="AWB / Tracking number"
-                    style={{borderColor: form.tracking_no?'var(--green)':undefined}}/>
+                    placeholder="AWB / Tracking number (required)"
+                    style={{borderColor: form.tracking_no?'var(--green)':'var(--red)'}}/>
                 </div>
               </div>
             </div>
@@ -1088,7 +1101,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               </div>
               <ol style={{margin:'0 0 0 16px',padding:0,color:'var(--text2)',lineHeight:1.8}}>
                 <li><strong>Save PO</strong> below — order will move to <strong>Transit – Hub</strong> status</li>
-                <li>Go to <a href="/delivery-hub" style={{color:'var(--accent)',fontWeight:600}}>Delivery Hub →</a> to record GRN when goods arrive</li>
+                <li>Go to <a href="/app/delivery-hub" style={{color:'var(--accent)',fontWeight:600}}>Delivery Hub →</a> to record GRN when goods arrive</li>
               </ol>
             </div>
           )}
@@ -1132,13 +1145,13 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               <button type="button" className="btn" disabled={saving}
                 style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700,fontSize:12}}
                 onClick={async()=>{
-                  setSaving(true); // disables button immediately
+                  setSaving(true);
                   try {
                     await api.put('/supplier-orders/'+po.id,{...form,status:'in_transit'});
                     qc.invalidateQueries(['orders']);
-                    toast.success('📦 PO sent to Delivery Hub!');
+                    toast.success('📦 PO sent to Delivery Hub! Go to Delivery Hub to record GRN when goods arrive.');
                     onSaved();
-                    window.location.href='/delivery-hub?order='+encodeURIComponent(order.id)+'&po='+encodeURIComponent(po.id);
+                    onClose();
                   } catch(e){ toast.error(e.response?.data?.error||'Failed'); setSaving(false); }
                 }}>
                 📦 Send to Delivery Hub →
@@ -1170,7 +1183,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                     qc.invalidateQueries(['orders']);
                     toast.success('📦 Balance shipment sent to Delivery Hub!');
                     onSaved();
-                    window.location.href='/delivery-hub?order='+encodeURIComponent(order.id)+'&po='+encodeURIComponent(po.id);
+                    onClose();
                   } catch(e){ toast.error(e.response?.data?.error||'Failed'); setSaving(false); }
                 }}>
                 📦 Send Balance to Delivery Hub →
@@ -1415,7 +1428,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                               : <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>)
                         }
                       </td>
-                      <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status}</span></td>
+                      <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status==='negotiating'?'Confirmed':li.line_status}</span></td>
                       <td>{(()=>{
                         // Gross Margin = ((Cust Price × QTY) − (Sourced Price × QTY)) / (Cust Price × QTY) × 100
                         const custTotal = (li.qty||0) * (li.unit_price||0);
@@ -1650,6 +1663,15 @@ export default function ProcurementBinPage() {
   const [search,        setSearch]        = useState('');
   const [poFilter,      setPoFilter]      = useState('all');
   const [expandedRows,  setExpandedRows]  = useState(new Set());
+  const [seenProc, setSeenProc] = useState(() => { try { return new Set(JSON.parse(localStorage.getItem('seen_procurement')||'[]')); } catch(_) { return new Set(); } });
+  const markProcSeen = (id) => {
+    setSeenProc(prev => {
+      const next = new Set(prev); next.add(id);
+      localStorage.setItem('seen_procurement', JSON.stringify([...next]));
+      window.dispatchEvent(new Event('seen-updated'));
+      return next;
+    });
+  };
   const toggleRow = (id) => setExpandedRows(prev => {
     const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
   });
@@ -1714,6 +1736,25 @@ export default function ProcurementBinPage() {
   const confirmed=allSOs.filter(so=>so.status==='confirmed').length;
   const received=allSOs.filter(so=>so.status==='received').length;
 
+  // Procurement status breakdown across all POs
+  const poStatusCounts = allSOs.reduce((acc,so)=>{
+    const key = so.status||'draft';
+    acc[key]=(acc[key]||0)+1;
+    return acc;
+  },{});
+  const procStatusBreakdown = [
+    { key:'draft',                 label:'Draft',              color:'var(--text3)',         bg:'var(--surface2)', icon:'📝' },
+    { key:'pending_payment',       label:'Pending Payment',    color:'var(--red)',            bg:'var(--red-lt,#fef2f2)', icon:'🔒' },
+    { key:'po_issued',             label:'PO Issued',          color:'var(--accent)',         bg:'var(--accent-lt)', icon:'📤' },
+    { key:'sent',                  label:'PO Issued',          color:'var(--accent)',         bg:'var(--accent-lt)', icon:'📤' },
+    { key:'awaiting_confirmation', label:'Awaiting Confirm',   color:'var(--amber,#d97706)', bg:'var(--amber-lt,#fffbeb)', icon:'⏳' },
+    { key:'confirmed',             label:'Confirmed',          color:'var(--teal,#0d9488)',  bg:'var(--teal-lt,#f0fdfa)', icon:'✅' },
+    { key:'in_transit',            label:'In Transit',         color:'var(--blue,#2563eb)',  bg:'var(--blue-lt,#eff6ff)', icon:'🚚' },
+    { key:'partially_received',    label:'Partial Rcvd',       color:'var(--amber,#d97706)', bg:'var(--amber-lt,#fffbeb)', icon:'⚠' },
+    { key:'received',              label:'Received',           color:'var(--green)',          bg:'var(--green-lt)', icon:'📦' },
+    { key:'cancelled',             label:'Cancelled',          color:'var(--red)',            bg:'var(--red-lt,#fef2f2)', icon:'❌' },
+  ].map(s=>({...s, count:(poStatusCounts[s.key]||0)})).filter(s=>s.count>0);
+
   return (
     <div>
       {/* PO Mode indicator */}
@@ -1745,6 +1786,30 @@ export default function ProcurementBinPage() {
           </div>
         ))}
       </div>
+
+      {/* Procurement Status Breakdown */}
+      {procStatusBreakdown.length>0&&(
+        <div style={{marginBottom:16,padding:'12px 16px',borderRadius:'var(--r)',
+          background:'var(--surface)',border:'1px solid var(--border)'}}>
+          <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',letterSpacing:.4,marginBottom:10}}>
+            PROCUREMENT STATUS — ALL POs
+          </div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+            {procStatusBreakdown.map(s=>(
+              <div key={s.key} style={{display:'flex',alignItems:'center',gap:6,
+                padding:'5px 12px',borderRadius:999,
+                background:s.bg,border:`1px solid ${s.color}33`}}>
+                <span style={{fontSize:13}}>{s.icon}</span>
+                <span style={{fontSize:12,fontWeight:700,color:s.color}}>{s.count}</span>
+                <span style={{fontSize:11,color:s.color,fontWeight:600}}>{s.label}</span>
+              </div>
+            ))}
+            <div style={{marginLeft:'auto',fontSize:11,color:'var(--text3)',fontWeight:600}}>
+              {allSOs.length} total PO{allSOs.length!==1?'s':''}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Search + filter */}
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}}>
@@ -1812,10 +1877,11 @@ export default function ProcurementBinPage() {
           const margin      = orderVal-procVal;
           const isExpanded  = expandedRows.has(order.id);
           const delayed     = isDelayed(order);
+          const isUnseen    = !seenProc.has(order.id);
 
           // Row accent colour
           const accentCol = hasBlocked?'var(--red)':hasOverdue?'var(--amber,#d97706)':allRcvd?'var(--green)':unPOd.length>0?'var(--amber,#d97706)':'var(--accent)';
-          const rowBg     = rowIdx%2===0?'var(--surface)':'var(--surface2)';
+          const rowBg     = isUnseen?'#f0f7ff':rowIdx%2===0?'var(--surface)':'var(--surface2)';
 
           return (
             <React.Fragment key={order.id}>
@@ -1825,7 +1891,7 @@ export default function ProcurementBinPage() {
                 gap:0,padding:'10px 12px',borderBottom:'1px solid var(--border)',
                 background:isExpanded?'var(--accent-lt)':rowBg,
                 borderLeft:`3px solid ${accentCol}`,cursor:'pointer',alignItems:'center'}}
-                onClick={()=>toggleRow(order.id)}>
+                onClick={()=>{ markProcSeen(order.id); toggleRow(order.id); }}>
 
                 {/* Expand toggle */}
                 <div style={{fontSize:13,color:'var(--accent)',fontWeight:700,userSelect:'none'}}>
@@ -1884,7 +1950,7 @@ export default function ProcurementBinPage() {
                     title={rowBlocked?'Finance action pending':''}
                     style={{opacity:rowBlocked?0.4:1,
                       cursor:rowBlocked?'not-allowed':'pointer'}}
-                    onClick={()=>{ if(rowBlocked) return; setSelected(order); }}>
+                    onClick={()=>{ if(rowBlocked) return; markProcSeen(order.id); setSelected(order); }}>
                     {rowReadOnly ? '👁 View' : '✏ Manage'}
                   </button>
                     );
@@ -1924,7 +1990,7 @@ export default function ProcurementBinPage() {
                       <span style={{fontSize:12,color:'var(--green)',fontWeight:600}}>
                         ✅ All POs received — goods at hub. Ready for GRN and outbound.
                       </span>
-                      <a href="/delivery-hub" style={{fontSize:11,fontWeight:700,color:'var(--green)',
+                      <a href="/app/delivery-hub" style={{fontSize:11,fontWeight:700,color:'var(--green)',
                         background:'#fff',padding:'3px 10px',borderRadius:999,
                         border:'1px solid var(--green)44',textDecoration:'none',whiteSpace:'nowrap'}}>
                         Go to Delivery Hub →
@@ -2018,7 +2084,8 @@ export default function ProcurementBinPage() {
                                     const shipped = shipMap[li.id]||0;
                                     const pending = (li.qty||0) - rcvd;
                                     const LINE_STATUS_LABEL = {
-                                      negotiating:     {l:'Negotiating',    c:'var(--text3)'},
+                                      negotiating:     {l:'Confirmed',      c:'var(--green)'},
+                                      confirmed:       {l:'Confirmed',      c:'var(--green)'},
                                       procurement:     {l:'Procurement',    c:'var(--accent)'},
                                       shipped:         {l:'🚚 Shipped',     c:'var(--teal,#0d9488)'},
                                       ready_to_ship:   {l:'✅ Ready',       c:'var(--green)'},

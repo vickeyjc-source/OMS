@@ -14,7 +14,7 @@ const STATUS_PRIORITY = ['active', 'returned_to_sourcing', 'order_created', 'sup
 function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  // Tab index: 0=Line Items, 1=Customer Response, 2=Details
+  // Tab index: 0=Line Items, 1=Details, 2=Customer Response
   const [tabIdx, setTabIdx] = useState(0);
   // Details tab — editable fields
   const [zohoQuote,       setZohoQuote]       = useState(quote.zoho_quote_no || '');
@@ -92,7 +92,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
         currency:         li.quote_currency || li.target_currency || 'INR',
         order_date:       new Date().toISOString().slice(0,10),
         delivery_date:    li.preferred_delivery_date || '',
-        line_status:      'negotiating',
+        line_status:      savedResponse === 'accepted' ? 'confirmed' : 'negotiating',
         tax_rate:         Number(li.tax_rate) || 0,
       }));
 
@@ -133,11 +133,11 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
   const items = lineData?.items || [];
 
-  // Tab order: items → response → details
+  // Tab order: items → details → response
   const tabs = [
     { k: 'items',    l: '📦 Line Items' },
-    { k: 'response', l: '💬 Customer Response' },
     { k: 'details',  l: '📋 Details' },
+    { k: 'response', l: '💬 Customer Response' },
   ];
 
   const detailsAllFilled = quote.status === 'active' && !!zohoQuote.trim() && !!validUntil &&
@@ -152,22 +152,13 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     );
   };
 
-  // Auto-save response then advance to Details tab (not when rejected)
+  // Auto-save response (Customer Response is last tab — no advance needed)
   const handleNextFromResponse = () => {
     if (!pendingResponse) { toast.error('Please select a customer response'); return; }
-    if (pendingResponse === 'rejected') {
-      // Just save, stay on the Response tab
-      if (pendingResponse === savedResponse) { toast.success('Response already saved'); return; }
-      saveMutation.mutate(
-        { customer_response: pendingResponse, customer_response_notes: responseNotes },
-        { onSuccess: () => { setSavedResponse(pendingResponse); toast.success('Response saved'); } }
-      );
-      return;
-    }
-    if (pendingResponse === savedResponse) { setTabIdx(2); return; }  // already saved, just advance
+    if (pendingResponse === savedResponse) { toast.success('Response already saved'); return; }
     saveMutation.mutate(
       { customer_response: pendingResponse, customer_response_notes: responseNotes },
-      { onSuccess: () => { setSavedResponse(pendingResponse); setTabIdx(2); } }
+      { onSuccess: () => { setSavedResponse(pendingResponse); toast.success('Response saved'); } }
     );
   };
 
@@ -227,6 +218,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                         <th style={{textAlign:'right'}}>Tax %</th>
                         <th style={{textAlign:'right'}}>Base Value</th>
                         <th style={{textAlign:'right',color:'var(--green)'}}>Total</th>
+                        <th style={{color:'var(--teal,#0d9488)'}}>Del. Date</th>
                       </tr></thead>
                       <tbody>
                         {items.map((li, i) => {
@@ -253,6 +245,9 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                               <td style={{textAlign:'right',fontWeight:700,color:tax>0?'var(--green)':'var(--text)',fontFamily:'monospace'}}>
                                 {base ? fmtCur(tot, li.quote_currency) : '—'}
                               </td>
+                              <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600,whiteSpace:'nowrap'}}>
+                                {li.preferred_delivery_date ? `📅 ${li.preferred_delivery_date}` : <span style={{color:'var(--text3)'}}>—</span>}
+                              </td>
                             </tr>
                           );
                         })}
@@ -263,8 +258,93 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             </div>
           )}
 
-          {/* Tab 1: Customer Response */}
+          {/* Tab 1: Details */}
           {tabIdx === 1 && (
+            <div>
+              {/* Read-only info strip */}
+              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16,padding:'10px 14px',
+                background:'var(--surface2)',borderRadius:8,fontSize:12}}>
+                {[
+                  {l:'Quote No.',  v:quote.quote_no,      mono:true},
+                  {l:'Status',     v:quote.status?.replace(/_/g,' ')},
+                  {l:'Revision',   v:quote.revision||1},
+                  {l:'Enquiry',    v:quote.enquiry_id||'—', mono:true},
+                  {l:'Created',    v:fmtDateTime(quote.created_at)},
+                  {l:'Last Updated', v:fmtDateTime(quote.updated_at||quote.created_at)||'—'},
+                ].map(f=>(
+                  <div key={f.l} style={{minWidth:100}}>
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:2}}>{f.l.toUpperCase()}</div>
+                    <div style={{fontWeight:600,fontFamily:f.mono?'monospace':'inherit',color:'var(--text)'}}>{f.v}</div>
+                  </div>
+                ))}
+              </div>
+              {/* Editable fields */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Zoho Quote No. <span className="req">*</span></label>
+                  <input className="input" value={zohoQuote}
+                    onChange={e => setZohoQuote(e.target.value)}
+                    placeholder="e.g. ZQ-2024-001"
+                    disabled={quote.status !== 'active'}
+                    style={{fontFamily:'monospace',outline:!zohoQuote.trim()?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Valid Until (Delivery) <span className="req">*</span></label>
+                  <input className="input" type="date" value={validUntil}
+                    onChange={e => setValidUntil(e.target.value)}
+                    disabled={quote.status !== 'active'}
+                    style={{outline:!validUntil?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
+                </div>
+              </div>
+              {/* Sent to customer tick — only for accepted */}
+              {savedResponse !== 'negotiating' && (
+              <div style={{marginBottom:16}}>
+                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:.5}}>
+                  SEND TO CUSTOMER <span style={{color:'var(--red)',marginLeft:2}}>*</span>
+                </div>
+                <label style={{display:'inline-flex',alignItems:'center',gap:10,cursor:'pointer',
+                  padding:'10px 16px',borderRadius:8,
+                  border:`1.5px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
+                  background:sentToCustomer?'var(--green-lt)':'var(--red-lt,#fff5f5)',
+                  transition:'all .15s'}}>
+                  <span style={{width:20,height:20,borderRadius:5,flexShrink:0,display:'flex',
+                    alignItems:'center',justifyContent:'center',
+                    border:`2px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
+                    background:sentToCustomer?'var(--green)':'transparent',transition:'all .15s'}}>
+                    {sentToCustomer && <svg width="11" height="9" viewBox="0 0 11 9" fill="none">
+                      <path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>}
+                  </span>
+                  <input type="checkbox" checked={sentToCustomer} onChange={e=>setSentToCustomer(e.target.checked)}
+                    style={{position:'absolute',opacity:0,width:0,height:0}}/>
+                  <span style={{fontSize:13,fontWeight:sentToCustomer?600:400,
+                    color:sentToCustomer?'var(--green)':'var(--red)'}}>
+                    {sentToCustomer ? '✓ Sent to customer' : 'Mark as sent to customer (required)'}
+                  </span>
+                </label>
+                {!sentToCustomer && (
+                  <div style={{marginTop:6,fontSize:11,color:'var(--red)',fontWeight:500}}>
+                    This field is mandatory before saving details.
+                  </div>
+                )}
+              </div>
+              )}
+              {quote.notes && (
+                <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:12,marginBottom:14}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4}}>NOTES</div>
+                  <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
+                </div>
+              )}
+              {quote.status !== 'active' && (
+                <div style={{marginTop:10,fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>
+                  Only active quotes can be updated.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Tab 2: Customer Response */}
+          {tabIdx === 2 && (
             <div>
               {/* ── Sourcing re-pricing warning — blocks all response actions ── */}
               {enquiryAwaitingRevision && (
@@ -386,91 +466,6 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             </div>
           )}
 
-          {/* Tab 2: Details */}
-          {tabIdx === 2 && (
-            <div>
-              {/* Read-only info strip */}
-              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16,padding:'10px 14px',
-                background:'var(--surface2)',borderRadius:8,fontSize:12}}>
-                {[
-                  {l:'Quote No.',  v:quote.quote_no,      mono:true},
-                  {l:'Status',     v:quote.status?.replace(/_/g,' ')},
-                  {l:'Revision',   v:quote.revision||1},
-                  {l:'Enquiry',    v:quote.enquiry_id||'—', mono:true},
-                  {l:'Created',    v:fmtDateTime(quote.created_at)},
-                  {l:'Last Updated', v:fmtDateTime(quote.updated_at||quote.created_at)||'—'},
-                ].map(f=>(
-                  <div key={f.l} style={{minWidth:100}}>
-                    <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:2}}>{f.l.toUpperCase()}</div>
-                    <div style={{fontWeight:600,fontFamily:f.mono?'monospace':'inherit',color:'var(--text)'}}>{f.v}</div>
-                  </div>
-                ))}
-              </div>
-              {/* Editable fields */}
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Zoho Quote No. <span className="req">*</span></label>
-                  <input className="input" value={zohoQuote}
-                    onChange={e => setZohoQuote(e.target.value)}
-                    placeholder="e.g. ZQ-2024-001"
-                    disabled={quote.status !== 'active'}
-                    style={{fontFamily:'monospace',outline:!zohoQuote.trim()?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
-                </div>
-                <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Valid Until (Delivery) <span className="req">*</span></label>
-                  <input className="input" type="date" value={validUntil}
-                    onChange={e => setValidUntil(e.target.value)}
-                    disabled={quote.status !== 'active'}
-                    style={{outline:!validUntil?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
-                </div>
-              </div>
-              {/* Sent to customer tick — only for accepted */}
-              {savedResponse !== 'negotiating' && (
-              <div style={{marginBottom:16}}>
-                <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:.5}}>
-                  SEND TO CUSTOMER <span style={{color:'var(--red)',marginLeft:2}}>*</span>
-                </div>
-                <label style={{display:'inline-flex',alignItems:'center',gap:10,cursor:'pointer',
-                  padding:'10px 16px',borderRadius:8,
-                  border:`1.5px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
-                  background:sentToCustomer?'var(--green-lt)':'var(--red-lt,#fff5f5)',
-                  transition:'all .15s'}}>
-                  <span style={{width:20,height:20,borderRadius:5,flexShrink:0,display:'flex',
-                    alignItems:'center',justifyContent:'center',
-                    border:`2px solid ${sentToCustomer?'var(--green)':'var(--red)'}`,
-                    background:sentToCustomer?'var(--green)':'transparent',transition:'all .15s'}}>
-                    {sentToCustomer && <svg width="11" height="9" viewBox="0 0 11 9" fill="none">
-                      <path d="M1 4.5L4 7.5L10 1" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>}
-                  </span>
-                  <input type="checkbox" checked={sentToCustomer} onChange={e=>setSentToCustomer(e.target.checked)}
-                    style={{position:'absolute',opacity:0,width:0,height:0}}/>
-                  <span style={{fontSize:13,fontWeight:sentToCustomer?600:400,
-                    color:sentToCustomer?'var(--green)':'var(--red)'}}>
-                    {sentToCustomer ? '✓ Sent to customer' : 'Mark as sent to customer (required)'}
-                  </span>
-                </label>
-                {!sentToCustomer && (
-                  <div style={{marginTop:6,fontSize:11,color:'var(--red)',fontWeight:500}}>
-                    This field is mandatory before saving details.
-                  </div>
-                )}
-              </div>
-              )}
-              {quote.notes && (
-                <div style={{padding:'10px 14px',background:'var(--surface2)',borderRadius:8,fontSize:12,marginBottom:14}}>
-                  <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',marginBottom:4}}>NOTES</div>
-                  <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
-                </div>
-              )}
-              {quote.status !== 'active' && (
-                <div style={{marginTop:10,fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>
-                  Only active quotes can be updated.
-                </div>
-              )}
-            </div>
-          )}
-
           {/* ── Unified bottom nav bar — shown on ALL tabs ── */}
           <div style={{marginTop:20,paddingTop:14,borderTop:'1px solid var(--border)',
             display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
@@ -480,17 +475,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
               <button className="btn" onClick={() => setTabIdx(t => t - 1)} style={{fontWeight:500}}>← Back</button>
             )}
 
-            {/* Centre: action buttons — only on Details tab */}
+            {/* Centre: action buttons */}
 
-            {tabIdx === 2 && canCreateOrder && detailsAllFilled && (
-              <button className="btn btn-primary"
-                style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
-                disabled={saveMutation.isPending || createOrderMutation.isPending}
-                onClick={handleCreateOrder}>
-                {(saveMutation.isPending || createOrderMutation.isPending) ? 'Processing…' : '➕ Create Order from Quote'}
-              </button>
-            )}
-            {tabIdx === 2 && !canCreateOrder && detailsAllFilled && (
+            {/* Details tab (tab 1) — Save Details + Send to Revision */}
+            {tabIdx === 1 && !canCreateOrder && detailsAllFilled && (
               <button className="btn btn-primary"
                 disabled={saveMutation.isPending}
                 style={{fontWeight:600}}
@@ -501,7 +489,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 {saveMutation.isPending ? 'Saving…' : 'Save Details'}
               </button>
             )}
-            {tabIdx === 2 && quote.status === 'active' && savedResponse === 'negotiating' && !enquiryAwaitingRevision && (
+            {tabIdx === 1 && quote.status === 'active' && savedResponse === 'negotiating' && !enquiryAwaitingRevision && (
               <button className="btn"
                 style={{background:'var(--amber,#d97706)',color:'#fff',
                   borderColor:'var(--amber,#d97706)',fontWeight:600}}
@@ -514,6 +502,16 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
               </button>
             )}
 
+            {/* Customer Response tab (tab 2) — Create Order button appears after response saved */}
+            {tabIdx === 2 && canCreateOrder && (
+              <button className="btn btn-primary"
+                style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+                disabled={saveMutation.isPending || createOrderMutation.isPending}
+                onClick={handleCreateOrder}>
+                {(saveMutation.isPending || createOrderMutation.isPending) ? 'Processing…' : '➕ Create Order from Quote'}
+              </button>
+            )}
+
             {/* Spacer */}
             <span style={{flex:1}}/>
 
@@ -521,33 +519,26 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             <button className="btn" onClick={onClose} style={{fontWeight:500}}>✕ Close</button>
             {tabIdx === 0 && (
               <button className="btn btn-primary" onClick={() => setTabIdx(1)} style={{fontWeight:600}}>
-                Next → Customer Response
+                Next → Details
               </button>
             )}
             {tabIdx === 1 && (
+              <button className="btn btn-primary" onClick={() => setTabIdx(2)} style={{fontWeight:600}}>
+                Next → Customer Response
+              </button>
+            )}
+            {tabIdx === 2 && (
               savedResponse
-                ? savedResponse === 'rejected'
-                  ? <button className="btn btn-primary" onClick={onClose} style={{fontWeight:600,background:'var(--green)',borderColor:'var(--green)'}}>
+                ? (!canCreateOrder &&
+                    <button className="btn btn-primary" onClick={onClose} style={{fontWeight:600,background:'var(--green)',borderColor:'var(--green)'}}>
                       ✓ Done
                     </button>
-                  : savedResponse === 'negotiating'
-                    ? /* Negotiating: sent to revision, cannot go to Details until V2 quote comes back */
-                      <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
-                        borderRadius:8,background:'var(--amber-lt,#fffbeb)',
-                        border:'1px solid var(--amber,#d97706)',fontSize:12,
-                        color:'var(--amber,#d97706)',fontWeight:600}}>
-                        ⟳ Response saved — waiting for revised quote from Sourcing
-                      </div>
-                    : <button className="btn btn-primary" onClick={() => setTabIdx(2)} style={{fontWeight:600}}>
-                        Next → Details
-                      </button>
+                  )
                 : <button className="btn btn-primary"
                     disabled={!pendingResponse || saveMutation.isPending || enquiryAwaitingRevision}
                     style={{opacity:(!pendingResponse||enquiryAwaitingRevision)?0.45:1,fontWeight:600}}
                     onClick={handleNextFromResponse}>
-                    {saveMutation.isPending ? 'Saving…'
-                      : pendingResponse === 'rejected' ? 'Save Response'
-                      : 'Save & Next → Details'}
+                    {saveMutation.isPending ? 'Saving…' : 'Save Response'}
                   </button>
             )}
           </div>
@@ -563,6 +554,17 @@ export default function QuotesPage() {
   const [filter, setFilter]   = useState('all');
   const [selected, setSelected] = useState(null);
   const qc = useQueryClient();
+  const [seenQuotes, setSeenQuotes] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('seen_quotes')||'[]')); } catch(_) { return new Set(); }
+  });
+  const markSeen = (id) => {
+    setSeenQuotes(prev => {
+      const next = new Set(prev); next.add(id);
+      localStorage.setItem('seen_quotes', JSON.stringify([...next]));
+      window.dispatchEvent(new Event('seen-updated'));
+      return next;
+    });
+  };
 
   const { data: quotes=[], refetch }   = useQuery({ queryKey:['quotes'],    queryFn:()=>api.get('/quotes').then(r=>r.data) });
   const { data: customers=[] }         = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
@@ -665,9 +667,13 @@ export default function QuotesPage() {
                 <th>Valid Until</th><th>Created</th><th style={{textAlign:'center'}}>Days in Stage</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
-                {filtered.map(q => (
-                  <tr key={q.id} style={{cursor:'pointer'}} onClick={() => setSelected(q)}>
-                    <td className="mono bold" style={{color:'var(--accent)'}}>{q.quote_no}</td>
+                {filtered.map(q => {
+                  const isUnseen = q.status === 'active' && !seenQuotes.has(q.id);
+                  return (
+                  <tr key={q.id} style={{cursor:'pointer',background:isUnseen?'var(--accent-lt)':undefined}} onClick={() => { setSelected(q); markSeen(q.id); }}>
+                    <td className="mono bold" style={{color:'var(--accent)'}}>
+                      {isUnseen && <span style={{display:'inline-block',width:7,height:7,borderRadius:'50%',background:'var(--accent)',marginRight:5,verticalAlign:'middle'}}/>}
+                      {q.quote_no}</td>
                     <td style={{fontWeight:500}}>{custName(q.customer_id)}</td>
                     <td className="mono" style={{fontSize:11,color:'var(--text3)'}}>{q.enquiry_id||'—'}</td>
                     <td><StatusBadge s={q.status}/></td>
@@ -678,7 +684,12 @@ export default function QuotesPage() {
                             color:q.customer_response==='accepted'?'var(--green)':q.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
                             {q.customer_response}
                           </span>
-                        : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
+                        : q.sent_to_customer
+                          ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
+                              background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)'}}>
+                              ⏳ Awaiting confirmation
+                            </span>
+                          : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
                     </td>
                     <td style={{textAlign:'center'}}>
                       {q.revision||1}
@@ -692,12 +703,13 @@ export default function QuotesPage() {
                     <td style={{fontSize:11,color:'var(--text3)'}}>{fmtDateTime(q.created_at)}</td>
                     <td><DaysBadge updatedAt={q.updated_at||q.created_at} /></td>
                     <td style={{textAlign:'right'}}>
-                      <button className="btn btn-xs btn-primary" onClick={e=>{e.stopPropagation();setSelected(q)}}>
+                      <button className="btn btn-xs btn-primary" onClick={e=>{e.stopPropagation();setSelected(q);markSeen(q.id);}}>
                         View
                       </button>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

@@ -70,6 +70,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           ...ex,
           bank_fixed_foreign: isIntl  ? (ex.bank_fixed_usd ?? '') : '',
           bank_fixed_inr:     !isIntl ? (ex.bank_fixed_usd ?? '') : '',
+          preferred_delivery_date: ex.preferred_delivery_date || item.preferred_delivery_date || '',
         };
       }
       return { id: null, enquiry_item_id: item.id, supplier_id: '', sourced_price: '',
@@ -77,7 +78,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                hsn_code: '', availability: '', lead_time: '', notes: '',
                freight_pct: '', insurance_pct: '', duty_pct: '',
                cess_pct: '', bank_fixed_foreign: '', bank_fixed_inr: '',
-               clearance_fixed_inr: '', margin_pct: '' };
+               clearance_fixed_inr: '', margin_pct: '',
+               preferred_delivery_date: item.preferred_delivery_date || '' };
     })
   );
 
@@ -116,7 +118,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     }
     return suppliers.find(s => s.id === id)?.name || '—';
   };
-  const srcingUsers = users.filter(u => u.department === 'sourcing' || ['admin','manager'].includes(u.role));
+  const srcingUsers = users.filter(u => u.department === 'sourcing');
 
   const updSrc   = (idx, k, v) => setSrcRows(p  => p.map((r,i) => i===idx ? {...r,[k]:v} : r));
   const updQuote = (idx, k, v) => setQuoteRows(p => p.map((r,i) => i===idx ? {...r,[k]:v} : r));
@@ -200,14 +202,21 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     const totalSrcValue    = rows.reduce((s, r) => s + r.srcTotal, 0);
     const totalQuoteValue  = rows.reduce((s, r) => s + r.quoteTotal, 0);
     const totalGrossMargin = totalQuoteValue - totalSrcValue;
-    const grossMarginPct   = totalSrcValue > 0 ? ((totalGrossMargin / totalSrcValue) * 100) : 0;
 
-    const addlCost = ['customs','handling','freight','bank','insurance','duty','cess','clearance']
+    // Additional costs: just sum the auto-calc values shown in the row (per unit, no qty multiply)
+    const rowAddlCost = rows.reduce((s, r) => {
+      const c = r.calc;
+      return s + c.freight + c.insurance + c.duty + c.cess + c.bank + c.clearance;
+    }, 0);
+    const enquiryAddlCost = ['customs','handling','freight','bank','insurance','duty','cess','clearance']
       .reduce((s, k) => s + (Number(charges[k])||0), 0);
-    const totalNetMargin = totalQuoteValue - totalSrcValue - addlCost;
+    const addlCost = rowAddlCost + enquiryAddlCost;
+    const addlCostPct = totalSrcValue > 0 ? (addlCost / totalSrcValue * 100) : 0;
+
+    const totalNetMargin = totalGrossMargin - addlCost;
     const netMarginPct   = totalSrcValue > 0 ? ((totalNetMargin / totalSrcValue) * 100) : 0;
 
-    return { rows, totalSrcValue, totalQuoteValue, totalGrossMargin, grossMarginPct, addlCost, totalNetMargin, netMarginPct };
+    return { rows, totalSrcValue, totalQuoteValue, totalGrossMargin, addlCost, addlCostPct, totalNetMargin, netMarginPct };
   }, [srcRows, quoteRows, charges, enq.items, suppliers]);
 
   const handleSave = async (mode) => {
@@ -696,11 +705,14 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                           background:'#f3f4f6',color:'#6b7280',border:'1px solid #d1d5db',
                           fontWeight:600,whiteSpace:'nowrap'}}>DC: {item.date_code}</span>
                       )}
-                      {item.preferred_delivery_date && (
-                        <span style={{fontSize:10,padding:'2px 8px',borderRadius:4,
-                          background:'#f0fdfa',color:'#0f766e',border:'1px solid #99f6e4',
-                          fontWeight:600,whiteSpace:'nowrap'}}>📅 {item.preferred_delivery_date}</span>
-                      )}
+                      <div style={{display:'flex',alignItems:'center',gap:4}}>
+                        <span style={{fontSize:10,color:'var(--text3)',fontWeight:600,whiteSpace:'nowrap'}}>📅 Del:</span>
+                        <input className="input" type="date"
+                          value={row.preferred_delivery_date || item.preferred_delivery_date || ''}
+                          onChange={e=>updSrc(idx,'preferred_delivery_date',e.target.value)}
+                          disabled={isReadOnly}
+                          style={{height:26,fontSize:11,padding:'2px 5px',width:130}}/>
+                      </div>
                       <input className="input" value={row.notes||''} placeholder="Notes…"
                         onChange={e=>updSrc(idx,'notes',e.target.value)} disabled={isReadOnly}
                         style={{width:180,height:32,fontSize:11,padding:'3px 8px',
@@ -1020,14 +1032,13 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                   val:  md.totalGrossMargin,
                   cur:  'INR',
                   color: md.totalGrossMargin >= 0 ? 'var(--green)' : 'var(--red)',
-                  sub:  `${md.grossMarginPct >= 0 ? '+' : ''}${md.grossMarginPct.toFixed(1)}%`
                 },
                 {
                   label:'Net Margin (after all charges)',
                   val:  md.totalNetMargin,
                   cur:  'INR',
                   color: md.totalNetMargin >= 0 ? 'var(--teal)' : 'var(--red)',
-                  sub:  `Addl. costs: ₹${fmt(md.addlCost)} · ${md.netMarginPct >= 0 ? '+' : ''}${md.netMarginPct.toFixed(1)}%`
+                  sub:  md.addlCost > 0 ? `Addl. costs: −₹${fmt(md.addlCost)}` : `No addl. costs`
                 },
               ].map(s => (
                 <div key={s.label} style={{ background:'var(--surface2)', borderRadius:'var(--r)', padding:'14px 16px', borderLeft:`4px solid ${s.color}`, boxShadow:`0 0 0 1px ${s.color}22` }}>

@@ -1035,6 +1035,11 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            toNum(s.tax_rate),
            req.session.user.id, now,
            s.sourcing_revision_notes||null, s.sales_comment||null]);
+        // Also update preferred_delivery_date on the enquiry item if provided
+        if (s.preferred_delivery_date !== undefined && s.enquiry_item_id) {
+          await runAsync('UPDATE enquiry_items SET preferred_delivery_date=? WHERE id=?',
+            [s.preferred_delivery_date || '', s.enquiry_item_id]);
+        }
       } catch(e) {
         console.error('[sourcing save error] row:', JSON.stringify({id:s.id,qp:s.quote_price}), 'err:', e.message);
       }
@@ -1267,10 +1272,12 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
     const item = d.lineItems[idx];
     const lid = uuid(); // always generate server-side — client ids like li1/li2 clash across orders
     // FIX 3a: added tax_rate as 15th column (requires order_items.tax_rate column — added in startup migration)
+    const lineStatus = ['negotiating','confirmed','procurement','payment','shipped','delivered'].includes(item.line_status)
+      ? item.line_status : 'confirmed';
     await runAsync('INSERT INTO order_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [lid,d.id,item.component,item.manufacturer||'',item.ipn||'',item.qty||0,
        item.unit_price||0,item.procurement_price||0,item.currency||'INR',
-       item.order_date||'',item.delivery_date||'',item.supplier_id||'','negotiating',idx+1,
+       item.order_date||'',item.delivery_date||'',item.supplier_id||'',lineStatus,idx+1,
        item.tax_rate||0]);
     if (item.supplier_id) { if (!supMap[item.supplier_id]) supMap[item.supplier_id]=[]; supMap[item.supplier_id].push(lid); }
   }
@@ -1555,10 +1562,12 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status='sourcing'"),
     enq_quoted:    await g("SELECT COUNT(*) as c FROM enquiries WHERE status='quoted'"),
     sourcing:      await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
-    procurement:     await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='procurement'"),
+    procurement:     await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),
     in_transit:      await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='shipped'"),
     finance_pending: await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'"),
     delivery_hub:    await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='delivered_hub'"),
+    quote_bin:       await g("SELECT COUNT(*) as c FROM quotes WHERE status='active'"),
+    orders_new:      await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('open','draft')"),
   });
 }));
 
@@ -2375,7 +2384,7 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
   try { advRows = await allAsync("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
-  const netRows = await allAsync("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
+  const netRows = await allAsync("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('paid','cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
   res.json({
@@ -2432,6 +2441,76 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
     [uuid(), fq.order_id, 'Supplier paid | Ref: '+(d.payment_ref||'—')+' | PO unblocked → back to Procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true });
+}));
+
+// PUT /api/finance/supplier-net-pay/:so_id — record net-term settlement against a supplier order
+app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res) => {
+  const d = req.body || {};
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [req.params.so_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier order not found' });
+
+  const zohoPo    = (d.zoho_po_number || '').trim();
+  const supplierRef = (d.supplier_ref || '').trim();
+  if (!zohoPo || !supplierRef) return res.status(400).json({ error: 'Zoho PO Number and Supplier PI Number are required' });
+  if (!d.payment_ref || !String(d.payment_ref).trim()) return res.status(400).json({ error: 'UTR / Ref No. is required' });
+  if (!d.payment_method) return res.status(400).json({ error: 'Payment method is required' });
+
+  // Add columns if they don't exist yet
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_ref TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_method TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_paid_by TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_paid_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_notes TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_total_paid NUMERIC DEFAULT 0"); } catch(_) {}
+  // Log table — one row per payment installment
+  try { await runAsync(`CREATE TABLE IF NOT EXISTS supplier_net_payment_logs (
+    id TEXT PRIMARY KEY, supplier_order_id TEXT, order_id TEXT,
+    amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT,
+    payment_method TEXT, zoho_po_number TEXT, supplier_ref TEXT,
+    notes TEXT, paid_by TEXT, paid_at TEXT,
+    total_paid_snapshot NUMERIC, remaining_snapshot NUMERIC, grand_total NUMERIC
+  )`); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN total_paid_snapshot NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN remaining_snapshot NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN grand_total NUMERIC DEFAULT 0"); } catch(_) {}
+
+  const thisPayment  = parseFloat(d.amount) || 0;
+  const prevPaid     = parseFloat(so.net_total_paid) || 0;
+  const newTotalPaid = prevPaid + thisPayment;
+  const total        = parseFloat(so.confirmed_price) || 0;
+  const isFullyPaid  = total > 0 ? newTotalPaid >= total : true;
+  const newStatus    = isFullyPaid ? 'paid' : 'partial_paid';
+  const remaining    = Math.max(0, total - newTotalPaid);
+  const now = nowStr();
+
+  // Save this installment to the log — snapshots capture exact state at time of payment
+  await runAsync(
+    `INSERT INTO supplier_net_payment_logs(id,supplier_order_id,order_id,amount,currency,payment_ref,payment_date,payment_method,zoho_po_number,supplier_ref,notes,paid_by,paid_at,total_paid_snapshot,remaining_snapshot,grand_total)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [uuid(), so.id, so.order_id, thisPayment, so.confirmed_currency||'INR',
+     d.payment_ref||'', d.payment_date||now.slice(0,10), d.payment_method||'',
+     zohoPo, supplierRef, d.notes||'', req.session.user.id, now,
+     newTotalPaid, remaining, total]
+  );
+
+  // Update supplier order with latest payment info + cumulative total
+  await runAsync(
+    `UPDATE supplier_orders SET status=?, zoho_po_number=?, supplier_ref=?,
+       net_payment_ref=?, net_payment_date=?, net_payment_method=?,
+       net_paid_by=?, net_paid_at=?, net_payment_notes=?, net_payment_amount=?, net_total_paid=? WHERE id=?`,
+    [newStatus, zohoPo, supplierRef, d.payment_ref||'', d.payment_date||now.slice(0,10),
+     d.payment_method||'', req.session.user.id, now, d.notes||'', thisPayment, newTotalPaid, so.id]
+  );
+
+  const histMsg = isFullyPaid
+    ? `Supplier net payment FULLY settled (${newTotalPaid.toFixed(2)}) | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}`
+    : `Partial payment ${thisPayment.toFixed(2)} recorded — ${remaining.toFixed(2)} still remaining | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}`;
+  try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), so.order_id, histMsg, req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, total_paid: newTotalPaid, remaining, status: newStatus });
 }));
 
 console.log('[STARTUP] Finance routes registered');
@@ -2661,14 +2740,38 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
   try {
     supPmts  = await allAsync(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
                            so.confirmed_currency, so.confirmed_price,
-                           so.order_id AS linked_order_id, s.name AS supplier_name
+                           so.order_id AS linked_order_id, s.name AS supplier_name,
+                           'advance' AS payment_kind
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
                     LEFT JOIN suppliers s ON s.id=so.supplier_id
                     WHERE fq.status='paid'
                     ORDER BY fq.paid_at DESC`);
   } catch(_) {}
-  res.json({ customer: custPmts, supplier: supPmts });
+
+  let netPmts = [];
+  try {
+    netPmts = await allAsync(`SELECT
+                          l.id, l.paid_at, l.paid_by, l.amount, l.currency,
+                          l.payment_ref, l.payment_date, l.payment_method, l.notes,
+                          l.zoho_po_number, l.supplier_ref,
+                          l.total_paid_snapshot, l.remaining_snapshot, l.grand_total,
+                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          so.supplier_id, so.confirmed_currency,
+                          s.name AS supplier_name,
+                          'net' AS payment_kind
+                   FROM supplier_net_payment_logs l
+                   LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
+                   LEFT JOIN suppliers s ON s.id=so.supplier_id
+                   ORDER BY l.paid_at DESC`);
+  } catch(_) {}
+
+  const allSupPmts = [...supPmts, ...netPmts].sort((a,b)=>{
+    const da = a.paid_at||''; const db = b.paid_at||'';
+    return db.localeCompare(da);
+  });
+
+  res.json({ customer: custPmts, supplier: allSupPmts });
 }));
 
   console.log('[STARTUP] All routes registered.');

@@ -412,7 +412,7 @@ export default function NewEnquiryPage() {
   const handleDraft  = () => { const v = validate('draft');  if (v !== null) mutation.mutate({ ...form, status:'draft',    items:v, _submitMode:'draft'  }); };
   const handleSubmit = () => { const v = validate('submit'); if (v) mutation.mutate({ ...form, status:'sourcing', items:v, _submitMode:'submit' }); };
 
-  const sourcingUsers = users.filter(u=>u.department==='sourcing'||['admin','manager'].includes(u.role));
+  const sourcingUsers = users.filter(u=>u.department==='sourcing');
   const busy = mutation.isPending;
 
   const cols = [

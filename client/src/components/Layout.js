@@ -13,7 +13,8 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [showKb, setShowKb] = useState(false);
-  const { data: summary = {} } = useQuery({ queryKey:['summary'], queryFn:()=>api.get('/reports/summary').then(r=>r.data), refetchInterval:30000 });
+  const { data: summary = {} } = useQuery({ queryKey:['summary'], queryFn:()=>api.get('/reports/summary').then(r=>r.data), refetchInterval:15000 });
+
 
   const dept = user.department || 'sales';
   const canSeeCustomers = user.perms?.canSeeCustomer ?? true;
@@ -60,7 +61,7 @@ export default function Layout() {
           {can('orders') && <NavLink to="/orders" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M1 3h14v11H1zM5 3V1.5a1 1 0 011-1h4a1 1 0 011 1V3M8 7v3M6.5 8.5h3"/>
             All Orders
-            {(summary.open||0) > 0 && <span className="nav-badge">{summary.open}</span>}
+            {(summary.orders_new||0) > 0 && <span className="nav-badge">{summary.orders_new}</span>}
           </NavLink>}
           {can('new-order') && <NavLink to="/orders/new" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M8 1.5a6.5 6.5 0 100 13A6.5 6.5 0 008 1.5zM8 5v6M5 8h6"/>
@@ -92,7 +93,6 @@ export default function Layout() {
           {can('closed-bin') && <NavLink to="/closed-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M2 8l4 4 8-8"/>
             Closed Bin
-            {(summary.closed||0) > 0 && <span className="nav-badge" style={{background:'var(--green)',color:'#fff'}}>{summary.closed}</span>}
           </NavLink>}
           {can('deleted-bin') && <NavLink to="/deleted-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M3 4h10M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M4 4l.667 9.333A1 1 0 005.66 14h4.68a1 1 0 00.993-.667L12 4"/>
