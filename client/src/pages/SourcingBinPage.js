@@ -203,10 +203,10 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     const totalQuoteValue  = rows.reduce((s, r) => s + r.quoteTotal, 0);
     const totalGrossMargin = totalQuoteValue - totalSrcValue;
 
-    // Additional costs: just sum the auto-calc values shown in the row (per unit, no qty multiply)
+    // Additional costs: per-unit charges × qty for each item
     const rowAddlCost = rows.reduce((s, r) => {
       const c = r.calc;
-      return s + c.freight + c.insurance + c.duty + c.cess + c.bank + c.clearance;
+      return s + (c.freight + c.insurance + c.duty + c.cess + c.bank + c.clearance) * r.qty;
     }, 0);
     const enquiryAddlCost = ['customs','handling','freight','bank','insurance','duty','cess','clearance']
       .reduce((s, k) => s + (Number(charges[k])||0), 0);
@@ -220,13 +220,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   }, [srcRows, quoteRows, charges, enq.items, suppliers]);
 
   const handleSave = async (mode) => {
-    // Validate lead time mandatory when sending to Quote Bin
+    // Validate lead time and GST mandatory when sending to Quote Bin
     if (mode === 'quote' || mode === 'return_revision') {
       for (let i = 0; i < srcRows.length; i++) {
         const item = enq.items?.[i];
         const lt = (srcRows[i].lead_time || '').toString().trim();
         if (!lt || lt === '0' || lt === '0 Days' || lt === '0 Weeks' || lt === '0 Months') {
           toast.error(`Lead Time is required for "${item?.component || 'item ' + (i+1)}"`);
+          return;
+        }
+        const qrow = quoteRows[i] || {};
+        if (qrow.tax_rate === '' || qrow.tax_rate == null) {
+          toast.error(`GST / Tax is required for "${item?.component || 'item ' + (i+1)}"`);
           return;
         }
       }
@@ -427,7 +432,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
       const hasQuotePrice = qrow.quote_price !== '' && qrow.quote_price != null && Number(qrow.quote_price) > 0;
       const hasExchRate   = !isIntlSup || (row.exchange_rate !== '' && row.exchange_rate != null && Number(row.exchange_rate) > 0);
       const hasForeignPx  = !isIntlSup || (row.src_price_foreign !== '' && row.src_price_foreign != null && Number(row.src_price_foreign) > 0);
-      return hasSupplier && hasSrcPrice && hasLeadTime && hasQuotePrice && hasExchRate && hasForeignPx;
+      const hasGST        = qrow.tax_rate !== '' && qrow.tax_rate != null;
+      return hasSupplier && hasSrcPrice && hasLeadTime && hasQuotePrice && hasExchRate && hasForeignPx && hasGST;
     });
   }, [srcRows, quoteRows, enq.items, suppliers]);
 
@@ -903,11 +909,15 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* GST */}
                     <div style={{flex:'1 1 82px',minWidth:75}}>
-                      <span style={LBL}>{supplierTaxCurrency==='INR'?'GST':'Tax/VAT'}</span>
+                      <span style={{...LBL, color: (!qrow.tax_rate && qrow.tax_rate !== 0) ? '#ef4444' : undefined}}>
+                        {supplierTaxCurrency==='INR'?'GST *':'Tax/VAT *'}
+                      </span>
                       <select className="input" value={qrow.tax_rate??''}
                         onChange={e=>updQuote(idx,'tax_rate',e.target.value)} disabled={isReadOnly}
                         title={`Tax from supplier currency (${supplierTaxCurrency}) - ${getTaxRatesForCurrency(supplierTaxCurrency).country}`}
-                        style={{width:'100%',height:32,fontSize:12,padding:'3px 4px'}}>
+                        style={{width:'100%',height:32,fontSize:12,padding:'3px 4px',
+                          borderColor: (!qrow.tax_rate && qrow.tax_rate !== 0) ? '#ef4444' : undefined,
+                          borderWidth: (!qrow.tax_rate && qrow.tax_rate !== 0) ? 1.5 : 1}}>
                         <option value="">—None—</option>
                         {getTaxRates(supplierTaxCurrency).map(t=>(
                           <option key={t.label} value={t.rate}>{t.label}</option>

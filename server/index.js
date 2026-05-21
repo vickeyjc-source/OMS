@@ -1344,7 +1344,12 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
     await runAsync('UPDATE orders SET payment_terms=? WHERE id=?', [d.payment_terms||'', oid]);
   }
 
-  if (d.status === 'closed') await runAsync('UPDATE orders SET closed_at=? WHERE id=?', [nowStr(), oid]);
+  if (d.status === 'closed') {
+    await runAsync('UPDATE orders SET closed_at=? WHERE id=?', [nowStr(), oid]);
+    if (o.enquiry_id) {
+      await runAsync("UPDATE enquiries SET status='closed', updated_at=? WHERE id=?", [nowStr(), o.enquiry_id]);
+    }
+  }
 
   if (d.lineItems !== undefined) {
     await runAsync('DELETE FROM order_items WHERE order_id=?', [oid]);
@@ -1726,8 +1731,12 @@ app.get('/api/health', (req, res) => {
 startListening(PORT, MAX_PORT_TRIES);
 
 // THEN CONNECT TO DB
-initDb().then(() => {
+initDb().then(async () => {
   console.log('[STARTUP] DB ready — registering routes...');
+  // Backfill: mark enquiries as closed if their linked order is closed
+  try {
+    await runAsync(`UPDATE enquiries SET status='closed', updated_at=datetime('now') WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
+  } catch(_) {}
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
   // customer_payments table created by db.js initDb() via pool.query()
   // ─────────────────────────────────────────────────────────────────────────────
