@@ -102,6 +102,7 @@ export default function Layout() {
             <NavLink to="/finance" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
               <Icon d="M2 4h12v8H2zM2 8h12M6 12v2M10 12v2M5 14h6"/>
               Finance
+              {(summary.finance_pending||0) > 0 && <span className="nav-badge" style={{background:'var(--orange,#ea580c)',color:'#fff'}}>{summary.finance_pending}</span>}
             </NavLink>
           )}
 

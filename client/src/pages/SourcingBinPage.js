@@ -131,36 +131,31 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     const rate       = Number(src.exchange_rate) || 0;    // 0 = not entered yet
     const supType    = src._supType || 'domestic';
     const isIntl     = supType === 'international';
-    const freightPct = Number(src.freight_pct) || 0;
-    const insPct     = isIntl ? (Number(src.insurance_pct) || 0) : 0;
-    const dutyPct    = isIntl ? (Number(src.duty_pct) || 0) : 0;
-    const cessPct    = isIntl ? (Number(src.cess_pct) || 0) : 0;
-    // support legacy field name bank_fixed_usd as fallback
-    const bankForeign = isIntl ? (Number(src.bank_fixed_foreign ?? src.bank_fixed_usd) || 0) : 0;
-    const bankINR    = isIntl ? 0 : 0;
-    const clearINR   = isIntl ? (Number(src.clearance_fixed_inr) || 0) : 0;
     const marginPct  = Number(src.margin_pct) || 0;
 
-    // Freight: srcINR × freight_pct% (both intl and domestic)
-    const freight    = srcINR * freightPct / 100;
-    // Insurance: srcINR × insurance_pct% (both)
-    const insurance  = srcINR * insPct / 100;
-    // Duty = (source + freight + insurance) × duty_pct% (both)
-    const duty       = (srcINR + freight + insurance) * dutyPct / 100;
-    // Cess = duty × cess_pct% (both)
-    const cess       = duty * cessPct / 100;
-    // Bank intl: bank_amount(foreign currency) × exchange_rate ÷ qty → ₹/unit
-    // Bank domestic: bank_amount(₹) ÷ qty
-    // Only calculate if both bank amount and rate (for intl) are entered
-    const bank       = isIntl
-      ? (rate > 0 ? (bankForeign * rate) / qty : 0)
-      : (bankINR / qty);
-    // Clearance = clearance_fixed_inr / qty (both)
-    const clearance  = clearINR / qty;
-    // Total cost per unit INR
+    let freight, insurance, duty, cess, bank, clearance;
+    if (isIntl) {
+      // International: all charges = srcINR × pct%
+      const freightPct   = Number(src.freight_pct) || 0;
+      const insPct       = Number(src.insurance_pct) || 0;
+      const dutyPct      = Number(src.duty_pct) || 0;
+      const cessPct      = Number(src.cess_pct) || 0;
+      const bankPct      = Number(src.bank_fixed_foreign ?? src.bank_fixed_usd) || 0;
+      const clearancePct = Number(src.clearance_fixed_inr) || 0;
+      freight    = srcINR * freightPct / 100;
+      insurance  = srcINR * insPct / 100;
+      duty       = srcINR * dutyPct / 100;
+      cess       = srcINR * cessPct / 100;
+      bank       = srcINR * bankPct / 100;
+      clearance  = srcINR * clearancePct / 100;
+    } else {
+      // Domestic: freight is a direct INR amount entered by user; all other charges = 0
+      freight   = Number(src.freight_pct) || 0;
+      insurance = 0; duty = 0; cess = 0; bank = 0; clearance = 0;
+    }
+
     const totalCost  = srcINR + freight + insurance + duty + cess + bank + clearance;
-    // Margin = totalCost × margin_pct%
-    const margin     = totalCost * marginPct / 100;
+    const margin     = srcINR * marginPct / 100;
     // Quote = totalCost + margin
     const quoteCalc  = totalCost + margin;
 
@@ -538,7 +533,6 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const hasTarget = Number(item.target_price) > 0;
               const supType = suppliers.find(s => s.id === row.supplier_id)?.type || 'domestic';
               const isIntl  = supType === 'international';
-              const domesticZeroLocked = ['insurance_pct', 'duty_pct', 'cess_pct', 'bank_fixed_inr', 'clearance_fixed_inr'];
               const calc    = calcRow({ ...row, _supType: supType }, item);
               const cur     = row.sourced_currency || (isIntl ? 'USD' : 'INR');
               const supplierTaxCurrency = isIntl ? cur : 'INR';
@@ -827,8 +821,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         {k:'insurance_pct',      l:'Ins%'},
                         {k:'duty_pct',           l:'Duty%'},
                         {k:'cess_pct',           l:'Cess%'},
-                        {k:'bank_fixed_foreign', l:`Bank(${cur})`},
-                        {k:'clearance_fixed_inr',l:'Clr₹'},
+                        {k:'bank_fixed_foreign', l:'Bank%'},
+                        {k:'clearance_fixed_inr',l:'Clr%'},
                         {k:'margin_pct',         l:'Mgn%'},
                       ].map(({k,l})=>(
                         <div key={k} style={{flex:'1 1 46px',minWidth:42}}>
@@ -854,29 +848,32 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                       {/* Divider */}
                       <div style={{flex:'0 0 1px',alignSelf:'stretch',background:'var(--border)',margin:'0 1px'}}/>
 
-                      {/* Domestic rate fields — same as intl, bank in ₹, no exchange rate */}
-                      {[
-                        {k:'freight_pct',        l:'Frgt%'},
-                        {k:'insurance_pct',      l:'Ins%'},
-                        {k:'duty_pct',           l:'Duty%'},
-                        {k:'cess_pct',           l:'Cess%'},
-                        {k:'bank_fixed_inr',     l:'Bank₹'},
-                        {k:'clearance_fixed_inr',l:'Clr₹'},
-                        {k:'margin_pct',         l:'Mgn%'},
-                      ].map(({k,l})=>(
-                        <div key={k} style={{flex:'1 1 46px',minWidth:42}}>
-                          <span style={LBL}>{l}</span>
-                          <input className="input" type="number" step="0.001"
-                            value={domesticZeroLocked.includes(k) ? '0' : (row[k]??'')} placeholder="0"
-                            disabled={isReadOnly || domesticZeroLocked.includes(k)}
-                            onChange={e=>handleRateChange(k,e.target.value)}
-                            style={{
-                              width:'100%',height:32,fontSize:12,padding:'3px 6px',
-                              background: domesticZeroLocked.includes(k) ? 'var(--surface2)' : undefined,
-                              color: domesticZeroLocked.includes(k) ? 'var(--text3)' : undefined,
-                            }}/>
-                        </div>
-                      ))}
+                      {/* Domestic rate fields */}
+                      {(() => {
+                        const domesticZeroLocked = ['insurance_pct', 'duty_pct', 'cess_pct', 'bank_fixed_inr', 'clearance_fixed_inr'];
+                        return [
+                          {k:'freight_pct',        l:'Frgt ₹'},
+                          {k:'insurance_pct',      l:'Ins%'},
+                          {k:'duty_pct',           l:'Duty%'},
+                          {k:'cess_pct',           l:'Cess%'},
+                          {k:'bank_fixed_inr',     l:'Bank%'},
+                          {k:'clearance_fixed_inr',l:'Clr%'},
+                          {k:'margin_pct',         l:'Mgn%'},
+                        ].map(({k,l})=>(
+                          <div key={k} style={{flex:'1 1 46px',minWidth:42}}>
+                            <span style={LBL}>{l}</span>
+                            <input className="input" type="number" step="0.001"
+                              value={domesticZeroLocked.includes(k) ? '0' : (row[k]??'')} placeholder="0"
+                              disabled={isReadOnly || domesticZeroLocked.includes(k)}
+                              onChange={e=>handleRateChange(k,e.target.value)}
+                              style={{
+                                width:'100%',height:32,fontSize:12,padding:'3px 6px',
+                                background: domesticZeroLocked.includes(k) ? 'var(--surface2)' : undefined,
+                                color: domesticZeroLocked.includes(k) ? 'var(--text3)' : undefined,
+                              }}/>
+                          </div>
+                        ));
+                      })()}
 
                     </>)}
 
@@ -897,7 +894,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Quote Price */}
                     <div style={{flex:'1 1 88px',minWidth:80}}>
-                      <span style={{...LBL,color:qrow.quote_price?'#15803d':'var(--text3)'}}>Quote Price</span>
+                      <span style={{...LBL,color:qrow.quote_price?'#15803d':'var(--text3)'}}>Quote Price/UNIT</span>
                       <input className="input" type="number" step="0.01"
                         value={qrow.quote_price||''} placeholder="0.00" disabled={isReadOnly}
                         onChange={e=>updQuote(idx,'quote_price',e.target.value)}
