@@ -535,7 +535,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const isIntl  = supType === 'international';
               const calc    = calcRow({ ...row, _supType: supType }, item);
               const cur     = row.sourced_currency || (isIntl ? 'USD' : 'INR');
-              const supplierTaxCurrency = isIntl ? cur : 'INR';
+              // const supplierTaxCurrency = isIntl ? cur : 'INR';
+              const supplierTaxCurrency = 'INR';
 
               // shared label style
               const LBL = { display:'block', fontSize:10, fontWeight:600, color:'var(--text3)',
