@@ -499,25 +499,27 @@ app.delete('/api/files/:id', auth, asyncRoute(async (req, res) => {
 
 // ── USERS ────────────────────────────────────────────────────
 app.get('/api/users', auth, asyncRoute(async (req, res) => {
-  res.json(await allAsync('SELECT id,name,username,email,role,department,status,created FROM users ORDER BY department,name'));
+  res.json(await allAsync('SELECT id,name,username,email,role,department,status,created,plain_password FROM users ORDER BY department,name'));
 }));
 app.post('/api/users', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.name || !d.username || !d.password) return res.status(400).json({ error: 'Required' });
   if (await getAsync('SELECT id FROM users WHERE username=?', [d.username])) return res.status(409).json({ error: 'Username exists' });
   const id = 'u' + uuid().slice(0,8);
-  await runAsync('INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?)',
-    [id, d.name, d.username, d.email||'', bcrypt.hashSync(d.password,10), d.department||'sales', d.role||'user', d.status||'active', todayStr()]);
+  await runAsync('INSERT INTO users(id,name,username,email,password,department,role,status,created,plain_password) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    [id, d.name, d.username, d.email||'', bcrypt.hashSync(d.password,10), d.department||'sales', d.role||'user', d.status||'active', todayStr(), d.password]);
   saveNow(); res.json({ id });
 }));
 app.put('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
   const u = await getAsync('SELECT * FROM users WHERE id=?', [req.params.id]);
   if (!u) return res.status(404).json({ error: 'Not found' });
   const d = req.body;
-  await runAsync('UPDATE users SET name=?,username=?,email=?,password=?,department=?,role=?,status=? WHERE id=?',
+  await runAsync('UPDATE users SET name=?,username=?,email=?,password=?,department=?,role=?,status=?,plain_password=? WHERE id=?',
     [d.name||u.name, d.username||u.username, d.email||u.email,
      d.password ? bcrypt.hashSync(d.password,10) : u.password,
-     d.department||u.department, d.role||u.role, d.status||u.status, req.params.id]);
+     d.department||u.department, d.role||u.role, d.status||u.status,
+     d.password ? d.password : (u.plain_password||''),
+     req.params.id]);
   saveNow(); res.json({ ok: true });
 }));
 app.delete('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {

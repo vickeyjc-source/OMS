@@ -569,6 +569,8 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN bank_inr NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN clearance_inr NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN margin_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  // ── Migrate users — add plain_password for admin visibility ─────────────────
+  try { await pool.query("ALTER TABLE users ADD COLUMN plain_password TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate supplier_orders — add PO workflow columns ─────────────────────
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN internal_po_no TEXT"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN status TEXT DEFAULT 'draft'"); } catch(_) {}
@@ -727,8 +729,13 @@ async function initDb() {
   const [id, name, username, email, password, department, role, status, created] = adminUser;
   const hashedPassword = bcrypt.hashSync(password, 10);
   await pool.query(
-    'INSERT INTO users(id,name,username,email,password,department,role,status,created) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(username) DO NOTHING',
-    [id, name, username, email, hashedPassword, department, role, status, created]
+    'INSERT INTO users(id,name,username,email,password,department,role,status,created,plain_password) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(username) DO NOTHING',
+    [id, name, username, email, hashedPassword, department, role, status, created, password]
+  );
+  // ── Backfill plain_password for default admin if missing ─────────────────
+  await pool.query(
+    "UPDATE users SET plain_password=$1 WHERE username='admin' AND (plain_password IS NULL OR plain_password='')",
+    [password]
   );
 
 

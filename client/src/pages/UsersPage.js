@@ -12,7 +12,10 @@ function UserModal({ u, onClose }) {
   const qc = useQueryClient();
   const { user: me } = useAuth();
   const isNew = !u?.id;
-  const [form, setForm] = useState(u||{name:'',username:'',email:'',password:'',department:'sales',role:'user',status:'active'});
+  const [form, setForm] = useState(u
+    ? { ...u, password: u.plain_password || '' }
+    : {name:'',username:'',email:'',password:'',department:'sales',role:'user',status:'active'});
+  const [showPass, setShowPass] = useState(false);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const mutation = useMutation({
     mutationFn: d => isNew ? api.post('/users',d) : api.put(`/users/${u.id}`,d),
@@ -35,7 +38,21 @@ function UserModal({ u, onClose }) {
             <div className="form-group"><label className="label">Username <span className="req">*</span></label><input className="input" value={form.username} onChange={e=>set('username',e.target.value)} /></div>
             <div className="form-group"><label className="label">Email</label><input className="input" type="email" value={form.email} onChange={e=>set('email',e.target.value)} /></div>
           </div>
-          <div className="form-group"><label className="label">Password {u?'(blank = keep)':''} <span className="req">*</span></label><input className="input" type="password" value={form.password||''} onChange={e=>set('password',e.target.value)} /></div>
+          <div className="form-group">
+            <label className="label">Password <span className="req">*</span></label>
+            <div style={{position:'relative'}}>
+              <input className="input" type={showPass?'text':'password'} value={form.password||''} onChange={e=>set('password',e.target.value)} style={{width:'100%',paddingRight:38}} />
+              <button type="button" onClick={()=>setShowPass(v=>!v)}
+                style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',
+                  background:'none',border:'none',cursor:'pointer',padding:2,
+                  color:'var(--text3)',display:'flex',alignItems:'center'}}>
+                {showPass
+                  ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                  : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                }
+              </button>
+            </div>
+          </div>
           <div className="form-grid-2">
             <div className="form-group"><label className="label">Department <span className="req">*</span></label>
               <select className="input" value={form.department} onChange={e=>set('department',e.target.value)}>
@@ -350,6 +367,26 @@ function SectionPermissions() {
   );
 }
 
+function PasswordCell({ plain }) {
+  const [show, setShow] = React.useState(false);
+  if (!plain) return <span style={{color:'var(--text3)',fontSize:11}}>—</span>;
+  return (
+    <div style={{display:'flex',alignItems:'center',gap:5}}>
+      <span style={{fontFamily:'monospace',fontSize:12,color:'var(--text2)',letterSpacing:show?0:2}}>
+        {show ? plain : '••••••••'}
+      </span>
+      <button type="button" onClick={()=>setShow(v=>!v)}
+        style={{background:'none',border:'none',cursor:'pointer',padding:2,
+          color:'var(--text3)',display:'flex',alignItems:'center'}}>
+        {show
+          ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        }
+      </button>
+    </div>
+  );
+}
+
 export default function UsersPage() {
   const { user: me } = useAuth();
   const [modal, setModal] = useState(null);
@@ -373,7 +410,7 @@ export default function UsersPage() {
       </div>
       <div className="table-wrap" style={{marginBottom:18}}>
         <table>
-          <thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Department</th><th>Role</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Username</th><th>Email</th><th>Department</th><th>Role</th><th>Password</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {filtered.map(u=>(
               <tr key={u.id}>
@@ -382,8 +419,9 @@ export default function UsersPage() {
                 <td>{u.email}</td>
                 <td><DeptBadge dept={u.department} /></td>
                 <td><span className={`role-${u.role}`}>{u.role}</span></td>
+                <td><PasswordCell plain={u.plain_password} /></td>
                 <td>{u.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
-                <td>{u.id!==me.id?<button className="btn btn-xs" onClick={()=>setModal(u)}>Edit</button>:<span style={{fontSize:11,color:'var(--text3)'}}>(you)</span>}</td>
+                <td><div style={{display:'flex',alignItems:'center',gap:6}}><button className="btn btn-xs" onClick={()=>setModal(u)}>Edit</button>{u.id===me.id&&<span style={{fontSize:11,color:'var(--text3)'}}>(you)</span>}</div></td>
               </tr>
             ))}
           </tbody>

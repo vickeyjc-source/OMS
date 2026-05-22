@@ -131,7 +131,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     const rate       = Number(src.exchange_rate) || 0;    // 0 = not entered yet
     const supType    = src._supType || 'domestic';
     const isIntl     = supType === 'international';
-    const marginPct  = Number(src.margin_pct) || 0;
+    // margin_pct now stores a direct INR amount (not a percentage)
+    const marginAmt  = Number(src.margin_pct) || 0;
 
     let freight, insurance, duty, cess, bank, clearance;
     if (isIntl) {
@@ -155,11 +156,14 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     }
 
     const totalCost  = srcINR + freight + insurance + duty + cess + bank + clearance;
-    const margin     = srcINR * marginPct / 100;
+    const margin     = marginAmt;  // direct INR amount entered by admin
+    const marginPct  = srcINR > 0 ? (marginAmt / srcINR * 100) : 0;  // shown as display below
     // Quote = totalCost + margin
     const quoteCalc  = totalCost + margin;
+    // Total = quoteCalc × quantity
+    const totalAmt   = quoteCalc * qty;
 
-    return { freight, insurance, duty, cess, bank, clearance, margin, quoteCalc, totalCost, isIntl };
+    return { freight, insurance, duty, cess, bank, clearance, margin, marginPct, quoteCalc, totalCost, totalAmt, isIntl };
   };
 
   // ── Margin calculations ──────────────────────────────────
@@ -824,7 +828,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         {k:'cess_pct',           l:'Cess%'},
                         {k:'bank_fixed_foreign', l:'Bank%'},
                         {k:'clearance_fixed_inr',l:'Clr%'},
-                        {k:'margin_pct',         l:'Mgn%'},
+                        {k:'margin_pct',         l:'Mgn ₹'},
                       ].map(({k,l})=>(
                         <div key={k} style={{flex:'1 1 46px',minWidth:42}}>
                           <span style={LBL}>{l}</span>
@@ -859,7 +863,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                           {k:'cess_pct',           l:'Cess%'},
                           {k:'bank_fixed_inr',     l:'Bank%'},
                           {k:'clearance_fixed_inr',l:'Clr%'},
-                          {k:'margin_pct',         l:'Mgn%'},
+                          {k:'margin_pct',         l:'Mgn ₹'},
                         ].map(({k,l})=>(
                           <div key={k} style={{flex:'1 1 46px',minWidth:42}}>
                             <span style={LBL}>{l}</span>
@@ -975,7 +979,6 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         { l:'Cess ₹',       v:calc.cess      },
                         { l:'Bank ₹',       v:calc.bank      },
                         { l:'Clearance ₹',  v:calc.clearance },
-                        { l:'Margin ₹',     v:calc.margin,   col:'#7c3aed' },
                       ].map(({l,v,col},ci,arr)=>(
                         <div key={l} style={{
                           flex:1, padding:'5px 10px',
@@ -989,6 +992,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         </div>
                       ))}
 
+                      {/* Margin tile — entered as ₹, shows % */}
+                      <div style={{
+                        flex:1, padding:'5px 10px',
+                        borderRight:'1px solid var(--border)',
+                        display:'flex',flexDirection:'column',gap:2,minWidth:58,
+                      }}>
+                        <span style={{fontSize:9,color:'var(--text3)',letterSpacing:.3,fontWeight:600,textTransform:'uppercase'}}>Margin %</span>
+                        <span style={{fontSize:12,fontWeight:700,color: calc.margin>0 ? '#7c3aed' : 'var(--border2)'}}>
+                          {calc.margin>0 ? `${calc.marginPct.toFixed(1)}%` : '—'}
+                        </span>
+                      </div>
+
                       {/* = Quote / Unit */}
                       {calc.quoteCalc > 0 && (
                         <div style={{
@@ -1000,6 +1015,23 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                           <span style={{fontSize:9,color:'var(--accent)',letterSpacing:.3,fontWeight:700,textTransform:'uppercase'}}>= Quote / Unit</span>
                           <span style={{fontSize:14,fontWeight:800,color:'var(--accent)',whiteSpace:'nowrap'}}>
                             ₹{fmt(calc.quoteCalc)}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* = Total (per unit × qty) */}
+                      {calc.quoteCalc > 0 && (
+                        <div style={{
+                          padding:'5px 14px', flexShrink:0,
+                          display:'flex',flexDirection:'column',gap:2,
+                          background:'#f5f3ff',
+                          borderLeft:'1.5px solid #7c3aed',
+                        }}>
+                          <span style={{fontSize:9,color:'#7c3aed',letterSpacing:.3,fontWeight:700,textTransform:'uppercase'}}>
+                            = Total (×{item.quantity})
+                          </span>
+                          <span style={{fontSize:14,fontWeight:800,color:'#7c3aed',whiteSpace:'nowrap'}}>
+                            ₹{fmt(calc.totalAmt)}
                           </span>
                         </div>
                       )}
