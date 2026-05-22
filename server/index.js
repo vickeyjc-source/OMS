@@ -1737,7 +1737,7 @@ initDb().then(async () => {
   console.log('[STARTUP] DB ready — registering routes...');
   // Backfill: mark enquiries as closed if their linked order is closed
   try {
-    await runAsync(`UPDATE enquiries SET status='closed', updated_at=datetime('now') WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
+    await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
   } catch(_) {}
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
   // customer_payments table created by db.js initDb() via pool.query()
