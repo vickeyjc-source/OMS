@@ -721,6 +721,8 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN expected_ship_date TEXT DEFAULT ''"); } catch(_) {}
+  // ── Migrate grn_records — add credit_note_no for partial GRN shortfalls ──────
+  try { await pool.query("ALTER TABLE grn_records ADD COLUMN credit_note_no TEXT DEFAULT ''"); } catch(_) {}
   console.log('[DB] All migrations done');
 
   // ── Ensure the default admin user exists ─────────────────────────────────

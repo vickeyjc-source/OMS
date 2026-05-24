@@ -158,8 +158,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     const totalCost  = srcINR + freight + insurance + duty + cess + bank + clearance;
     const margin     = marginAmt;  // direct INR amount entered by admin
     const marginPct  = srcINR > 0 ? (marginAmt / srcINR * 100) : 0;  // shown as display below
-    // Quote = totalCost + margin
-    const quoteCalc  = totalCost + margin;
+    // Quote = totalCost + margin — only meaningful when source price is entered
+    const quoteCalc  = srcINR > 0 ? totalCost + margin : 0;
     // Total = quoteCalc × quantity
     const totalAmt   = quoteCalc * qty;
 
@@ -194,8 +194,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
       const quoteAbove = target > 0 && quoteUnit > target;
 
       return { srcUnit, quoteUnit, srcTotal, quoteTotal, grossMarginUnit, grossMarginTotal,
-               target, qty, srcAbove, quoteAbove, aboveTarget, exchangeRate, srcCurrency,
-               srcForeign, calc };
+               target, qty, srcAbove, quoteAbove, aboveTarget, exchangeRate,
+               srcCurrency, srcForeign, calc };
     });
 
     const totalSrcValue    = rows.reduce((s, r) => s + r.srcTotal, 0);
@@ -562,9 +562,16 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     const er = field === 'exchange_rate' ? val : r2.exchange_rate;
                     if (Number(fp) > 0 && Number(er) > 0)
                       updated.sourced_price = String((Number(fp)*Number(er)).toFixed(4));
+                    else if (Number(fp) === 0 || val === '')
+                      updated.sourced_price = '';
                   }
                   const c2 = calcRow({ ...updated, _supType: supType }, item);
-                  if (c2.quoteCalc > 0) setQuoteRows(p2 => p2.map((q2, qi) => qi !== idx ? q2 : { ...q2, quote_price: c2.quoteCalc.toFixed(2) }));
+                  // Auto-fill quote price only when src price is present; clear it when src is removed
+                  if (c2.quoteCalc > 0) {
+                    setQuoteRows(p2 => p2.map((q2, qi) => qi !== idx ? q2 : { ...q2, quote_price: c2.quoteCalc.toFixed(2) }));
+                  } else if (Number(updated.sourced_price) === 0 || updated.sourced_price === '') {
+                    setQuoteRows(p2 => p2.map((q2, qi) => qi !== idx ? q2 : { ...q2, quote_price: '' }));
+                  }
                   return updated;
                 }));
               };
@@ -1064,31 +1071,36 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           <div className="card card-sm" style={{ marginBottom:0, border:'1px solid rgba(27,79,158,.2)' }}>
             <div className="card-title">📊 Margin Summary</div>
             <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
-              {[
-                { label:'Total Source Value (₹ INR)', val: md.totalSrcValue,   cur: 'INR', color:'var(--accent)' },
-                { label:'Total Quote Value',          val: md.totalQuoteValue, cur: quoteRows[0]?.quote_currency||'INR', color:'var(--green)' },
-                {
-                  label:'Gross Margin (Quote − Source)',
-                  val:  md.totalGrossMargin,
-                  cur:  'INR',
-                  color: md.totalGrossMargin >= 0 ? 'var(--green)' : 'var(--red)',
-                },
-                {
-                  label:'Net Margin (after all charges)',
-                  val:  md.totalNetMargin,
-                  cur:  'INR',
-                  color: md.totalNetMargin >= 0 ? 'var(--teal)' : 'var(--red)',
-                  sub:  md.addlCost > 0 ? `Addl. costs: −₹${fmt(md.addlCost)}` : `No addl. costs`
-                },
-              ].map(s => (
-                <div key={s.label} style={{ background:'var(--surface2)', borderRadius:'var(--r)', padding:'14px 16px', borderLeft:`4px solid ${s.color}`, boxShadow:`0 0 0 1px ${s.color}22` }}>
-                  <div style={{ fontSize:11, color:'var(--text2)', marginBottom:6, fontWeight:700, letterSpacing:.2 }}>{s.label}</div>
-                  <div style={{ fontSize:22, fontWeight:800, color:s.color, letterSpacing:'-.03em', lineHeight:1.1 }}>
-                    {s.val !== 0 ? fmtC(s.val, s.cur) : '—'}
+              {(() => {
+                const hasSrc = md.totalSrcValue > 0;
+                return [
+                  { label:'Total Source Value (₹ INR)', val: md.totalSrcValue,   cur: 'INR', color:'var(--accent)',                show: md.totalSrcValue > 0 },
+                  { label:'Total Quote Value',          val: md.totalQuoteValue, cur: quoteRows[0]?.quote_currency||'INR', color:'var(--green)',  show: hasSrc && md.totalQuoteValue > 0 },
+                  {
+                    label:'Gross Margin (Quote − Source)',
+                    val:  md.totalGrossMargin,
+                    cur:  'INR',
+                    color: md.totalGrossMargin >= 0 ? 'var(--green)' : 'var(--red)',
+                    show: hasSrc && md.totalQuoteValue > 0,
+                  },
+                  {
+                    label:'Net Margin (after all charges)',
+                    val:  md.totalNetMargin,
+                    cur:  'INR',
+                    color: md.totalNetMargin >= 0 ? 'var(--teal)' : 'var(--red)',
+                    sub:  hasSrc && md.totalQuoteValue > 0 ? (md.addlCost > 0 ? `Addl. costs: −₹${fmt(md.addlCost)}` : `No addl. costs`) : null,
+                    show: hasSrc && md.totalQuoteValue > 0,
+                  },
+                ].map(s => (
+                  <div key={s.label} style={{ background:'var(--surface2)', borderRadius:'var(--r)', padding:'14px 16px', borderLeft:`4px solid ${s.show ? s.color : 'var(--border)'}`, boxShadow:`0 0 0 1px ${s.show ? s.color+'22' : 'transparent'}` }}>
+                    <div style={{ fontSize:11, color:'var(--text2)', marginBottom:6, fontWeight:700, letterSpacing:.2 }}>{s.label}</div>
+                    <div style={{ fontSize:22, fontWeight:800, color: s.show ? s.color : 'var(--text3)', letterSpacing:'-.03em', lineHeight:1.1 }}>
+                      {s.show ? fmtC(s.val, s.cur) : '—'}
+                    </div>
+                    {s.sub && <div style={{ fontSize:12, color:s.color, marginTop:5, fontWeight:700, opacity:.85 }}>{s.sub}</div>}
                   </div>
-                  {s.sub && <div style={{ fontSize:12, color:s.color, marginTop:5, fontWeight:700, opacity:.85 }}>{s.sub}</div>}
-                </div>
-              ))}
+                ));
+              })()}
             </div>
 
             {/* Per-item margin table */}
@@ -1131,6 +1143,11 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                             {m.grossMarginUnit ? (
                               <span>
                                 {m.grossMarginUnit >= 0?'+':''}{fmtC(m.grossMarginUnit, 'INR')}
+                                {Number(src.sourced_price) > 0 && Number(src.margin_pct) > 0 && (
+                                  <span style={{display:'block',fontSize:9,fontWeight:700,opacity:.8}}>
+                                    {(Number(src.margin_pct) / Number(src.sourced_price) * 100).toFixed(1)}%
+                                  </span>
+                                )}
                                 {marginForeign != null && <span style={{color:'var(--text3)',fontSize:9,display:'block'}}>{marginForeign >= 0?'+':''}{fmtC(marginForeign, m.srcCurrency)}</span>}
                               </span>
                             ) : '—'}

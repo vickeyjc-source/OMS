@@ -25,6 +25,8 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   // Init from saved notes so locked view shows them when modal is reopened
   const [responseNotes,   setResponseNotes]    = useState(quote.customer_response_notes || '');
   const [savedResponse,   setSavedResponse]    = useState(quote.customer_response || '');
+  // Track whether details have been saved — Next → Customer Response only enabled after Save
+  const [detailsSavedOnce, setDetailsSavedOnce] = useState(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
 
   // Sync editable fields when parent passes updated quote data (after save+refresh)
   useEffect(() => {
@@ -33,6 +35,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     setSentToCustomer(!!(quote.sent_to_customer));
     setSavedResponse(quote.customer_response || '');
     setResponseNotes(quote.customer_response_notes || '');
+    setDetailsSavedOnce(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
   }, [quote.id, quote.zoho_quote_no, quote.valid_until, quote.sent_to_customer, quote.customer_response, quote.customer_response_notes]);
 
   // Linked enquiry — tells us if source is still re-pricing (returned_to_sourcing)
@@ -58,7 +61,13 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
   const saveMutation = useMutation({
     mutationFn: d => api.put('/quotes/' + quote.id, d).then(r => r.data),
-    onSuccess: () => { qc.invalidateQueries(['quotes']); onRefresh(); toast.success('Saved'); },
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries(['quotes']);
+      onRefresh();
+      toast.success('Saved');
+      // Mark details as saved when zoho_quote_no is part of the payload (Details tab save)
+      if (vars.zoho_quote_no !== undefined) setDetailsSavedOnce(true);
+    },
     onError: e => toast.error(e.response?.data?.error || 'Save failed'),
   });
 
@@ -155,6 +164,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   // Auto-save response (Customer Response is last tab — no advance needed)
   const handleNextFromResponse = () => {
     if (!pendingResponse) { toast.error('Please select a customer response'); return; }
+    if (['negotiating', 'rejected'].includes(pendingResponse) && !responseNotes.trim()) {
+      toast.error(`Notes are required when response is "${pendingResponse === 'negotiating' ? 'Negotiating' : 'Rejected'}"`);
+      return;
+    }
     if (pendingResponse === savedResponse) { toast.success('Response already saved'); return; }
     saveMutation.mutate(
       { customer_response: pendingResponse, customer_response_notes: responseNotes },
@@ -261,6 +274,22 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           {/* Tab 1: Details */}
           {tabIdx === 1 && (
             <div>
+              {/* ── Sent-to-revision lock banner ── */}
+              {enquiryAwaitingRevision && (
+                <div style={{marginBottom:16,padding:'12px 16px',borderRadius:10,
+                  border:'2px solid var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)',
+                  display:'flex',alignItems:'center',gap:12}}>
+                  <span style={{fontSize:20}}>⏳</span>
+                  <div>
+                    <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>
+                      Sent to Revision — View Only
+                    </div>
+                    <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>
+                      This quote is being re-priced by Sourcing. Details cannot be edited until Sourcing returns the updated quote.
+                    </div>
+                  </div>
+                </div>
+              )}
               {/* Read-only info strip */}
               <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:16,padding:'10px 14px',
                 background:'var(--surface2)',borderRadius:8,fontSize:12}}>
@@ -278,26 +307,26 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                   </div>
                 ))}
               </div>
-              {/* Editable fields */}
+              {/* Editable fields — locked while awaiting revision */}
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:14}}>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Zoho Quote No. <span className="req">*</span></label>
                   <input className="input" value={zohoQuote}
                     onChange={e => setZohoQuote(e.target.value)}
                     placeholder="e.g. ZQ-2024-001"
-                    disabled={quote.status !== 'active'}
-                    style={{fontFamily:'monospace',outline:!zohoQuote.trim()?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
+                    disabled={quote.status !== 'active' || enquiryAwaitingRevision}
+                    style={{fontFamily:'monospace',outline:(!zohoQuote.trim()&&!enquiryAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||enquiryAwaitingRevision)?0.6:1}}/>
                 </div>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Valid Until (Delivery) <span className="req">*</span></label>
                   <input className="input" type="date" value={validUntil}
                     onChange={e => setValidUntil(e.target.value)}
-                    disabled={quote.status !== 'active'}
-                    style={{outline:!validUntil?'1.5px solid var(--red)':'',opacity:quote.status!=='active'?0.6:1}}/>
+                    disabled={quote.status !== 'active' || enquiryAwaitingRevision}
+                    style={{outline:(!validUntil&&!enquiryAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||enquiryAwaitingRevision)?0.6:1}}/>
                 </div>
               </div>
-              {/* Sent to customer tick — only for accepted */}
-              {savedResponse !== 'negotiating' && (
+              {/* Sent to customer tick — hidden while awaiting revision */}
+              {savedResponse !== 'negotiating' && !enquiryAwaitingRevision && (
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:.5}}>
                   SEND TO CUSTOMER <span style={{color:'var(--red)',marginLeft:2}}>*</span>
@@ -335,7 +364,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                   <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
                 </div>
               )}
-              {quote.status !== 'active' && (
+              {quote.status !== 'active' && !enquiryAwaitingRevision && (
                 <div style={{marginTop:10,fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>
                   Only active quotes can be updated.
                 </div>
@@ -456,10 +485,21 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                     )}
                   </div>
                   <div className="form-group" style={{marginBottom:12}}>
-                    <label className="label">Notes</label>
+                    <label className="label">
+                      Notes
+                      {['negotiating','rejected'].includes(pendingResponse) && (
+                        <span className="req" style={{marginLeft:4}}>* Required</span>
+                      )}
+                    </label>
                     <textarea className="input" rows={3} value={responseNotes}
                       onChange={e => setResponseNotes(e.target.value)}
-                      placeholder="Customer feedback, conditions, etc."/>
+                      placeholder={['negotiating','rejected'].includes(pendingResponse) ? 'Required — explain customer feedback or reason for rejection…' : 'Customer feedback, conditions, etc.'}
+                      style={{outline: ['negotiating','rejected'].includes(pendingResponse) && !responseNotes.trim() ? '1.5px solid var(--red)' : ''}}/>
+                    {['negotiating','rejected'].includes(pendingResponse) && !responseNotes.trim() && (
+                      <div style={{marginTop:4,fontSize:11,color:'var(--red)',fontWeight:500}}>
+                        Notes are required for {pendingResponse === 'negotiating' ? 'Negotiating' : 'Rejected'} response.
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -478,7 +518,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             {/* Centre: action buttons */}
 
             {/* Details tab (tab 1) — Save Details + Send to Revision */}
-            {tabIdx === 1 && !canCreateOrder && detailsAllFilled && (
+            {tabIdx === 1 && !canCreateOrder && detailsAllFilled && !enquiryAwaitingRevision && (
               <button className="btn btn-primary"
                 disabled={saveMutation.isPending}
                 style={{fontWeight:600}}
@@ -523,7 +563,11 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
               </button>
             )}
             {tabIdx === 1 && (
-              <button className="btn btn-primary" onClick={() => setTabIdx(2)} style={{fontWeight:600}}>
+              <button className="btn btn-primary"
+                disabled={!detailsSavedOnce || enquiryAwaitingRevision}
+                title={enquiryAwaitingRevision ? 'Waiting for Sourcing to return revised quote' : !detailsSavedOnce ? 'Save Details first before proceeding' : ''}
+                onClick={() => setTabIdx(2)}
+                style={{fontWeight:600, opacity: (detailsSavedOnce && !enquiryAwaitingRevision) ? 1 : 0.45, cursor: (detailsSavedOnce && !enquiryAwaitingRevision) ? 'pointer' : 'not-allowed'}}>
                 Next → Customer Response
               </button>
             )}
@@ -534,12 +578,19 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                       ✓ Done
                     </button>
                   )
-                : <button className="btn btn-primary"
-                    disabled={!pendingResponse || saveMutation.isPending || enquiryAwaitingRevision}
-                    style={{opacity:(!pendingResponse||enquiryAwaitingRevision)?0.45:1,fontWeight:600}}
-                    onClick={handleNextFromResponse}>
-                    {saveMutation.isPending ? 'Saving…' : 'Save Response'}
-                  </button>
+                : (() => {
+                    const notesRequired = ['negotiating','rejected'].includes(pendingResponse) && !responseNotes.trim();
+                    const btnDisabled = !pendingResponse || saveMutation.isPending || enquiryAwaitingRevision || notesRequired;
+                    return (
+                      <button className="btn btn-primary"
+                        disabled={btnDisabled}
+                        title={notesRequired ? 'Notes are required for this response' : ''}
+                        style={{opacity: btnDisabled ? 0.45 : 1, fontWeight:600}}
+                        onClick={handleNextFromResponse}>
+                        {saveMutation.isPending ? 'Saving…' : 'Save Response'}
+                      </button>
+                    );
+                  })()
             )}
           </div>
 

@@ -8,7 +8,7 @@ import { printDoc, generateOrderPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 
-const LINE_STATUS_BADGE = { negotiating:'badge-green', confirmed:'badge-green', procurement:'badge-blue', payment:'badge-amber', shipped:'badge-teal', delivered:'badge-green' };
+const LINE_STATUS_BADGE = { negotiating:'badge-purple', confirmed:'badge-purple', procurement:'badge-blue', payment:'badge-amber', shipped:'badge-teal', partial_shipped:'badge-teal', delivered_hub:'badge-teal', ready_to_ship:'badge-green', grn_partial:'badge-amber', grn_rejected:'badge-red', delivered:'badge-green', delivered_customer:'badge-green' };
 
 const PAYMENT_TERMS_GROUPS = [
   { group:'Advance Payment', terms:['Advance Payment (AP) – Full payment before shipment','Partial Advance – 30% upfront, 70% on delivery','Partial Advance – 50% upfront, 50% on delivery','Cash in Advance (CIA) – 100% before dispatch','Cash Before Shipment (CBS) – Payment before goods ship','Cash on Delivery (COD)','Cash Against Delivery (CAD)'] },
@@ -30,7 +30,7 @@ const isPartialAdvance = t => t && t.toLowerCase().includes('partial advance');
 
 const PAYMENT_METHODS = ['Bank Transfer','Cash','Bank Remittance','NEFT / RTGS','SWIFT / Wire Transfer','UPI','Cheque'];
 const BALANCE_TIMINGS = ['On Delivery','Before Delivery','Post Delivery','After 7 Days of Delivery','After 15 Days of Delivery','After 30 Days of Delivery','Against Documents','On Acceptance'];
-const LINE_STATUS_LABEL = { negotiating:'Confirmed', confirmed:'Confirmed', procurement:'Procurement', payment:'Payment', shipped:'Shipped', delivered:'Delivered' };
+const LINE_STATUS_LABEL = { negotiating:'Confirmed', confirmed:'Confirmed', procurement:'Procurement', payment:'Payment', shipped:'Shipped', partial_shipped:'Partial Shipped', delivered_hub:'At Hub', ready_to_ship:'Ready to Ship', grn_partial:'GRN Partial', grn_rejected:'GRN Rejected', delivered:'Delivered', delivered_customer:'Delivered' };
 const LineStatusBadge = ({ s }) => <span className={`badge ${LINE_STATUS_BADGE[s]||'badge-gray'}`}>{LINE_STATUS_LABEL[s]||s}</span>;
 
 function ShipperSelect({ value, onChange, shippers }) {
@@ -90,7 +90,6 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const { data: orderFiles=[] } = useQuery({
     queryKey: ['files', 'order', order.id],
     queryFn: () => api.get('/files', { params: { entity_type:'order', entity_id:order.id } }).then(r => r.data),
-    staleTime: 30000,
   });
 
   const [infoForm, setInfoForm] = useState({ enquiry_no:order.enquiry_no||'', quote_no:order.quote_no||'', tentative_date:order.tentative_date||'', po_number:order.po_number||'', notes:order.notes||'', delivery_address:order.delivery_address||'', allow_partial_shipment:order.allow_partial_shipment||0 });
@@ -571,7 +570,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       if (!window.confirm(`Delete "${f.original_name}"?`)) return;
                       try {
                         await api.delete('/files/' + f.id);
-                        qc.invalidateQueries(['files','order',order.id]);
+                        qc.invalidateQueries({ queryKey: ['files','order',order.id] });
                         toast.success('File deleted');
                       } catch(e) { toast.error(e.response?.data?.error||'Delete failed'); }
                     }}>🗑 Delete</button>
@@ -596,7 +595,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       formData.append('field_name', 'po_file');
                       try {
                         await api.post('/files', formData, { headers:{'Content-Type':'multipart/form-data'}, timeout:120000 });
-                        qc.invalidateQueries(['files','order',order.id]);
+                        qc.invalidateQueries({ queryKey: ['files','order',order.id] });
                         toast.success('File uploaded');
                       } catch(err) { toast.error(err.response?.data?.error||'Upload failed'); }
                       e.target.value = '';
@@ -995,8 +994,8 @@ export default function OrdersPage() {
     return { base:byCur, total:tByCur };
   };
 
-  // ADDED: waiting_for_payment status filter chip
   const FILTERS = ['all','draft','open','procurement','waiting_for_payment','closed','delivered','hold','failed'];
+  const FILTER_LABEL = { all:'All', draft:'Draft', open:'Open', procurement:'Procurement', waiting_for_payment:'Waiting Payment', closed:'Closed', delivered:'Delivered', hold:'Hold', failed:'Failed' };
 
   // ── Order ageing ─────────────────────────────────────────────────────────
   const todayStr   = new Date().toISOString().slice(0,10);
@@ -1132,7 +1131,7 @@ export default function OrdersPage() {
       {/* ── Status filter chips ── */}
       <div className="filter-row" style={{marginBottom:12}}>
         {FILTERS.map(f=><span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>
-          {f==='all'?`All (${orders.length})`:f.charAt(0).toUpperCase()+f.slice(1)}
+          {f==='all'?`All (${orders.length})`:FILTER_LABEL[f]||f}
         </span>)}
       </div>
 

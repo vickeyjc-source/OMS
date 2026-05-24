@@ -45,6 +45,11 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
   const cooWrapRefs = useRef({});
   const setG = (id,k,v) => setGrn(g=>({...g,[id]:{...g[id],[k]:v}}));
 
+  // Auto-generate CN number for partial GRNs (seq matches server GRN seq: total records + 1)
+  const nextGrnSeq = (order.grnRecords||[]).length + 1;
+  const autoGenCN = 'CN-' + order.id + '-' + String(nextGrnSeq).padStart(2,'0');
+  const [creditNoteNo, setCreditNoteNo] = useState(autoGenCN);
+
   useEffect(() => {
     if (!cooOpenFor) return;
     const onDocMouseDown = (e) => {
@@ -108,10 +113,16 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
     setSaving(true);
     try {
       const records = buildRecords();
-      const res = await api.post('/orders/'+order.id+'/grn', { records, partial: partialSave });
+      const isPartial = partialSave || hasShortage;
+      const res = await api.post('/orders/'+order.id+'/grn', {
+        records,
+        partial: partialSave,
+        credit_note_no: isPartial ? creditNoteNo.trim() : '',
+      });
       const partialMsg = res.data.order_status === 'partial_hub' ? ' — Partial, balance still expected' : '';
       const grnLabel = res.data.grn_no ? res.data.grn_no + ' recorded!' : 'GRN recorded!';
-      toast.success('✅ ' + grnLabel + partialMsg);
+      const cnMsg = res.data.credit_note_no ? ' | CN: ' + res.data.credit_note_no : '';
+      toast.success('✅ ' + grnLabel + partialMsg + cnMsg);
       qc.invalidateQueries(['orders']);
       onSaved();
     } catch(e) { toast.error(e.response?.data?.error||'GRN failed'); }
@@ -361,7 +372,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
             ))}
           </div>
 
-          {/* Discrepancy warning */}
+          {/* Discrepancy warning + Credit Note */}
           {(hasShortage||hasDamaged) && (
             <div style={{padding:'10px 14px',borderRadius:'var(--r)',
               background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)'}}>
@@ -369,6 +380,22 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
               {hasShortage && <div style={{fontSize:12}}>• Short shipment detected — balance stays pending in hub</div>}
               {hasDamaged  && <div style={{fontSize:12}}>• Damaged/rejected items — raise RMA or insurance claim</div>}
               <div style={{fontSize:12,marginTop:4,color:'var(--text3)'}}>Order will proceed with received items. Remaining items flagged for follow-up.</div>
+              {hasShortage && (
+                <div style={{marginTop:10,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                  <label style={{fontSize:12,fontWeight:700,color:'var(--amber,#d97706)',whiteSpace:'nowrap'}}>
+                    📄 Credit Note No:
+                  </label>
+                  <input
+                    className="input"
+                    value={creditNoteNo}
+                    onChange={e=>setCreditNoteNo(e.target.value)}
+                    placeholder={autoGenCN}
+                    style={{width:200,fontWeight:700,fontSize:12,
+                      borderColor:'var(--amber,#d97706)',background:'#fff'}}
+                  />
+                  <span style={{fontSize:11,color:'var(--text3)'}}>Auto-generated — edit if needed</span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -409,6 +436,8 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   const [selected, setSelected] = useState(()=>{ const s={}; allItems.forEach(li=>{s[li.id]=true;}); return s; });
   const [dsPreviewed, setDsPreviewed] = useState(false);
   const [plPreviewed, setPlPreviewed] = useState(false);
+  const [dsGenerated, setDsGenerated] = useState(false);
+  const [plGenerated, setPlGenerated] = useState(false);
   const [dsReviewed, setDsReviewed] = useState(false);
   const [plReviewed, setPlReviewed] = useState(false);
   const [invoiceRef, setInvoiceRef] = useState('');
@@ -484,20 +513,28 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
       toast.error('Invoice upload failed: ' + (e.response?.data?.error || e.message));
     }
   };
+  const generateDS = () => {
+    if (!invoiceRef.trim()) { toast.error('Enter invoice number first'); return; }
+    setDsGenerated(true);
+    setDsPreviewed(false);
+    setDsReviewed(false);
+  };
   const previewDS = () => {
-    if (!invoiceRef.trim()) {
-      toast.error('Enter invoice number first');
-      return;
-    }
     printDoc(generateDeliverySlipPDF(order, selectedItems, shipNo, shipperName, awb, invoiceRef, custName));
     setDsPreviewed(true);
   };
+  const generatePL = () => {
+    if (!invoiceRef.trim()) { toast.error('Enter invoice number first'); return; }
+    setPlGenerated(true);
+    setPlPreviewed(false);
+    setPlReviewed(false);
+  };
   const previewPL = () => {
-    printDoc(generatePackingListPDF(order, selectedItems, order.grnRecords||[], shipNo, custName));
+    printDoc(generatePackingListPDF(order, selectedItems, order.grnRecords||[], shipNo, custName, invoiceRef));
     setPlPreviewed(true);
   };
   const canProceedShipping = awb.trim() && shipperId && (shipperId !== 'others' || otherCarrierName.trim());
-  const canProceedDocuments = dsReviewed && plReviewed && invoiceRef.trim() && !['uploading','error'].includes(invoiceUploadStatus) && (!ewayRequired||ewayBill.trim());
+  const canProceedDocuments = dsReviewed && plReviewed && invoiceRef.trim() && invoiceUploadStatus==='uploaded' && (!ewayRequired||ewayBill.trim());
   const handleDispatch = async () => {
     setSaving(true);
     try {
@@ -556,7 +593,7 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
               </div>
             )}
           </div>)}
-          {step===2&&(<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          {step===2&&(<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,alignItems:'end'}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Carrier *</label>
               {(!shippers || shippers.length===0) && (
@@ -592,48 +629,58 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
             </div>
           </div>)}
           {step===3&&(<div style={{display:'grid',gap:16}}>
-            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${invoiceRef?'var(--green)':'var(--amber,#d97706)'}`,background:'var(--surface2)'}}>
+            <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${invoiceRef&&invoiceFile?'var(--green)':'var(--amber,#d97706)'}`,background:'var(--surface2)'}}>
               <div style={{fontWeight:700,marginBottom:10}}>🧾 Invoice <span style={{color:'var(--red)'}}>*</span></div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Zoho Invoice Number *</label>
                   <input className="input" value={invoiceRef} onChange={e=>{
                     setInvoiceRef(e.target.value);
-                    // Delivery Slip includes invoice no, so force re-preview after invoice changes.
+                    setDsGenerated(false);
                     setDsPreviewed(false);
                     setDsReviewed(false);
+                    setPlGenerated(false);
+                    setPlPreviewed(false);
+                    setPlReviewed(false);
                   }} placeholder="e.g. INV-2026-00123" style={{borderColor:invoiceRef?'var(--green)':'var(--amber,#d97706)'}}/>
                 </div>
                 <div className="form-group" style={{marginBottom:0}}>
-                  <label className="label">Upload Invoice PDF (optional)</label>
-                  <input type="file" accept=".pdf,.PDF" className="input" onChange={handleInvoiceFile} style={{padding:'6px'}}/>
+                  <label className="label">Upload Invoice PDF *</label>
+                  <input type="file" accept=".pdf,.PDF" className="input" onChange={handleInvoiceFile} style={{padding:'6px',borderColor:invoiceFile?(invoiceUploadStatus==='error'?'var(--red)':'var(--green)'):'var(--amber,#d97706)'}}/>
                   {invoiceFile&&<div style={{fontSize:11,color:invoiceUploadStatus==='error'?'var(--red)':invoiceUploadStatus==='uploading'?'var(--accent)':'var(--green)',marginTop:2}}>
-                    {invoiceUploadStatus==='uploading' ? 'Uploading… ' : invoiceUploadStatus==='error' ? 'Upload failed: ' : '✅ Uploaded: '}
-                    {invoiceFile.name}
+                    {invoiceUploadStatus==='uploading'?'Uploading…':invoiceUploadStatus==='error'?'Upload failed:':'✅ Uploaded:'} {invoiceFile.name}
                   </div>}
                 </div>
               </div>
             </div>
             <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>📄 Delivery Slip</div>
+              <div style={{fontWeight:700,marginBottom:6}}>📄 Delivery Slip</div>
+              {invoiceRef.trim() && <div style={{fontSize:12,color:'var(--text3)',marginBottom:10}}>Invoice: {invoiceRef}</div>}
               <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-                <button className="btn btn-sm" onClick={previewDS} disabled={!invoiceRef.trim()} title={!invoiceRef.trim() ? 'Enter invoice number first' : ''}>👁 Preview DS</button>
-                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                  <input type="checkbox" checked={dsReviewed} disabled={!dsPreviewed} onChange={e=>setDsReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
-                  ✅ DS reviewed and correct
-                </label>
-                {!dsPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
+                <button className="btn btn-sm" onClick={generateDS} disabled={!invoiceRef.trim()} title={!invoiceRef.trim()?'Enter invoice number first':''}>⚙ Generate DS</button>
+                {dsGenerated && <button className="btn btn-sm" onClick={previewDS}>👁 Preview DS</button>}
+                {dsGenerated && (
+                  <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
+                    <input type="checkbox" checked={dsReviewed} disabled={!dsPreviewed} onChange={e=>setDsReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
+                    ✅ DS reviewed and correct
+                  </label>
+                )}
+                {dsGenerated && !dsPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
               </div>
             </div>
             <div style={{padding:'14px 16px',borderRadius:'var(--r)',border:'1px solid var(--border)',background:'var(--surface2)'}}>
-              <div style={{fontWeight:700,marginBottom:10}}>📦 Packing List</div>
+              <div style={{fontWeight:700,marginBottom:6}}>📦 Packing List</div>
+              {invoiceRef.trim() && <div style={{fontSize:12,color:'var(--text3)',marginBottom:10}}>Invoice: {invoiceRef}</div>}
               <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-                <button className="btn btn-sm" onClick={previewPL}>👁 Preview PL</button>
-                <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
-                  <input type="checkbox" checked={plReviewed} disabled={!plPreviewed} onChange={e=>setPlReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
-                  ✅ PL reviewed and correct
-                </label>
-                {!plPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
+                <button className="btn btn-sm" onClick={generatePL}>⚙ Generate PL</button>
+                {plGenerated && <button className="btn btn-sm" onClick={previewPL}>👁 Preview PL</button>}
+                {plGenerated && (
+                  <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:13}}>
+                    <input type="checkbox" checked={plReviewed} disabled={!plPreviewed} onChange={e=>setPlReviewed(e.target.checked)} style={{accentColor:'var(--green)'}}/>
+                    ✅ PL reviewed and correct
+                  </label>
+                )}
+                {plGenerated && !plPreviewed && <span style={{fontSize:11,color:'var(--text3)'}}>Preview required before tick</span>}
               </div>
             </div>
             {ewayRequired&&(<div style={{padding:'14px 16px',borderRadius:'var(--r)',border:`1px solid ${ewayBill?'var(--green)':'var(--red)'}`,background:'var(--surface2)'}}>

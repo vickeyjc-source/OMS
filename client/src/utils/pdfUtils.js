@@ -575,7 +575,7 @@ export function generateDeliverySlipPDF(order, selectedItems, shipmentNo, shippe
 }
 
 // ─── 6. PACKING LIST PDF ─────────────────────────────────────────────────────
-export function generatePackingListPDF(order, selectedItems, grnRecords, shipmentNo, custName) {
+export function generatePackingListPDF(order, selectedItems, grnRecords, shipmentNo, custName, invoiceRef) {
   const rows = selectedItems.map(li => {
     const grn = (grnRecords || []).find(g => g.order_item_id === li.id) || {};
     return `<tr>
@@ -601,6 +601,7 @@ export function generatePackingListPDF(order, selectedItems, grnRecords, shipmen
           <tr><td class="label" style="width:40%">Shipment No.</td><td class="accent mono">${shipmentNo}</td></tr>
           <tr><td class="label">Order ID</td><td>${order.id}</td></tr>
           <tr><td class="label">Customer PO</td><td>${order.po_number || '—'}</td></tr>
+          <tr><td class="label">Invoice No.</td><td class="mono">${invoiceRef || '—'}</td></tr>
           <tr><td class="label">Date</td><td>${today()}</td></tr>
         </table>
       </td>

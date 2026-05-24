@@ -343,8 +343,13 @@ export function CustomerModal({ customer, onClose, onSaved }) {
   });
 
   const [tab, setTab] = useState('details');
+  const [tried, setTried] = useState(false);
   const [billingEditMode, setBillingEditMode] = useState(() => !(customer?.billing_city || customer?.billing_street1));
+  const [billingTried, setBillingTried] = useState(false);
   const [shippingEditModes, setShippingEditModes] = useState({});
+  // Track if user has manually edited address attention/phone — if not, mirror top section live
+  const [billingAttentionEdited, setBillingAttentionEdited] = useState(!!(customer?.billing_attention));
+  const [billingPhoneEdited, setBillingPhoneEdited] = useState(!!(customer?.billing_phone));
 
   // Shipping addresses helpers
   const addShipping = () => {
@@ -433,12 +438,32 @@ export function CustomerModal({ customer, onClose, onSaved }) {
   };
 
   const save = () => {
-    if (!form.name && !form.first_name) { toast.error('Company name or first name required'); return; }
+    setTried(true);
+    setBillingTried(true);
+    // Required top-level fields
+    if (!form.name && !form.first_name) { toast.error('Name is required'); return; }
+    const mobileNum = (form.mobile||'').replace(/^\+\d+\s?/,'').trim();
+    if (!mobileNum) { toast.error('Mobile number is required'); return; }
+    if (!form.currency) { toast.error('Currency is required'); return; }
+    // Required Other Details tab
+    if (!intl && !form.place_of_supply) { toast.error('Place of Supply is required'); setTab('details'); return; }
+    if (!intl && !form.gstin) { toast.error('GSTIN is required'); setTab('details'); return; }
+    if (!intl && !form.pan) { toast.error('PAN is required'); setTab('details'); return; }
+    if (!form.payment_terms) { toast.error('Payment Terms is required'); setTab('details'); return; }
+    // Required Address tab — billing
+    if (!form.billing_street1 || !form.billing_city || !form.billing_state || !form.billing_country || !form.billing_pincode) {
+      toast.error('Billing address is incomplete — fill all required fields'); setTab('address'); setBillingEditMode(true); return;
+    }
+    const topName = [form.first_name, form.last_name].filter(Boolean).join(' ');
+    const finalAttention = billingAttentionEdited ? form.billing_attention : (topName || form.billing_attention);
+    const finalPhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
     const cleanAddresses = safeAddresses(form).map(({_isNew, ...rest}) => rest);
     mutation.mutate({
       ...form,
+      billing_attention: finalAttention,
+      billing_phone: finalPhone,
       shipping_addresses: cleanAddresses,
-      name: form.name || [form.first_name, form.last_name].filter(Boolean).join(' '),
+      name: form.name || topName,
       contact: [form.salutation,form.first_name,form.last_name].filter(Boolean).join(' ')||form.contact,
       city: form.billing_city||form.city, state: form.billing_state||form.state,
       country: form.billing_country||form.country,
@@ -448,6 +473,10 @@ export function CustomerModal({ customer, onClose, onSaved }) {
   const billingHasData = !!(form.billing_street1 || form.billing_city || form.billing_pincode);
   const shippingList = safeAddresses(form);
   const totalAddresses = (billingHasData ? 1 : 0) + shippingList.length;
+
+  const _topNameC = [form.first_name, form.last_name].filter(Boolean).join(' ');
+  const billingLiveAttention = billingAttentionEdited ? form.billing_attention : (_topNameC || form.billing_attention);
+  const billingLivePhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
   const intl = isIntl(form);
 
   return (
@@ -501,19 +530,20 @@ export function CustomerModal({ customer, onClose, onSaved }) {
           )}
 
           <div className="form-group" style={{marginBottom:13}}>
-            <label className="label">Primary Contact</label>
+            <label className="label">Primary Contact {(form.customer_type==='individual') && <span className="req">*</span>}</label>
             <div style={{display:'flex',gap:8}}>
               <select className="input" style={{width:90}} value={form.salutation} onChange={e=>set('salutation',e.target.value)}>
                 <option value="">—</option>{SALUTATIONS.map(s=><option key={s}>{s}</option>)}
               </select>
-              <input className="input" value={form.first_name} onChange={e=>set('first_name',e.target.value)} placeholder="First Name" style={{flex:1}}/>
-              <input className="input" value={form.last_name}  onChange={e=>set('last_name',e.target.value)}  placeholder="Last Name"  style={{flex:1}}/>
+              <input className="input" value={form.first_name} onChange={e=>{set('first_name',e.target.value);setBillingAttentionEdited(false);}} placeholder="First Name" style={{flex:1, ...(tried && form.customer_type==='individual' && !form.first_name ? {borderColor:'var(--red)'} : {})}}/>
+              <input className="input" value={form.last_name}  onChange={e=>{set('last_name',e.target.value);setBillingAttentionEdited(false);}}  placeholder="Last Name"  style={{flex:1}}/>
             </div>
           </div>
           {form.customer_type==='business' && (
             <div className="form-group" style={{marginBottom:13}}>
               <label className="label">Company Name <span className="req">*</span></label>
-              <input className="input" value={form.name} onChange={e=>set('name',e.target.value)} placeholder="Company / Organisation Name" />
+              <input className="input" value={form.name} onChange={e=>set('name',e.target.value)} placeholder="Company / Organisation Name"
+                style={tried && !form.name ? {borderColor:'var(--red)'} : {}} />
             </div>
           )}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:13,marginBottom:13}}>
@@ -521,15 +551,19 @@ export function CustomerModal({ customer, onClose, onSaved }) {
             <div className="form-group"><label className="label">Work Phone</label>
               <PhoneField value={form.phone} onChange={v=>set('phone',v)} domestic={!intl} excludeIndia={intl} />
             </div>
-            <div className="form-group"><label className="label">Mobile</label>
-              <PhoneField value={form.mobile} onChange={v=>set('mobile',v)} domestic={!intl} excludeIndia={intl} />
+            <div className="form-group">
+              <label className="label">Mobile <span className="req">*</span></label>
+              <PhoneField value={form.mobile} onChange={v=>{set('mobile',v);setBillingPhoneEdited(false);}} domestic={!intl} excludeIndia={intl} />
             </div>
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:4}}>
-            <div className="form-group"><label className="label">Currency</label>
+            <div className="form-group">
+              <label className="label">Currency <span className="req">*</span></label>
               {intl ? (
-                <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}>
+                <select className="input" value={form.currency} onChange={e=>set('currency',e.target.value)}
+                  style={tried && !form.currency ? {borderColor:'var(--red)'} : {}}>
+                  <option value="">— Select Currency —</option>
                   {ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}
                 </select>
               ) : (
@@ -556,23 +590,26 @@ export function CustomerModal({ customer, onClose, onSaved }) {
               {!intl ? (
                 <>
                   <div className="form-grid-2">
-                    <div className="form-group"><label className="label">GST Treatment</label>
+                    <div className="form-group"><label className="label">GST Treatment <span className="req">*</span></label>
                       <select className="input" value={form.gstin_type} onChange={e=>set('gstin_type',e.target.value)}>
                         {GST_TREATMENTS.map(g=><option key={g} value={g.toLowerCase().replace(/[^a-z0-9]/g,'_')}>{g}</option>)}
                       </select>
                     </div>
-                    <div className="form-group"><label className="label">Place of Supply</label>
-                      <select className="input" value={form.place_of_supply} onChange={e=>set('place_of_supply',e.target.value)}>
+                    <div className="form-group"><label className="label">Place of Supply <span className="req">*</span></label>
+                      <select className="input" value={form.place_of_supply} onChange={e=>set('place_of_supply',e.target.value)}
+                        style={tried && !form.place_of_supply ? {borderColor:'var(--red)'} : {}}>
                         <option value="">— Select State —</option>{INDIA_STATES.map(s=><option key={s}>{s}</option>)}
                       </select>
                     </div>
                   </div>
                   <div className="form-grid-2">
-                    <div className="form-group"><label className="label">GSTIN</label>
-                      <input className="input" value={form.gstin} onChange={e=>set('gstin',e.target.value.toUpperCase())} placeholder="29ABCDE1234F1Z5" maxLength={15}/>
+                    <div className="form-group"><label className="label">GSTIN <span className="req">*</span></label>
+                      <input className="input" value={form.gstin} onChange={e=>set('gstin',e.target.value.toUpperCase())} placeholder="29ABCDE1234F1Z5" maxLength={15}
+                        style={tried && !form.gstin ? {borderColor:'var(--red)'} : {}}/>
                     </div>
-                    <div className="form-group"><label className="label">PAN</label>
-                      <input className="input" value={form.pan} onChange={e=>set('pan',e.target.value.toUpperCase())} placeholder="ABCDE1234F" maxLength={10}/>
+                    <div className="form-group"><label className="label">PAN <span className="req">*</span></label>
+                      <input className="input" value={form.pan} onChange={e=>set('pan',e.target.value.toUpperCase())} placeholder="ABCDE1234F" maxLength={10}
+                        style={tried && !form.pan ? {borderColor:'var(--red)'} : {}}/>
                     </div>
                   </div>
                 </>
@@ -587,8 +624,9 @@ export function CustomerModal({ customer, onClose, onSaved }) {
                 </div>
               )}
               <div className="form-grid-2">
-                <div className="form-group"><label className="label">Payment Terms</label>
-                  <select className="input" value={form.payment_terms} onChange={e=>set('payment_terms',e.target.value)}>
+                <div className="form-group"><label className="label">Payment Terms <span className="req">*</span></label>
+                  <select className="input" value={form.payment_terms} onChange={e=>set('payment_terms',e.target.value)}
+                    style={tried && !form.payment_terms ? {borderColor:'var(--red)'} : {}}>
                     <option value="">— Select Payment Terms —</option>
                     {PAYMENT_TERMS_GROUPS.map(g=>(
                       <optgroup key={g.group} label={g.group}>
@@ -606,21 +644,24 @@ export function CustomerModal({ customer, onClose, onSaved }) {
             <div style={{paddingTop:16}}>
               {/* ── Billing Address ── */}
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
-                <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>🏢 Billing Address</div>
+                <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>🏢 Billing Address <span className="req">*</span></div>
                 {billingHasData && !billingEditMode && (
                   <button className="btn btn-xs" onClick={() => setBillingEditMode(true)}>✏ Edit</button>
                 )}
               </div>
               {!billingHasData && !billingEditMode ? (
-                <button className="btn btn-sm" style={{marginBottom:16}} onClick={() => setBillingEditMode(true)}>
-                  + Add Billing Address
-                </button>
+                <div>
+                  <button className="btn btn-sm" style={{marginBottom:8}} onClick={() => setBillingEditMode(true)}>
+                    + Add Billing Address
+                  </button>
+                  {billingTried && <div style={{fontSize:12,color:'var(--red)',marginBottom:12}}>Billing address is required</div>}
+                </div>
               ) : billingEditMode ? (
                 <div>
                   <AddressForm
                     value={{
-                      attention: form.billing_attention,
-                      phone: form.billing_phone,
+                      attention: billingLiveAttention,
+                      phone: billingLivePhone,
                       street1: form.billing_street1,
                       street2: form.billing_street2,
                       country: form.billing_country,
@@ -628,16 +669,22 @@ export function CustomerModal({ customer, onClose, onSaved }) {
                       city: form.billing_city,
                       pincode: form.billing_pincode,
                     }}
-                    onChange={a => setForm(f => ({...f,
-                      billing_attention: a.attention || '',
-                      billing_phone: a.phone || '',
-                      billing_street1: a.street1 || '',
-                      billing_street2: a.street2 || '',
-                      billing_country: a.country || 'India',
-                      billing_state: a.state || '',
-                      billing_city: a.city || '',
-                      billing_pincode: a.pincode || '',
-                    }))}
+                    onChange={a => {
+                      if (a.attention !== billingLiveAttention) setBillingAttentionEdited(true);
+                      if (a.phone !== billingLivePhone) setBillingPhoneEdited(true);
+                      setForm(f => ({...f,
+                        billing_attention: a.attention || '',
+                        billing_phone: a.phone || '',
+                        billing_street1: a.street1 || '',
+                        billing_street2: a.street2 || '',
+                        billing_country: a.country || 'India',
+                        billing_state: a.state || '',
+                        billing_city: a.city || '',
+                        billing_pincode: a.pincode || '',
+                      }));
+                    }}
+                    required={['street1','city','state','country','pincode']}
+                    tried={billingTried}
                     domestic={!intl}
                     excludeIndia={intl}
                   />

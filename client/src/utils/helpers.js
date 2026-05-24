@@ -53,28 +53,55 @@ export const ENQ_STATUSES = [
 ];
 
 export const STATUS_BADGE = {
-  // Order
-  open:        ['badge-blue',   'Open'],
-  closed:      ['badge-green',  'Closed'],
-  delivered:   ['badge-green',  'Delivered'],
-  failed:      ['badge-red',    'Failed'],
-  hold:        ['badge-amber',  'Hold'],
-  // Line items
-  negotiating: ['badge-purple', 'Negotiating'],
-  procurement: ['badge-blue',   'Procurement'],
-  payment:     ['badge-amber',  'Payment'],
-  shipped:     ['badge-teal',   'Shipped'],
-  // Enquiry
-  draft:       ['badge-gray',   '💾 Draft'],
-  new:         ['badge-gray',   'New'],
-  sourcing:    ['badge-purple', 'Sourcing'],
-  quoted:      ['badge-orange', 'Quoted'],
-  ordered:     ['badge-blue',   'Ordered'],
+  // Order — main statuses
+  open:                  ['badge-blue',   'Open'],
+  draft:                 ['badge-gray',   'Draft'],
+  closed:                ['badge-green',  'Closed'],
+  delivered:             ['badge-green',  'Delivered'],
+  failed:                ['badge-red',    'Failed'],
+  hold:                  ['badge-amber',  'Hold'],
+  cancelled:             ['badge-red',    'Cancelled'],
+  // Order — procurement / payment flow
+  procurement:           ['badge-blue',   'Procurement'],
+  payment_approval:      ['badge-amber',  'Customer Payment Approval'],
+  waiting_for_payment:   ['badge-amber',  'Customer Payment Approval'],
+  cust_payment_update:   ['badge-amber',  'Customer Payment Approval'],
+  sup_payment_update:    ['badge-orange', 'Supplier Payment Approval'],
+  // Order — shipping / hub flow
+  transit_hub:           ['badge-teal',   'Transit to Hub'],
+  transit_customer:      ['badge-teal',   'Transit to Customer'],
+  delivery_hub:          ['badge-teal',   'Delivery Hub'],
+  partial_hub:           ['badge-teal',   'Partial at Hub'],
+  partial_dispatched:    ['badge-teal',   'Partial Dispatched'],
+  delivered_hub:         ['badge-green',  'At Hub'],
+  delivered_customer:    ['badge-green',  'Delivered'],
+  // Line item statuses
+  negotiating:           ['badge-purple', 'Confirmed'],
+  confirmed:             ['badge-purple', 'Confirmed'],
+  payment:               ['badge-amber',  'Payment'],
+  shipped:               ['badge-teal',   'Shipped'],
+  partial_shipped:       ['badge-teal',   'Partial Shipped'],
+  ready_to_ship:         ['badge-green',  'Ready to Ship'],
+  grn_partial:           ['badge-amber',  'GRN Partial'],
+  grn_rejected:          ['badge-red',    'GRN Rejected'],
+  // Enquiry statuses
+  new:                   ['badge-gray',   'New'],
+  sourcing:              ['badge-purple', 'Sourcing'],
+  returned_to_sourcing:  ['badge-orange', 'Revision'],
+  quoted:                ['badge-orange', 'Quoted'],
+  ordered:               ['badge-blue',   'Ordered'],
+  order_created:         ['badge-blue',   'Order Created'],
+  // Quote statuses
+  active:                ['badge-blue',   'Active'],
+  superseded:            ['badge-gray',   'Superseded'],
   // Generic
-  pending:     ['badge-gray',   'Pending'],
-  'in-transit':['badge-teal',   'In Transit'],
-  received:    ['badge-green',  'Received'],
-  cancelled:   ['badge-red',    'Cancelled'],
+  pending:               ['badge-gray',   'Pending'],
+  received:              ['badge-green',  'Received'],
+  paid:                  ['badge-green',  'Paid'],
+  partial_paid:          ['badge-amber',  'Partial Paid'],
+  rejected:              ['badge-red',    'Rejected'],
+  approved:              ['badge-green',  'Approved'],
+  'in-transit':          ['badge-teal',   'In Transit'],
 };
 
 export const StatusBadge = ({ s }) => {

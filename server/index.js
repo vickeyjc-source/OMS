@@ -1566,7 +1566,7 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     linecards:     await g("SELECT COUNT(*) as c FROM linecards"),
     enquiries:     await g("SELECT COUNT(*) as c FROM enquiries"),
     enq_new:       await g("SELECT COUNT(*) as c FROM enquiries WHERE status='new'"),
-    enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status='sourcing'"),
+    enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('sourcing','returned_to_sourcing')"),
     enq_quoted:    await g("SELECT COUNT(*) as c FROM enquiries WHERE status='quoted'"),
     sourcing:      await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
     procurement:     await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),
@@ -2134,7 +2134,7 @@ function normalizedFinanceDocNo(prefix, orderId, existingValue) {
 // GET /api/finance/customer-queue
 app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const orders = await allAsync("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') ORDER BY created_at DESC");
-  const customers = await allAsync('SELECT id, name, email, gstin, customer_no, billing_city, billing_state FROM customers');
+  const customers = await allAsync('SELECT id, name, email, phone, mobile, work_phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone FROM customers');
   let payments = [];
   try { payments = await allAsync('SELECT * FROM customer_payments ORDER BY recorded_at DESC'); } catch(_) {}
   const custMap = {};
@@ -2171,7 +2171,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       payment_type: isAdvanceTerms(o.payment_terms) ? 'full_advance'
         : isPartialAdvanceTerms(o.payment_terms) ? 'partial_advance'
         : isNetTerms(o.payment_terms) ? 'net' : 'other',
-      last_payment: payments.filter(p => p.order_id === o.id)[0] || null,
+      last_payment: payments.filter(p => p.order_id === o.id && p.status === 'paid')[0] || null,
     };
   });
   res.json(result);
@@ -2309,14 +2309,16 @@ app.post('/api/po-requests', auth, asyncRoute(async (req, res) => {
       [d.order_id, d.supplier_id]);
     if (existing) return res.json({ ok: true, id: existing.id, already_exists: true });
   } catch(_) {}
+  // ensure payment_terms_type column exists
+  try { await runAsync("ALTER TABLE po_requests ADD COLUMN payment_terms_type TEXT DEFAULT 'net'"); } catch(_) {}
   const id = uuid();
   await runAsync(`INSERT INTO po_requests(id,order_id,supplier_order_id,supplier_id,supplier_name,order_ref,
-       status,requested_by,requested_at,notes,fulfilled_by,fulfilled_at,supplier_ref,zoho_po_number)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       status,requested_by,requested_at,notes,fulfilled_by,fulfilled_at,supplier_ref,zoho_po_number,payment_terms_type)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [id, d.order_id, d.supplier_order_id||'', d.supplier_id,
      d.supplier_name||'', d.order_ref||'',
      'pending', req.session.user.name, now,
-     d.notes||'', '', '', '', '']);
+     d.notes||'', '', '', '', '', d.payment_terms_type||'net']);
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), d.order_id, 'PO request sent to Finance for supplier: '+(d.supplier_name||d.supplier_id),
      req.session.user.name, '', now]); } catch(_) {}
@@ -2329,21 +2331,27 @@ app.put('/api/po-requests/:id', auth, asyncRoute(async (req, res) => {
   const d = req.body || {};
   const pr = await getAsync('SELECT * FROM po_requests WHERE id=?', [req.params.id]);
   if (!pr) return res.status(404).json({ error: 'Request not found' });
-  if (!d.supplier_ref?.trim() || !d.zoho_po_number?.trim())
-    return res.status(400).json({ error: 'Supplier PI and Zoho PO number are required' });
+  const isAdvance = (pr.payment_terms_type==='advance'||pr.payment_terms_type==='split');
+  if (!d.zoho_po_number?.trim())
+    return res.status(400).json({ error: 'Zoho PO number is required' });
+  if (isAdvance && !d.supplier_ref?.trim())
+    return res.status(400).json({ error: 'Supplier PI number is required for advance payment terms' });
   const now = nowStr();
+  const supplierRef = d.supplier_ref?.trim() || '';
   await runAsync(`UPDATE po_requests SET status='fulfilled', fulfilled_by=?, fulfilled_at=?,
        supplier_ref=?, zoho_po_number=? WHERE id=?`,
-    [req.session.user.name, now, d.supplier_ref.trim(), d.zoho_po_number.trim(), req.params.id]);
+    [req.session.user.name, now, supplierRef, d.zoho_po_number.trim(), req.params.id]);
   if (pr.supplier_order_id) {
     try {
       await runAsync('UPDATE supplier_orders SET supplier_ref=?, zoho_po_number=? WHERE id=?',
-        [d.supplier_ref.trim(), d.zoho_po_number.trim(), pr.supplier_order_id]);
+        [supplierRef, d.zoho_po_number.trim(), pr.supplier_order_id]);
     } catch(_) {}
   }
+  const histNote = isAdvance
+    ? 'Finance fulfilled PO request — PI: '+supplierRef+' | Zoho PO: '+d.zoho_po_number.trim()
+    : 'Finance fulfilled PO request — Zoho PO: '+d.zoho_po_number.trim();
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-    [uuid(), pr.order_id, 'Finance fulfilled PO request — PI: '+d.supplier_ref.trim()+' | Zoho PO: '+d.zoho_po_number.trim(),
-     req.session.user.name, '', now]); } catch(_) {}
+    [uuid(), pr.order_id, histNote, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true });
 }));
@@ -2528,31 +2536,37 @@ console.log('[STARTUP] Finance routes registered');
 // ── GRN ROUTES ───────────────────────────────────────────────────────────────
 // POST /api/orders/:id/grn — record goods receipt
 app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
-  const { records = [] } = req.body;
+  const { records = [], credit_note_no: cnNoInput } = req.body;
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
 
   let grnNo;
+  let grnSeq = 1;
   try {
     const existing = await allAsync('SELECT DISTINCT id FROM grn_records WHERE order_id=?', [req.params.id]);
-    grnNo = 'GRN-' + req.params.id + '-' + String(existing.length + 1).padStart(2,'0');
-  } catch(_) { grnNo = 'GRN-' + req.params.id + '-01'; }
+    grnSeq = existing.length + 1;
+    grnNo = 'GRN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0');
+  } catch(_) { grnSeq = 1; grnNo = 'GRN-' + req.params.id + '-01'; }
 
   let allFull = true;
   let anyReceived = false;
+  let anyShort = false;
   for (const r of records) {
     const li = await getAsync('SELECT * FROM order_items WHERE id=?', [r.order_item_id]);
     if (!li) continue;
     const qty = parseInt(r.qty_received) || 0;
     if (qty > 0) anyReceived = true;
+    const totalRecSoFar = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id]);
+    const prevRcvd = parseInt(totalRecSoFar?.t || 0);
+    if (prevRcvd + qty < li.qty) anyShort = true;
     try {
-      await runAsync(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      await runAsync(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at,credit_note_no)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [uuid(), req.params.id, r.order_item_id, r.supplier_id||'', r.coo||'',
          r.date_code||'', r.lot_number||'', r.weight_kg||null, qty,
          r.condition||'good', r.arrived_date||now.slice(0,10), r.notes||'',
-         req.session.user.id, now]);
+         req.session.user.id, now, cnNoInput||'']);
     } catch(_) {}
     if (qty > 0) {
       const totalRecRow = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id]);
@@ -2594,11 +2608,12 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     }
   }
 
+  const cnNo = cnNoInput || (anyShort ? 'CN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0') : '');
+  const histNote = (allFull?'Full':'Partial')+' GRN recorded — '+grnNo+(cnNo?' | CN: '+cnNo:'');
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-    [uuid(), req.params.id, (allFull?'Full':'Partial')+' GRN recorded — '+grnNo,
-     req.session.user.name, '', now]); } catch(_) {}
+    [uuid(), req.params.id, histNote, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, grn_no: grnNo, order_status: newOrderStatus });
+  res.json({ ok: true, grn_no: grnNo, credit_note_no: cnNo, order_status: newOrderStatus });
 }));
 
 // POST /api/orders/:id/shipments — create outbound shipment from Delivery Hub

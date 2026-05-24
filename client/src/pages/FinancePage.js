@@ -67,8 +67,10 @@ function generatePIHtml(order, customer, settings) {
   const coBankSwift= (settings||{}).bank_swift      || '';
   const custName  = customer?.name || '—';
   const custAddr  = [customer?.billing_attention, customer?.billing_street1, customer?.billing_street2].filter(Boolean).join(', ') || '—';
-  const custGstin = customer?.gstin || '—';
-  const custPhone = customer?.mobile || customer?.phone || '—';
+  const isIntl = (customer?.customer_scope || '').toLowerCase() === 'international';
+  const custTaxLabel = isIntl ? 'VAT No:' : 'GST No:';
+  const custTaxNo = isIntl ? (customer?.vat_number || '—') : (customer?.gstin || '—');
+  const custPhone = customer?.work_phone || customer?.mobile || customer?.phone || customer?.billing_phone || '—';
   const total     = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
   const baseTotal = items.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
   const gstTotal  = total - baseTotal;
@@ -160,7 +162,7 @@ function generatePIHtml(order, customer, settings) {
         <table class="addr-table">
           <tr><td class="addr-label">Customer</td><td>${custName}</td></tr>
           <tr><td class="addr-label">Address</td><td>${custAddr}${custAddr2?'<br/>'+custAddr2:''}</td></tr>
-          <tr><td class="addr-label">GST No:</td><td>${custGstin}</td></tr>
+          <tr><td class="addr-label">${custTaxLabel}</td><td>${custTaxNo}</td></tr>
           <tr><td class="addr-label">Contact No:</td><td>${custPhone}</td></tr>
         </table>
       </td>
@@ -169,7 +171,7 @@ function generatePIHtml(order, customer, settings) {
         <table class="addr-table">
           <tr><td class="addr-label">Customer</td><td>${custName}</td></tr>
           <tr><td class="addr-label">Address</td><td>${custAddr}${custAddr2?'<br/>'+custAddr2:''}</td></tr>
-          <tr><td class="addr-label">GST No:</td><td>${custGstin}</td></tr>
+          <tr><td class="addr-label">${custTaxLabel}</td><td>${custTaxNo}</td></tr>
           <tr><td class="addr-label">Contact No:</td><td>${custPhone}</td></tr>
         </table>
       </td>
@@ -202,32 +204,16 @@ function generatePIHtml(order, customer, settings) {
   </table>
   <div class="words-row">Amount in Words: ${numToWords(total)}</div>
 
-  <!-- TERMS & BANK -->
-  <table class="tc-table" style="margin-top:8px">
+  <!-- BANK DETAILS -->
+  <table class="tc-table" style="margin-top:8px;width:50%;margin-left:auto">
     <tr>
-      <td colspan="2" style="background:#374151;color:#fff;font-weight:700;text-align:center;padding:5px">TERMS AND CONDITIONS</td>
       <td colspan="2" style="background:#374151;color:#fff;font-weight:700;text-align:center;padding:5px">Bank Account Details</td>
     </tr>
-    <tr>
-      <td colspan="2" style="padding:4px 8px">1) All orders are accepted on NCNR</td>
-      <td style="font-weight:700;background:#f9fafb">Bank Name:</td><td>${coBankName}</td>
-    </tr>
-    <tr>
-      <td colspan="2">2) Payment Terms: Payment against delivery</td>
-      <td style="font-weight:700;background:#f9fafb">Account Number:</td><td>${coBankAcc}</td>
-    </tr>
-    <tr>
-      <td colspan="2">3) Mode of Payment: 100% advance</td>
-      <td style="font-weight:700;background:#f9fafb">Account Name:</td><td>${coBankHolder}</td>
-    </tr>
-    <tr>
-      <td colspan="2">4) Lead time: 1 - 2 Weeks</td>
-      <td style="font-weight:700;background:#f9fafb">Branch / IFSC Code:</td><td>${coBankIFSC}</td>
-    </tr>
-    <tr>
-      <td colspan="2">5) Goods once sold will not be taken back</td>
-      <td style="font-weight:700;background:#f9fafb">SWIFT Code:</td><td>${coBankSwift||'—'}</td>
-    </tr>
+    <tr><td style="font-weight:700;background:#f9fafb">Bank Name:</td><td>${coBankName}</td></tr>
+    <tr><td style="font-weight:700;background:#f9fafb">Account Number:</td><td>${coBankAcc}</td></tr>
+    <tr><td style="font-weight:700;background:#f9fafb">Account Name:</td><td>${coBankHolder}</td></tr>
+    <tr><td style="font-weight:700;background:#f9fafb">Branch / IFSC Code:</td><td>${coBankIFSC}</td></tr>
+    ${coBankSwift ? `<tr><td style="font-weight:700;background:#f9fafb">SWIFT Code:</td><td>${coBankSwift}</td></tr>` : ''}
   </table>
 
   <div class="sig-area">
@@ -581,7 +567,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Amount <span className="req">*</span></label>
-              {type === 'supplier-net' ? (
+              {(type === 'customer' || type === 'supplier-net') ? (
                 <div style={{padding:'8px 12px',borderRadius:'var(--r-sm)',background:'var(--surface2)',
                   border:'1px solid var(--border)',fontSize:13,fontFamily:'DM Mono,monospace',fontWeight:700}}>
                   {fmtM(parseFloat(form.amount)||0, form.currency)}
@@ -831,8 +817,8 @@ function PORequestsTab({ requests, onRefresh }) {
   return (
     <div>
       <div style={{marginBottom:10,fontSize:12,color:'var(--text3)'}}>
-        Procurement has requested Supplier PI Number and Zoho PO Number for these orders.
-        Fill in the details and submit — they will auto-populate in Procurement's PO Allocation.
+        Procurement has requested PO details for these orders. For advance payment terms, both Supplier PI and Zoho PO are required. For other terms, only Zoho PO is required.
+        Submit — details will auto-populate in Procurement's PO Allocation.
       </div>
       {pending.length === 0 ? (
         <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
@@ -920,6 +906,7 @@ function PORequestsTab({ requests, onRefresh }) {
 }
 
 function FulfillPORequestModal({ request, onClose, onSaved }) {
+  const isAdvance = (request.payment_terms_type==='advance'||request.payment_terms_type==='split');
   const [form, setForm] = useState({ supplier_ref: '', zoho_po_number: '' });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const mutation = useMutation({
@@ -927,6 +914,10 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
     onSuccess: () => { toast.success('✅ Details saved — Procurement will see them automatically!'); onSaved(); },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
+
+  const canSubmit = isAdvance
+    ? !mutation.isPending && form.supplier_ref.trim() && form.zoho_po_number.trim()
+    : !mutation.isPending && form.zoho_po_number.trim();
 
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
@@ -943,16 +934,18 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
               Requested by {request.requested_by} on {fmtDate(request.requested_at)}
             </div>
           </div>
-          <div className="form-group">
-            <label className="label">Supplier PI Number <span className="req">*</span></label>
-            <input className="input" value={form.supplier_ref}
-              onChange={e=>set('supplier_ref',e.target.value)}
-              placeholder="e.g. PI-2026-00123"
-              style={{borderColor:!form.supplier_ref?'var(--amber,#d97706)':undefined}}/>
-            <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
-              The Proforma Invoice number provided by the supplier
+          {isAdvance && (
+            <div className="form-group">
+              <label className="label">Supplier PI Number <span className="req">*</span></label>
+              <input className="input" value={form.supplier_ref}
+                onChange={e=>set('supplier_ref',e.target.value)}
+                placeholder="e.g. PI-2026-00123"
+                style={{borderColor:!form.supplier_ref?'var(--amber,#d97706)':undefined}}/>
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
+                The Proforma Invoice number provided by the supplier
+              </div>
             </div>
-          </div>
+          )}
           <div className="form-group" style={{marginBottom:0}}>
             <label className="label">Zoho PO Number <span className="req">*</span></label>
             <input className="input" value={form.zoho_po_number}
@@ -967,7 +960,7 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={mutation.isPending || !form.supplier_ref.trim() || !form.zoho_po_number.trim()}
+            disabled={!canSubmit}
             onClick={()=>mutation.mutate(form)}>
             {mutation.isPending ? 'Saving…' : '✅ Save & Send to Procurement'}
           </button>
@@ -1085,7 +1078,6 @@ export default function FinancePage() {
     try {
       const r = await api.post('/finance/pi/'+order.id);
       const pi_no = r.data.pi_no;
-      // Fetch full order details for PI
       const full = await api.get('/orders/'+order.id);
       const cust = order.customer;
       const html = generatePIHtml({...full.data, pi_no, payment_terms:order.payment_terms}, cust, settings);
@@ -1215,8 +1207,8 @@ export default function FinancePage() {
                       {o.total_paid>0 ? fmtM(o.total_paid) : '—'}
                     </td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
-                      color:o.balance_due>0?'var(--red)':'var(--green)'}}>
-                      {o.balance_due<=0 ? '✅ Paid' : fmtM(o.balance_due)}
+                      color:o.balance_due>0?'var(--red)':(o.total_paid>0?'var(--green)':'var(--text3)')}}>
+                      {(o.total_paid>0 && o.balance_due<=0) ? '✅ Paid' : fmtM(o.balance_due)}
                     </td>
                     <td>
                       {o.pi_no

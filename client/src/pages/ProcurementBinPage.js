@@ -172,7 +172,9 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               Object.entries(prev).forEach(([itemId, a]) => {
                 if (!a.supplier_id) return;
                 const hasPending = pending.some(r => r.supplier_id === a.supplier_id);
-                if (hasPending && !a.supplier_ref) next[itemId] = 'sent';
+                const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
+                const missingField = isAdv ? !a.supplier_ref : !a.zoho_po_number;
+                if (hasPending && missingField) next[itemId] = 'sent';
               });
               return next;
             });
@@ -200,20 +202,27 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
             const next = { ...prev };
             Object.entries(next).forEach(([itemId, a]) => {
               const fr = fulfilled.find(r => r.supplier_id === a.supplier_id);
-              if (fr && fr.supplier_ref && a.supplier_ref !== fr.supplier_ref) {
-                next[itemId] = { ...a, supplier_ref: fr.supplier_ref, zoho_po_number: fr.zoho_po_number || a.zoho_po_number };
-                // Clear the awaiting state — data is now here, button will hide
+              if (!fr) return;
+              const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
+              const newRef = fr.supplier_ref || a.supplier_ref;
+              const newZoho = fr.zoho_po_number || a.zoho_po_number;
+              // update if either field changed
+              if ((isAdv && fr.supplier_ref && a.supplier_ref !== fr.supplier_ref) ||
+                  (fr.zoho_po_number && a.zoho_po_number !== fr.zoho_po_number)) {
+                next[itemId] = { ...a, supplier_ref: newRef, zoho_po_number: newZoho };
                 changed = true;
               }
             });
             return changed ? next : prev;
           });
-          // Clear awaiting state for items whose supplier_ref is now filled
+          // Clear awaiting state for items whose expected field is now filled
           setPoRequests(prev => {
             const next = { ...prev };
             let changed = false;
             Object.entries(allocRef.current).forEach(([itemId, a]) => {
-              if (a.supplier_ref && next[itemId] === 'sent') {
+              const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
+              const filled = isAdv ? !!a.supplier_ref : !!a.zoho_po_number;
+              if (filled && next[itemId] === 'sent') {
                 delete next[itemId];
                 changed = true;
               }
@@ -440,7 +449,6 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                   <th>Assign Supplier <span style={{color:'var(--red)'}}>*</span></th>
                   <th>Supplier PI / Zoho PO</th>
                   <th>Payment Terms</th>
-                  <th>Promised Date</th>
                 </tr>
               </thead>
               <tbody>
@@ -532,92 +540,116 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                           </div>
                         )}
                       </td>
-                      {/* Supplier PI / PO request + Buying Price */}
+                      {/* Supplier PI (advance) / Zoho PO (net/split) */}
                       <td style={{minWidth:160}}>
                         <div>
-                          <input className="input" value={a.supplier_ref||''}
-                            readOnly
-                            placeholder="Supplier PI No. *"
-                            style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':'var(--green)',background:'var(--surface2)',cursor:'not-allowed'}}/>
-                          {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
-                          {a.supplier_id && !a.supplier_ref && (
-                            poRequests[li.id]==='sent' ? (
-                              <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
-                                padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
-                                border:'1px solid var(--accent)33'}}>
-                                ⏳ Waiting for Finance…
-                              </div>
-                            ) : (
-                              <button
-                                className="btn btn-xs"
-                                style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                disabled={poRequests[li.id]==='sending'}
-                                onClick={async()=>{
-                                  setPoRequests(r=>({...r,[li.id]:'sending'}));
-                                  try {
-                                    const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
-                                    await api.post('/po-requests', {
-                                      order_id: order.id,
-                                      supplier_id: a.supplier_id,
-                                      supplier_order_id: existingPO?.id || a._existing_po_id || '',
-                                      supplier_name: supName(a.supplier_id),
-                                      order_ref: order.po_number || order.id,
-                                    });
-                                    setPoRequests(r=>({...r,[li.id]:'sent'}));
-                                    toast.success('📋 Request sent to Finance team!');
-                                  } catch(e) {
-                                    setPoRequests(r=>({...r,[li.id]:'idle'}));
-                                    toast.error('Failed to send request');
-                                  }
-                                }}>
-                                {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request PO Info from Finance'}
-                              </button>
-                            )
+                          {(a.payment_terms_type==='advance'||a.payment_terms_type==='split') ? (
+                            <>
+                              <input className="input" value={a.supplier_ref||''}
+                                readOnly
+                                placeholder="Supplier PI No. *"
+                                style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':'var(--green)',background:'var(--surface2)',cursor:'not-allowed'}}/>
+                              {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
+                              {a.supplier_id && !a.supplier_ref && (
+                                poRequests[li.id]==='sent' ? (
+                                  <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
+                                    padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
+                                    border:'1px solid var(--accent)33'}}>
+                                    ⏳ Waiting for Finance…
+                                  </div>
+                                ) : (
+                                  <button
+                                    className="btn btn-xs"
+                                    style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                    disabled={poRequests[li.id]==='sending'}
+                                    onClick={async()=>{
+                                      setPoRequests(r=>({...r,[li.id]:'sending'}));
+                                      try {
+                                        const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
+                                        await api.post('/po-requests', {
+                                          order_id: order.id,
+                                          supplier_id: a.supplier_id,
+                                          supplier_order_id: existingPO?.id || a._existing_po_id || '',
+                                          supplier_name: supName(a.supplier_id),
+                                          order_ref: order.po_number || order.id,
+                                          payment_terms_type: a.payment_terms_type||'advance',
+                                        });
+                                        setPoRequests(r=>({...r,[li.id]:'sent'}));
+                                        toast.success('📋 Request sent to Finance team!');
+                                      } catch(e) {
+                                        setPoRequests(r=>({...r,[li.id]:'idle'}));
+                                        toast.error('Failed to send request');
+                                      }
+                                    }}>
+                                    {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request PI from Finance'}
+                                  </button>
+                                )
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {a.zoho_po_number
+                                ? <span className="mono" style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✓ {a.zoho_po_number}</span>
+                                : <span style={{fontSize:10,color:'var(--text3)'}}>Zoho PO via Finance</span>}
+                              {a.supplier_id && !a.zoho_po_number && (
+                                poRequests[li.id]==='sent' ? (
+                                  <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
+                                    padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
+                                    border:'1px solid var(--accent)33'}}>
+                                    ⏳ Waiting for Finance…
+                                  </div>
+                                ) : (
+                                  <button
+                                    className="btn btn-xs"
+                                    style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                    disabled={poRequests[li.id]==='sending'}
+                                    onClick={async()=>{
+                                      setPoRequests(r=>({...r,[li.id]:'sending'}));
+                                      try {
+                                        const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
+                                        await api.post('/po-requests', {
+                                          order_id: order.id,
+                                          supplier_id: a.supplier_id,
+                                          supplier_order_id: existingPO?.id || a._existing_po_id || '',
+                                          supplier_name: supName(a.supplier_id),
+                                          order_ref: order.po_number || order.id,
+                                          payment_terms_type: a.payment_terms_type||'net',
+                                        });
+                                        setPoRequests(r=>({...r,[li.id]:'sent'}));
+                                        toast.success('📋 Request sent to Finance team!');
+                                      } catch(e) {
+                                        setPoRequests(r=>({...r,[li.id]:'idle'}));
+                                        toast.error('Failed to send request');
+                                      }
+                                    }}>
+                                    {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request Zoho PO from Finance'}
+                                  </button>
+                                )
+                              )}
+                            </>
                           )}
                         </div>
                       </td>
-                      {/* Payment terms */}
+                      {/* Payment terms — read-only display */}
                       <td style={{minWidth:140}}>
                         <select className="input" value={a.payment_terms_type||'net'}
-                          onChange={e=>setA(li.id,'payment_terms_type',e.target.value)}
-                          style={{fontSize:11,marginBottom:4}}>
+                          disabled
+                          style={{fontSize:11,marginBottom:4,background:'var(--surface2)',color:'var(--text2)',cursor:'not-allowed'}}>
                           {PAYMENT_TERM_OPTIONS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
                         </select>
                         {a.payment_terms_type==='net'&&(
-                          <select className="input" value={a.payment_net_days||30}
-                            onChange={e=>setA(li.id,'payment_net_days',parseInt(e.target.value))}
-                            style={{fontSize:11}}>
-                            {NET_DAYS_OPTIONS.map(d=><option key={d} value={d}>Net {d}</option>)}
-                          </select>
+                          <div style={{fontSize:10,color:'var(--text3)'}}>Net {a.payment_net_days||30} days</div>
                         )}
                         {a.payment_terms_type==='advance'&&(
                           <div style={{fontSize:10,color:'var(--amber,#d97706)',fontWeight:600,marginTop:2}}>
-                            ⚠ Will be blocked — Finance must pay before release
+                            ⚠ Finance must pay before release
                           </div>
                         )}
                         {a.payment_terms_type==='split'&&(
-                          <div style={{display:'flex',alignItems:'center',gap:4,marginTop:4}}>
-                            <input className="input" type="number" min="0" max="100"
-                              value={a.payment_advance_pct||50}
-                              onChange={e=>setA(li.id,'payment_advance_pct',parseInt(e.target.value))}
-                              style={{fontSize:11,width:55}}/>
-                            <span style={{fontSize:11,color:'var(--text2)'}}>% advance</span>
+                          <div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>
+                            {a.payment_advance_pct||50}% advance
                           </div>
                         )}
-                        {a.payment_terms_type !== a._orig_payment_terms_type && (
-                          <div style={{marginTop:4}}>
-                            <input className="input" value={a.payment_terms_change_reason||''}
-                              onChange={e=>setA(li.id,'payment_terms_change_reason',e.target.value)}
-                              placeholder="Reason for change…"
-                              style={{fontSize:11,borderLeft:'3px solid var(--amber,#d97706)',paddingLeft:6}}/>
-                          </div>
-                        )}
-                      </td>
-                      {/* Date */}
-                      <td style={{minWidth:120}}>
-                        <input className="input" type="date" value={a.promised_delivery_date||''}
-                          onChange={e=>setA(li.id,'promised_delivery_date',e.target.value)}
-                          style={{fontSize:11}}/>
                       </td>
                     </tr>
                   );
@@ -648,7 +680,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
             </button>
             {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
             {!readOnly && (() => {
-              const missingPI = (order.lineItems||[]).some(li => alloc[li.id]?.supplier_id && !alloc[li.id]?.supplier_ref);
+              const missingPI = (order.lineItems||[]).some(li => {
+                const a = alloc[li.id];
+                if (!a?.supplier_id) return false;
+                const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
+                return isAdv && !a.supplier_ref;
+              });
               return (
                 <button className="btn btn-primary"
                   disabled={saving || Object.keys(grouped).length === 0 || missingPI}
@@ -661,6 +698,93 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Carrier Combo: search + manual entry + preset list ───────────────────────
+function CarrierCombo({ value, carrierOptions, onChange }) {
+  const [query, setQuery] = React.useState('');
+  const [manualMode, setManualMode] = React.useState(false);
+  const [manualVal, setManualVal] = React.useState('');
+  const [open, setOpen] = React.useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(() => {
+    const handler = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const filtered = carrierOptions.filter(c => c.name.toLowerCase().includes(query.toLowerCase()));
+
+  const displayLabel = React.useMemo(() => {
+    if (!value) return '';
+    const found = carrierOptions.find(c => c.id === value || c.name === value);
+    return found ? found.name : value;
+  }, [value, carrierOptions]);
+
+  if (manualMode) {
+    return (
+      <div className="form-group" style={{marginBottom:0}}>
+        <label className="label">Carrier</label>
+        <div style={{display:'flex',gap:4}}>
+          <input className="input" value={manualVal} placeholder="Type carrier name"
+            onChange={e=>setManualVal(e.target.value)}
+            onBlur={()=>{ if(manualVal.trim()) onChange(manualVal.trim()); }}
+            style={{flex:1}}/>
+          <button type="button" className="btn btn-xs" onClick={()=>{setManualMode(false);setManualVal('');}}>↩</button>
+        </div>
+        <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+          Press Tab/click outside to confirm
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="form-group" style={{marginBottom:0,position:'relative'}} ref={ref}>
+      <label className="label">Carrier</label>
+      <div style={{display:'flex',gap:4}}>
+        <div style={{flex:1,position:'relative'}}>
+          <input className="input" placeholder={displayLabel || 'Search carrier…'}
+            value={open ? query : displayLabel}
+            onFocus={()=>{setOpen(true);setQuery('');}}
+            onChange={e=>{setQuery(e.target.value);setOpen(true);}}
+            style={{width:'100%'}}/>
+          {open && (
+            <div style={{position:'absolute',top:'100%',left:0,right:0,background:'#fff',
+              border:'1px solid var(--border)',borderRadius:'var(--r-sm)',zIndex:200,
+              boxShadow:'0 4px 12px rgba(0,0,0,.12)',maxHeight:180,overflowY:'auto'}}>
+              {filtered.length===0 && (
+                <div style={{padding:'8px 12px',fontSize:12,color:'var(--text3)'}}>No match</div>
+              )}
+              {filtered.map(c=>(
+                <div key={c.id} style={{padding:'7px 12px',cursor:'pointer',fontSize:12,
+                  background: value===c.id||value===c.name ? 'var(--accent-lt)' : undefined,
+                  fontWeight: value===c.id||value===c.name ? 700 : 400}}
+                  onMouseDown={e=>{e.preventDefault();onChange(c.id);setOpen(false);setQuery('');}}>
+                  {c.name}
+                </div>
+              ))}
+              <div style={{borderTop:'1px solid var(--border)',padding:'7px 12px',cursor:'pointer',
+                fontSize:12,color:'var(--accent)',fontWeight:600}}
+                onMouseDown={e=>{e.preventDefault();setOpen(false);setManualMode(true);}}>
+                + Add manually
+              </div>
+            </div>
+          )}
+        </div>
+        <button type="button" className="btn btn-xs" title="Enter carrier manually"
+          onClick={()=>setManualMode(true)}>✏</button>
+      </div>
+      {value && (
+        <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+          Selected: <strong>{displayLabel}</strong>
+          <span style={{marginLeft:8,cursor:'pointer',color:'var(--red)'}}
+            onClick={()=>onChange('')}>✕ clear</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -691,7 +815,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     payment_net_days:       po.payment_net_days||30,
     payment_advance_pct:    po.payment_advance_pct||0,
     payment_due_date:       po.payment_due_date||'',
-    shipping_status:        po.shipping_status||'pending',
+    shipping_status:        po.shipping_status==='pending'?'scheduled':(po.shipping_status||'scheduled'),
     shipper_id:             po.shipper_id||'',
     tracking_no:            po.tracking_no||'',
     ship_load_date:         po.ship_load_date||'',
@@ -1009,7 +1133,14 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Promised Delivery Date</label>
-              <input className="input" type="date" value={form.promised_delivery_date} onChange={e=>set('promised_delivery_date',e.target.value)}/>
+              {(() => {
+                const todayStr = new Date().toISOString().slice(0,10);
+                return (
+                  <input className="input" type="date" value={form.promised_delivery_date}
+                    min={todayStr}
+                    onChange={e=>set('promised_delivery_date',e.target.value)}/>
+                );
+              })()}
             </div>
             {/* Payment Terms — show live supplier default for reference */}
             <div className="form-group" style={{marginBottom:0}}>
@@ -1062,17 +1193,33 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                 <div className="form-group" style={{marginBottom:0}}><label className="label">Shipping Status</label>
                   <select className="input" value={form.shipping_status} onChange={e=>set('shipping_status',e.target.value)}>
-                    {['pending','in-transit','partially-received','received','failed'].map(s=><option key={s}>{s}</option>)}
+                    {[
+                      {v:'scheduled', l:'scheduled'},
+                      {v:'in-transit', l:'in-transit'},
+                      {v:'partially-received', l:'partially-received'},
+                      {v:'received', l:'received'},
+                      {v:'failed', l:'failed'},
+                    ].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}
                   </select></div>
-                <div className="form-group" style={{marginBottom:0}}><label className="label">Carrier</label>
-                  <select className="input" value={form.shipper_id} onChange={e=>set('shipper_id',e.target.value)}>
-                    <option value="">— Select —</option>
-                    {carrierOptions.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select></div>
+                <CarrierCombo value={form.shipper_id} carrierOptions={carrierOptions} onChange={v=>set('shipper_id',v)}/>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Ship Load Date <span style={{fontSize:10,color:'var(--text3)',fontWeight:400}}>(date supplier dispatched)</span></label>
-                  <input className="input" type="date" value={form.ship_load_date}
-                    onChange={e=>set('ship_load_date',e.target.value)}/>
+                  {(() => {
+                    const todayStr2 = new Date().toISOString().slice(0,10);
+                    const maxDate = form.promised_delivery_date
+                      ? (() => {
+                          const d = new Date(form.promised_delivery_date);
+                          d.setDate(d.getDate()-1);
+                          return d.toISOString().slice(0,10);
+                        })()
+                      : undefined;
+                    return (
+                      <input className="input" type="date" value={form.ship_load_date}
+                        min={todayStr2}
+                        max={maxDate}
+                        onChange={e=>set('ship_load_date',e.target.value)}/>
+                    );
+                  })()}
                 </div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr',gap:10,marginTop:8}}>
