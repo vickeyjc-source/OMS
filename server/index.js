@@ -140,8 +140,17 @@ if (fs.existsSync(PORTAL)) {
 }
 
 if (fs.existsSync(BUILD)) {
-  app.use('/app', express.static(BUILD));
-  app.use(express.static(BUILD));
+  // index.html must never be cached — always re-fetch so new deploys take effect
+  const noCache = (req, res, next) => {
+    if (req.path === '/' || req.path.endsWith('.html')) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+    }
+    next();
+  };
+  app.use('/app', noCache, express.static(BUILD));
+  app.use(noCache, express.static(BUILD));
 }
 
 app.use((req, res, next) => {
@@ -2805,7 +2814,14 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
   app.get('*', (req, res) => {
     const idx = path.join(__dirname, '..', 'client', 'build', 'index.html');
-    fs.existsSync(idx) ? res.sendFile(idx) : res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
+    if (fs.existsSync(idx)) {
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
+      res.sendFile(idx);
+    } else {
+      res.json({ message: 'Ciflux OMS v2 API running. Build client first.' });
+    }
   });
 
 }).catch(err => { 
