@@ -1577,12 +1577,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status==='negotiating'?'Confirmed':li.line_status}</span></td>
                       <td>{(()=>{
-                        // Gross Margin = ((Cust Price × QTY) − (Sourced Price × QTY)) / (Cust Price × QTY) × 100
-                        const custTotal = (li.qty||0) * (li.unit_price||0);
-                        const srcTotal  = (li.qty||0) * (parseFloat(srcRow?.sourced_price)||0);
-                        if (!srcRow?.sourced_price || custTotal===0) return <span style={{color:'var(--text3)'}}>—</span>;
-                        const grossAmt = custTotal - srcTotal;
-                        const grossPct = (grossAmt / custTotal) * 100;
+                        const srcPrice   = Number(srcRow?.sourced_price) || 0;
+                        const quotePrice = Number(srcRow?.quote_price)   || 0;
+                        const marginPct  = Number(srcRow?.margin_pct)    || 0;
+                        if (!srcPrice || !quotePrice) return <span style={{color:'var(--text3)'}}>—</span>;
+                        const grossUnit  = quotePrice - srcPrice;
+                        const grossTotal = grossUnit * (li.qty||0);
+                        const grossPct   = srcPrice > 0 ? (marginPct / srcPrice * 100) : 0;
                         const col = grossPct < 0  ? '#dc2626'
                                   : grossPct <= 10 ? '#d97706'
                                   : grossPct <= 15 ? '#16a34a'
@@ -1591,7 +1592,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                           <div style={{fontWeight:800,color:col,fontSize:13,textAlign:'right'}}>
                             {grossPct.toFixed(1)}%
                             <div style={{fontSize:10,fontWeight:500,color:'var(--text3)',marginTop:1}}>
-                              {fmtM(grossAmt, li.currency)}
+                              +{fmtM(grossTotal, li.currency)}
                             </div>
                           </div>
                         );
