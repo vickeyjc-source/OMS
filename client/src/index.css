@@ -40,7 +40,7 @@ input, select, textarea { font-family: 'DM Sans', sans-serif; }
 ::-webkit-scrollbar-thumb { background: var(--surface3); border-radius: 3px; }
 
 /* LAYOUT */
-.app-layout { display: flex; height: 100vh; overflow: hidden; }
+.app-layout { display: flex; height: 125vh; overflow: hidden; }
 .sidebar { width: 196px; min-width: 196px; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
 .main-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 .topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 18px; height: 44px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
