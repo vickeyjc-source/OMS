@@ -2134,7 +2134,7 @@ function normalizedFinanceDocNo(prefix, orderId, existingValue) {
 // GET /api/finance/customer-queue
 app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const orders = await allAsync("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') ORDER BY created_at DESC");
-  const customers = await allAsync('SELECT id, name, email, phone, mobile, work_phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone FROM customers');
+  const customers = await allAsync('SELECT id, name, email, phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone FROM customers');
   let payments = [];
   try { payments = await allAsync('SELECT * FROM customer_payments ORDER BY recorded_at DESC'); } catch(_) {}
   const custMap = {};
