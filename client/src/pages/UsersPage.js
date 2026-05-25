@@ -150,23 +150,6 @@ function DangerZone() {
 
   return (
     <>
-      {/* Safe maintenance — heal data inconsistencies */}
-      <div style={{marginTop:32,border:'1.5px solid var(--green)',borderRadius:'var(--r)',overflow:'hidden',marginBottom:16}}>
-        <div style={{background:'var(--green)',padding:'10px 20px',display:'flex',alignItems:'center',gap:12}}>
-          <span style={{fontSize:18}}>🔧</span>
-          <div style={{fontWeight:700,fontSize:14,color:'#fff'}}>Data Maintenance</div>
-        </div>
-        <div style={{padding:'16px 20px',background:'#f0fdf4',display:'flex',alignItems:'center',justifyContent:'space-between',gap:16}}>
-          <div style={{fontSize:13,color:'var(--text2)'}}>
-            Fix data inconsistencies — closes enquiries whose linked order is already closed, corrects stuck payment statuses. Safe to run anytime.
-          </div>
-          <button className="btn" disabled={loading}
-            style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,whiteSpace:'nowrap',minWidth:120}}
-            onClick={doHeal}>
-            {loading ? '…' : '🔧 Fix Data'}
-          </button>
-        </div>
-      </div>
 
       <div style={{marginTop:0,border:'2px solid var(--red)',borderRadius:'var(--r)',overflow:'hidden'}}>
         {/* Header */}
