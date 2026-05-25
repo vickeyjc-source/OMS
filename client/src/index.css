@@ -32,7 +32,7 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: 'DM Sans', sans-serif; font-size: 13px; color: var(--text); background: var(--bg); line-height: 1.45; }
+body { font-family: 'DM Sans', sans-serif; font-size: 13px; color: var(--text); background: var(--bg); line-height: 1.45; zoom: 0.9; }
 button { font-family: 'DM Sans', sans-serif; cursor: pointer; }
 input, select, textarea { font-family: 'DM Sans', sans-serif; }
 ::-webkit-scrollbar { width: 4px; height: 4px; }
