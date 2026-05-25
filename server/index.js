@@ -1548,6 +1548,22 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
   res.json({ ok:true, deleted });
 }));
 
+// ── ADMIN: DATA HEAL ─────────────────────────────────────────────────────────
+app.post('/api/admin/heal', adminOnly, asyncRoute(async (req, res) => {
+  const fixes = [];
+  // Fix enquiries stuck at 'ordered'/'order_created' whose linked order is now 'closed'
+  try {
+    const r = await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('closed')`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} enquiries marked closed`);
+  } catch(e) { fixes.push('enquiry-close heal failed: ' + e.message); }
+  // Fix orders with payments >= total but stuck at payment_approval
+  try {
+    const r = await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} orders reverted from paid→payment_recorded`);
+  } catch(e) { fixes.push('payment heal failed: ' + e.message); }
+  res.json({ ok: true, fixes });
+}));
+
 // ── GLOBAL SEARCH ────────────────────────────────────────────────────────────
 app.get('/api/search', auth, asyncRoute(async (req, res) => {
   const q = (req.query.q || '').trim();
@@ -1783,8 +1799,9 @@ initDb().then(async () => {
   console.log('[STARTUP] DB ready — registering routes...');
   // Backfill: mark enquiries as closed if their linked order is closed
   try {
-    await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
-  } catch(_) {}
+    const r = await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
+    if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'enquiries → closed');
+  } catch(e) { console.error('[STARTUP] Enquiry close backfill failed:', e.message); }
   // Fix: revert orders incorrectly auto-healed to customer_payment_status='paid' without going through
   // the Release step. A properly released order has status='open' (set by customer-release endpoint).
   // If status is still 'payment_approval', the payment was never formally released — revert to 'payment_recorded'.

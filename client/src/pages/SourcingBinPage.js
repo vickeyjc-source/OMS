@@ -1288,12 +1288,13 @@ export default function SourcingBinPage() {
     );
   };
   // CHANGED: binEnqs includes sourcing + quoted + returned_to_sourcing + completed(old sourcing)
+  const isCompleted = e => ['ordered','order_created','closed'].includes(e.status) || hasDownstreamOrder(e);
   const binEnqs = enquiries.filter(e => {
     if (statusFilter === 'sourcing')             return e.status === 'sourcing' && !hasRevisionReturned(e);
     if (statusFilter === 'quoted')               return e.status === 'quoted';
     if (statusFilter === 'returned_to_sourcing') return e.status === 'returned_to_sourcing';
-    if (statusFilter === 'completed')            return ['ordered','order_created'].includes(e.status) || hasDownstreamOrder(e);
-    // 'all': sourcing + quoted + returned_to_sourcing + completed
+    if (statusFilter === 'completed')            return isCompleted(e);
+    // 'all': exclude closed — those are fully done
     return (e.status === 'sourcing' && !hasRevisionReturned(e))
         || e.status === 'quoted'
         || e.status === 'returned_to_sourcing'
@@ -1342,11 +1343,11 @@ export default function SourcingBinPage() {
         {/* ADDED: status filter chips — All / New / Moved to Quote / Revision */}
         <div className="filter-row" style={{ marginBottom:0 }}>
           {[
-            { v:'all',                   l:`All (${visibleEnquiries.filter(e=>(e.status==='sourcing'&&!hasRevisionReturned(e))||e.status==='quoted'||e.status==='returned_to_sourcing'||['ordered','order_created'].includes(e.status)||hasDownstreamOrder(e)).length})` },
+            { v:'all',                   l:`All (${visibleEnquiries.filter(e=>(e.status==='sourcing'&&!hasRevisionReturned(e))||e.status==='quoted'||e.status==='returned_to_sourcing'||(['ordered','order_created'].includes(e.status))||hasDownstreamOrder(e)).length})` },
             { v:'sourcing',              l:`New (${visibleEnquiries.filter(e=>e.status==='sourcing'&&!hasRevisionReturned(e)).length})` },
             { v:'quoted',                l:`Moved to Quote (${visibleEnquiries.filter(e=>e.status==='quoted').length})` },
             { v:'returned_to_sourcing',  l:`Revision Needed (${visibleEnquiries.filter(e=>e.status==='returned_to_sourcing').length})` },
-            { v:'completed',             l:`Completed (${visibleEnquiries.filter(e=>['ordered','order_created'].includes(e.status)||hasDownstreamOrder(e)).length})` },
+            { v:'completed',             l:`Completed (${visibleEnquiries.filter(isCompleted).length})` },
           ].map(f => (
             <span key={f.v} className={`fchip ${statusFilter===f.v?'active':''}`} onClick={()=>setStatusFilter(f.v)}>
               {f.l}
