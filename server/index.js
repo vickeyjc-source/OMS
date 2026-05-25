@@ -1508,20 +1508,27 @@ async function deleteBlobsForFiles(fileRows) {
   await Promise.all(fileRows.map(f => container.getBlockBlobClient(f.blob_name).deleteIfExists().catch(()=>{})));
 }
 
+async function safeDeleteTables(tables, blobCleanup) {
+  if (blobCleanup) {
+    const files = await allAsync('SELECT blob_name FROM app_files').catch(()=>[]);
+    await deleteBlobsForFiles(files);
+  }
+  let deleted = 0;
+  for (const t of tables) {
+    try {
+      const n = (await getAsync('SELECT COUNT(*) as n FROM '+t)||{n:0}).n;
+      await runAsync('DELETE FROM '+t);
+      deleted += Number(n);
+    } catch(_) {}
+  }
+  return deleted;
+}
+
 app.delete('/api/admin/delete/:module', adminOnly, asyncRoute(async (req, res) => {
   const mod = DELETABLE_MODULES[req.params.module];
   if (!mod) return res.status(400).json({ error:'Unknown module' });
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
-  let deleted = 0;
-  if (mod.tables.includes('app_files')) {
-    const files = await allAsync('SELECT blob_name FROM app_files').catch(()=>[]);
-    await deleteBlobsForFiles(files);
-  }
-  for (const t of mod.tables) {
-    const n = (await getAsync('SELECT COUNT(*) as n FROM '+t)||{n:0}).n;
-    await runAsync('DELETE FROM '+t);
-    deleted += Number(n);
-  }
+  const deleted = await safeDeleteTables(mod.tables, mod.tables.includes('app_files'));
   saveNow();
   console.log('[ADMIN DELETE]', req.session.user.username, 'deleted module:', req.params.module, 'rows:', deleted);
   res.json({ ok:true, module:req.params.module, label:mod.label, deleted });
@@ -1535,15 +1542,7 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
     'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
     'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
     'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'];
-  // Delete blobs before clearing DB records
-  const files = await allAsync('SELECT blob_name FROM app_files').catch(()=>[]);
-  await deleteBlobsForFiles(files);
-  let deleted = 0;
-  for (const t of tables) {
-    const n = (await getAsync('SELECT COUNT(*) as n FROM '+t)||{n:0}).n;
-    await runAsync('DELETE FROM '+t);
-    deleted += Number(n);
-  }
+  const deleted = await safeDeleteTables(tables, true);
   saveNow();
   console.warn('[MASTER DELETE]', req.session.user.username, 'wiped ALL data. Rows:', deleted);
   res.json({ ok:true, deleted });
