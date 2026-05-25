@@ -90,6 +90,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const { data: orderFiles=[] } = useQuery({
     queryKey: ['files', 'order', order.id],
     queryFn: () => api.get('/files', { params: { entity_type:'order', entity_id:order.id } }).then(r => r.data),
+    staleTime: 0,
+    refetchOnMount: true,
   });
 
   const [infoForm, setInfoForm] = useState({ enquiry_no:order.enquiry_no||'', quote_no:order.quote_no||'', tentative_date:order.tentative_date||'', po_number:order.po_number||'', notes:order.notes||'', delivery_address:order.delivery_address||'', allow_partial_shipment:order.allow_partial_shipment||0 });
