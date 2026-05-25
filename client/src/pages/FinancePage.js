@@ -465,8 +465,11 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const netAmount = type === 'supplier-net'
     ? String(Math.max(0, (parseFloat(item.confirmed_price)||0) - (parseFloat(item.net_total_paid)||0)) || item.confirmed_price || '')
     : '';
+  const custDefaultAmt = type === 'customer'
+    ? String(Math.min(parseFloat(item.balance_due)||0, parseFloat(item.order_total)||0) || parseFloat(item.order_total)||'')
+    : '';
   const [form, setForm] = useState({
-    amount: type === 'customer' ? String(item.balance_due||item.order_total||'') : type === 'supplier-net' ? netAmount : String(item.amount||''),
+    amount: type === 'customer' ? custDefaultAmt : type === 'supplier-net' ? netAmount : String(item.amount||''),
     currency: type === 'customer' ? 'INR' : (item.confirmed_currency||item.currency||'INR'),
     payment_method: '', payment_ref: '', payment_date: today(), notes: '',
     customer_po_no: type === 'customer' ? (item.po_number || '') : '',
@@ -1207,8 +1210,8 @@ export default function FinancePage() {
                       {o.total_paid>0 ? fmtM(o.total_paid) : '—'}
                     </td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
-                      color:o.balance_due>0?'var(--red)':(o.total_paid>0?'var(--green)':'var(--text3)')}}>
-                      {(o.total_paid>0 && o.balance_due<=0) ? '✅ Paid' : fmtM(o.balance_due)}
+                      color:o.customer_payment_status==='paid'?'var(--green)':o.balance_due>0?'var(--red)':'var(--text3)'}}>
+                      {o.customer_payment_status==='paid' ? '✅ Paid' : fmtM(o.balance_due)}
                     </td>
                     <td>
                       {o.pi_no

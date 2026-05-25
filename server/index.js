@@ -2169,8 +2169,8 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       const base = (li.qty||0)*(li.unit_price||0);
       return s + base + base*((li.tax_rate||0)/100);
     }, 0);
-    const paid = payments.filter(p => p.order_id === o.id && p.status === 'paid')
-      .reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
+    const orderPayments = payments.filter(p => p.order_id === o.id && p.status === 'paid');
+    const paid = orderPayments.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
     return {
       ...o,
       customer: custMap[o.customer_id] || null,
@@ -2180,7 +2180,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       payment_type: isAdvanceTerms(o.payment_terms) ? 'full_advance'
         : isPartialAdvanceTerms(o.payment_terms) ? 'partial_advance'
         : isNetTerms(o.payment_terms) ? 'net' : 'other',
-      last_payment: payments.filter(p => p.order_id === o.id && p.status === 'paid')[0] || null,
+      last_payment: orderPayments[0] || null,
     };
   });
   res.json(result);
@@ -2268,7 +2268,11 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
     const prevRows = await allAsync("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'", [req.params.order_id]);
     prevPaid = prevRows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   } catch(_) {}
-  const newPaid  = prevPaid + (parseFloat(d.amount)||0);
+  const incomingAmount = parseFloat(d.amount)||0;
+  if (total > 0 && incomingAmount > total) {
+    return res.status(400).json({ error: `Payment amount (${incomingAmount}) exceeds order total (${total.toFixed(2)}). Please check the amount.` });
+  }
+  const newPaid  = prevPaid + incomingAmount;
   const balance  = parseFloat(Math.max(0,total-newPaid).toFixed(2));
   await runAsync(`INSERT INTO customer_payments(
         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
