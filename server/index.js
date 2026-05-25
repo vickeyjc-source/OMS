@@ -1624,7 +1624,7 @@ app.get('/api/search', auth, asyncRoute(async (req, res) => {
 
 // ── REPORTS ──────────────────────────────────────────────────
 app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
-  const g = async q => (await getAsync(q)||{c:0}).c;
+  const g = async q => Number((await getAsync(q)||{c:0}).c) || 0;
   const finSupAdvance  = await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'");
   const finCustAdvance = await g("SELECT COUNT(*) as c FROM orders WHERE status='payment_approval' AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid'))");
   const finCustNet     = await g("SELECT COUNT(*) as c FROM orders WHERE status NOT IN ('closed','cancelled','deleted','payment_approval') AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid')) AND payment_terms NOT LIKE 'Advance%' AND payment_terms LIKE 'Net%'");
