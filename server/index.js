@@ -1625,6 +1625,10 @@ app.get('/api/search', auth, asyncRoute(async (req, res) => {
 // ── REPORTS ──────────────────────────────────────────────────
 app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
   const g = async q => (await getAsync(q)||{c:0}).c;
+  const finSupAdvance  = await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'");
+  const finCustAdvance = await g("SELECT COUNT(*) as c FROM orders WHERE status='payment_approval' AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid'))");
+  const finCustNet     = await g("SELECT COUNT(*) as c FROM orders WHERE status NOT IN ('closed','cancelled','deleted','payment_approval') AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid')) AND payment_terms NOT LIKE 'Advance%' AND payment_terms LIKE 'Net%'");
+  const finSupNet      = await g("SELECT COUNT(*) as c FROM supplier_orders WHERE payment_terms_type='net' AND status NOT IN ('paid','cancelled') AND (payment_blocked IS NULL OR payment_blocked=0)");
   res.json({
     total:         await g("SELECT COUNT(*) as c FROM orders"),
     open:          await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
@@ -1643,9 +1647,13 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('sourcing','returned_to_sourcing')"),
     enq_quoted:    await g("SELECT COUNT(*) as c FROM enquiries WHERE status='quoted'"),
     sourcing:      await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
-    procurement:     await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),
-    in_transit:      await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='shipped'"),
-    finance_pending: await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'"),
+    procurement:      await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),
+    in_transit:       await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='shipped'"),
+    finance_sup_advance:  finSupAdvance,
+    finance_cust_advance: finCustAdvance,
+    finance_cust_net:     finCustNet,
+    finance_sup_net:      finSupNet,
+    finance_pending:      finSupAdvance + finCustAdvance + finCustNet + finSupNet,
     delivery_hub:    await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('delivery_hub','transit_hub','partial_hub')"),
     quote_bin:       await g("SELECT COUNT(*) as c FROM quotes WHERE status='active'"),
     orders_new:      await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('open','draft')"),
