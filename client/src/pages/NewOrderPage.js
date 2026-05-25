@@ -25,6 +25,7 @@ function POUpload({ files, onChange, orderId }) {
   const inputRef = useRef();
 
   const processFiles = (incoming) => {
+    if (!orderId) { alert('Order ID not ready yet — please wait a moment and try again.'); return; }
     const newFiles = Array.from(incoming).filter(f => !files.find(x => x.name === f.name));
     if (!newFiles.length) return;
     const pendingFiles = newFiles.map(f => ({
@@ -367,6 +368,7 @@ export default function NewOrderPage() {
   const { data: orders=[] }    = useQuery({ queryKey:['orders'],     queryFn:()=>api.get('/orders').then(r=>r.data) });
   const { data: enquiries=[] } = useQuery({ queryKey:['enquiries'],  queryFn:()=>api.get('/enquiries').then(r=>r.data) });
   const { data: quotes=[] }    = useQuery({ queryKey:['quotes'],     queryFn:()=>api.get('/quotes').then(r=>r.data) });
+  const { data: nextIdData }   = useQuery({ queryKey:['orders-next-id'], queryFn:()=>api.get('/orders/next-id').then(r=>r.data), staleTime:0, refetchOnMount:true });
 
   const [form, setForm] = useState(() => ({
     customer_id:      prefill?.customer_id || '',
@@ -404,19 +406,14 @@ export default function NewOrderPage() {
   });
 
   const [poFiles, setPoFiles]   = useState([]);
-  const [orderId, setOrderId]   = useState(() => {
-    // Auto-generate immediately
-    const next = (orders.length || 0) + 1;
-    return 'CFOR' + String(next).padStart(4, '0');
-  });
+  const [orderId, setOrderId]   = useState('');
 
-  // Recalculate orderId once orders loads
+  // Use server-generated next ID — always accurate, avoids gaps/race conditions
   React.useEffect(() => {
-    if (orders.length > 0) {
-      const next = orders.length + 1;
-      setOrderId('CFOR' + String(next).padStart(4, '0'));
+    if (nextIdData?.id && !orderId) {
+      setOrderId(nextIdData.id);
     }
-  }, [orders.length]);
+  }, [nextIdData]);
 
   const addItem    = () => setItems(p=>[...p,{ id:'li'+Date.now(), component:'', manufacturer:'', ipn:'', qty:'', unit_price:'', quoted_price:'', target_price:'', currency:'INR', order_date:today(), delivery_date:'', line_status:'negotiating' }]);
   const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
@@ -691,7 +688,7 @@ export default function NewOrderPage() {
           <div style={{ display:'flex', alignItems:'center', gap:10 }}>
             {!existingOrderId && <>
               <span style={{ fontSize:11, color:'var(--text3)' }}>Order ID</span>
-              <span style={{ fontFamily:'DM Mono,monospace', fontWeight:700, fontSize:15, color:'var(--accent)', background:'var(--accent-lt)', padding:'4px 12px', borderRadius:'var(--r-sm)' }}>{orderId}</span>
+              <span style={{ fontFamily:'DM Mono,monospace', fontWeight:700, fontSize:15, color:'var(--accent)', background:'var(--accent-lt)', padding:'4px 12px', borderRadius:'var(--r-sm)' }}>{orderId || '...'}</span>
             </>}
           </div>
         </div>

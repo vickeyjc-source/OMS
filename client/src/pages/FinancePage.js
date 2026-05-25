@@ -1207,7 +1207,7 @@ export default function FinancePage() {
                     <td><TermsBadge terms={o.payment_terms}/></td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(o.order_total)}</td>
                     <td style={{textAlign:'right',fontFamily:'monospace',color:'var(--green)',fontWeight:600}}>
-                      {o.total_paid>0 ? fmtM(o.total_paid) : '—'}
+                      {['payment_recorded','paid'].includes(o.customer_payment_status) && o.total_paid>0 ? fmtM(o.total_paid) : '—'}
                     </td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
                       color:o.customer_payment_status==='paid'?'var(--green)':o.balance_due>0?'var(--red)':'var(--text3)'}}>

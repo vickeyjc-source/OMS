@@ -1253,6 +1253,16 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
 }));
 
 // ── ORDERS ───────────────────────────────────────────────────
+app.get('/api/orders/next-id', auth, asyncRoute(async (req, res) => {
+  const row = await getAsync("SELECT id FROM orders WHERE id LIKE 'CFOR%' ORDER BY id DESC LIMIT 1");
+  let next = 1;
+  if (row) {
+    const num = parseInt(row.id.replace('CFOR', ''), 10);
+    if (!isNaN(num)) next = num + 1;
+  }
+  res.json({ id: 'CFOR' + String(next).padStart(4, '0') });
+}));
+
 app.get('/api/orders', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
@@ -2264,13 +2274,17 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   const items = await allAsync('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
   const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
   let prevPaid = 0;
+  let prevRows = [];
   try {
-    const prevRows = await allAsync("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'", [req.params.order_id]);
+    prevRows = await allAsync("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'", [req.params.order_id]);
     prevPaid = prevRows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   } catch(_) {}
   const incomingAmount = parseFloat(d.amount)||0;
   if (total > 0 && incomingAmount > total) {
-    return res.status(400).json({ error: `Payment amount (${incomingAmount}) exceeds order total (${total.toFixed(2)}). Please check the amount.` });
+    return res.status(400).json({ error: `Payment amount (${incomingAmount.toFixed(2)}) exceeds order total (${total.toFixed(2)}). Please check the amount.` });
+  }
+  if (total > 0 && prevPaid >= total) {
+    return res.status(400).json({ error: `Order is already fully paid (paid: ${prevPaid.toFixed(2)}, total: ${total.toFixed(2)}). Use the Edit option to correct any wrong payment.` });
   }
   const newPaid  = prevPaid + incomingAmount;
   const balance  = parseFloat(Math.max(0,total-newPaid).toFixed(2));
