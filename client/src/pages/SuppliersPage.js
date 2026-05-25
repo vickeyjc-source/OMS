@@ -172,8 +172,8 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
   const [form, setForm] = useState(() => {
     if (!supplier?.id) return blank;
     let cp=[], sa=[];
-    try { cp = JSON.parse(supplier.contact_persons||'[]'); } catch(_){}
-    try { sa = JSON.parse(supplier.shipping_addresses||'[]'); } catch(_){}
+    try { const p = JSON.parse(supplier.contact_persons||'[]'); if (Array.isArray(p)) cp = p; } catch(_){}
+    try { const p = JSON.parse(supplier.shipping_addresses||'[]'); if (Array.isArray(p)) sa = p; } catch(_){}
     return {...blank,...supplier, contact_persons:cp, shipping_addresses:sa, linecards:supplier.linecards||[]};
   });
   const [tab, setTab] = useState(initialTab || 'details');
