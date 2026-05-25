@@ -1207,7 +1207,7 @@ export default function FinancePage() {
                     <td><TermsBadge terms={o.payment_terms}/></td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:600}}>{fmtM(o.order_total)}</td>
                     <td style={{textAlign:'right',fontFamily:'monospace',color:'var(--green)',fontWeight:600}}>
-                      {['payment_recorded','paid'].includes(o.customer_payment_status) && o.total_paid>0 ? fmtM(o.total_paid) : '—'}
+                      {o.total_paid > 0 ? fmtM(o.total_paid) : '—'}
                     </td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
                       color:o.customer_payment_status==='paid'?'var(--green)':o.balance_due>0?'var(--red)':'var(--text3)'}}>
@@ -1243,9 +1243,9 @@ export default function FinancePage() {
                         ) : (
                           <button className="btn btn-xs btn-primary"
                             onClick={()=>setPayModal({item:o,type:'customer'})}
-                            disabled={!o.pi_no}
-                            title={!o.pi_no ? 'Generate PI first before recording payment' : ''}
-                            style={{fontSize:11,opacity:o.pi_no?1:0.45,cursor:o.pi_no?'pointer':'not-allowed'}}>💳 Record Payment</button>
+                            disabled={!o.pi_no || o.balance_due <= 0}
+                            title={!o.pi_no ? 'Generate PI first before recording payment' : o.balance_due <= 0 ? 'Order is fully paid — use History to view payments' : ''}
+                            style={{fontSize:11,opacity:(o.pi_no && o.balance_due > 0)?1:0.45,cursor:(o.pi_no && o.balance_due > 0)?'pointer':'not-allowed'}}>💳 Record Payment</button>
                         )}
                       </div>
                     </td>

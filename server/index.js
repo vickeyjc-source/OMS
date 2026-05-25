@@ -1309,6 +1309,18 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   }
   await runAsync('INSERT INTO customer_shipping VALUES(?,?,?,?,?,?)', [d.id,'pending',null,'','','']);
   await runAsync('INSERT INTO order_documents VALUES(?,?,?,?,?,?,?)', [d.id,'','','','',d.po_file_ref||'','']);
+  // Remove any orphaned app_files linked to this order ID that were NOT explicitly uploaded for this order.
+  // This prevents files from abandoned NewOrderPage sessions (or race conditions) appearing in this order.
+  const validFileIds = (d.po_file_ref || '').split(',').map(s=>s.trim()).filter(Boolean);
+  try {
+    const existingFiles = await allAsync("SELECT id, blob_name FROM app_files WHERE entity_type='order' AND entity_id=?", [d.id]);
+    for (const f of existingFiles) {
+      if (!validFileIds.includes(f.id)) {
+        try { await getAzureContainerClient().getBlockBlobClient(f.blob_name).deleteIfExists(); } catch(_) {}
+        await runAsync('DELETE FROM app_files WHERE id=?', [f.id]);
+      }
+    }
+  } catch(_) {}
   await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [uuid(),d.id,'Order created',req.session.user.name,'',nowStr()]);
   // Mark the linked quote as order_created so it can't be re-ordered
   if (d.quote_id) {
@@ -2173,7 +2185,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   }
   const itemsByOrder = {};
   allItems.forEach(li => { (itemsByOrder[li.order_id] = itemsByOrder[li.order_id] || []).push(li); });
-  const result = filtered.map(o => {
+  const enriched = filtered.map(o => {
     const items = itemsByOrder[o.id] || [];
     const total = items.reduce((s, li) => {
       const base = (li.qty||0)*(li.unit_price||0);
@@ -2191,8 +2203,21 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
         : isPartialAdvanceTerms(o.payment_terms) ? 'partial_advance'
         : isNetTerms(o.payment_terms) ? 'net' : 'other',
       last_payment: orderPayments[0] || null,
+      _computed_total: total,
+      _computed_paid: paid,
     };
   });
+  // Auto-heal: if actual payments already cover the total, mark order as paid and exclude from queue
+  const healPromises = [];
+  for (const o of enriched) {
+    if (o._computed_total > 0 && o._computed_paid >= o._computed_total && o.customer_payment_status !== 'paid') {
+      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='paid' WHERE id=?", [o.id]).catch(()=>{}));
+    }
+  }
+  if (healPromises.length) await Promise.all(healPromises);
+  const result = enriched
+    .filter(o => !(o._computed_total > 0 && o._computed_paid >= o._computed_total))
+    .map(({ _computed_total, _computed_paid, ...rest }) => rest);
   res.json(result);
 }));
 
