@@ -1572,7 +1572,7 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     procurement:     await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),
     in_transit:      await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='shipped'"),
     finance_pending: await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'"),
-    delivery_hub:    await g("SELECT COUNT(*) as c FROM order_items WHERE line_status='delivered_hub'"),
+    delivery_hub:    await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('delivery_hub','transit_hub','partial_hub')"),
     quote_bin:       await g("SELECT COUNT(*) as c FROM quotes WHERE status='active'"),
     orders_new:      await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('open','draft')"),
   });
