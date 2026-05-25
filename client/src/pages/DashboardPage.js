@@ -26,7 +26,6 @@ export default function DashboardPage() {
 
   // ── Financial Dashboard State ──────────────────────────────────────────────
   const [finExpanded, setFinExpanded] = useState(true);
-  const [exchangeRate, setExchangeRate] = useState(83); // 1 USD = 83 INR (default)
 
   const doSearch = useCallback(async (q) => {
     if (!q || q.length < 2) { setSearchRes(null); setSearchOpen(false); return; }
@@ -347,20 +346,6 @@ export default function DashboardPage() {
 
           {finExpanded && (
             <>
-              {/* Exchange Rate Input */}
-              <div style={{marginBottom:14,padding:'12px 14px',background:'var(--surface2)',borderRadius:'var(--r)',display:'flex',alignItems:'center',gap:12}}>
-                <label style={{fontSize:12,fontWeight:600,color:'var(--text2)',whiteSpace:'nowrap'}}>Exchange Rate:</label>
-                <div style={{display:'flex',alignItems:'center',gap:6}}>
-                  <span style={{fontSize:11,color:'var(--text3)'}}>1 USD =</span>
-                  <input
-                    type="number"
-                    value={exchangeRate}
-                    onChange={(e)=>setExchangeRate(parseFloat(e.target.value)||0)}
-                    style={{width:70,padding:'6px 8px',border:'1px solid var(--border)',borderRadius:6,background:'var(--surface)',color:'var(--text)',fontSize:12,fontFamily:'inherit'}}
-                  />
-                  <span style={{fontSize:11,color:'var(--text3)'}}>INR</span>
-                </div>
-              </div>
 
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:16}}>
                 {[{label:'Today',key:'today',icon:'📅',color:'var(--teal)'},{label:'This Month',key:'month',icon:'🗓️',color:'var(--accent)'},{label:'This Year',key:'year',icon:'📆',color:'var(--purple)'},{label:'All Time',key:'all',icon:'🏆',color:'var(--green)'}].map(({label,key,icon,color})=>(
@@ -384,18 +369,7 @@ export default function DashboardPage() {
                         const total=val(orders);
                         if(!total)return null;
 
-                        // Calculate conversion for display
-                        const displayVal = (baseVal, baseCur) => {
-                          if (baseCur === 'INR') {
-                            const usd = baseVal / exchangeRate;
-                            return `${fmtVal(baseVal, 'INR')} ($${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(usd)})`;
-                          } else if (baseCur === 'USD') {
-                            const inr = baseVal * exchangeRate;
-                            return `${fmtVal(baseVal, 'USD')} (₹${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(inr)})`;
-                          } else {
-                            return fmtVal(baseVal, baseCur);
-                          }
-                        };
+                        const displayVal = (baseVal, baseCur) => fmtVal(baseVal, baseCur);
 
                         return<tr key={cur}>
                           <td><span className="mono bold">{cur}</span></td>

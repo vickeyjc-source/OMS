@@ -269,7 +269,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
-        <div className="modal-body" style={{paddingBottom:0, padding:'20px 28px 0 28px'}}>
+        <div className="modal-body" style={{padding:'16px 24px 0 24px', display:'flex', flexDirection:'column', minHeight:0}}>
 
           {/* ── Top fields ── */}
           <div className="form-group" style={{marginBottom:13}}>
@@ -333,11 +333,12 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
           </div>
 
           {/* ── Tabs ── */}
-          <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginTop:10,overflowX:'auto'}}>
+          <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginTop:10,overflowX:'auto',flexShrink:0}}>
             {[['details','Other Details'],['address','Address'],['contacts','Contact Persons'],['linecards','Line Cards'],['bank','Bank Details'],['remarks','Remarks']].map(([k,l])=>(
               <Tab key={k} label={l} active={tab===k} onClick={()=>setTab(k)}/>
             ))}
           </div>
+          <div style={{flex:1,overflowY:'auto',minHeight:0}}>
 
           {/* ── Other Details ── */}
           {tab==='details' && (
@@ -578,6 +579,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
+          </div>{/* end tab scroll wrapper */}
         </div>
         <div className="modal-footer">
           {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
@@ -685,10 +687,10 @@ export default function SuppliersPage() {
             <th>Sup. No.</th><th>Supplier Name</th><th>Type</th>
             <th>Contact</th><th>Location</th><th>GSTIN / VAT</th>
             <th>Currency</th><th>Line Cards</th><th>Terms</th><th>Status</th><th>Created</th>
-            <th style={{textAlign:'right'}}>Actions</th>
+            <th style={{textAlign:'right',whiteSpace:'nowrap'}}>Actions</th>
           </tr></thead>
           <tbody>
-            {filtered.length===0&&<tr><td colSpan={11}><div className="empty-state"><div className="empty-icon">🏭</div><div>No suppliers found</div></div></td></tr>}
+            {filtered.length===0&&<tr><td colSpan={12}><div className="empty-state"><div className="empty-icon">🏭</div><div>No suppliers found</div></div></td></tr>}
             {filtered.map(s=>{
               // Detect if this supplier matched via a line card search
               const lcMatchedBySearch = isLcSearch && (() => {
@@ -697,16 +699,16 @@ export default function SuppliersPage() {
               })();
               return (
               <tr key={s.id}>
-                <td><span className="mono" style={{fontWeight:700,color:'var(--accent)',fontSize:12}}>{s.supplier_no||s.id}</span></td>
+                <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{s.supplier_no||s.id}</span></td>
                 <td>
                   <div className="bold">{s.name}</div>
                   {s.website&&<div style={{fontSize:11,color:'var(--text3)'}}>{s.website}</div>}
                 </td>
                 <td>{s.type==='domestic'?<span className="badge badge-green">🇮🇳 Dom</span>:<span className="badge badge-blue">🌐 Intl</span>}</td>
-                <td><div style={{fontSize:12}}>{s.contact||'—'}</div><div style={{fontSize:11,color:'var(--text3)'}}>{s.email||''}</div></td>
-                <td style={{fontSize:12}}>{[s.city,s.country].filter(Boolean).join(', ')||'—'}</td>
-                <td className="mono" style={{fontSize:11}}>{s.gstin||s.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
-                <td style={{fontSize:12}}>{s.currency||'INR'}</td>
+                <td><div>{s.contact||'—'}</div><div style={{fontSize:11,color:'var(--text3)'}}>{s.email||''}</div></td>
+                <td>{[s.city,s.country].filter(Boolean).join(', ')||'—'}</td>
+                <td className="mono">{s.gstin||s.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
+                <td>{s.currency||'INR'}</td>
                 <td style={{maxWidth:180}}>
                   {(s.linecards||[]).length > 0
                     ? <span
@@ -718,12 +720,12 @@ export default function SuppliersPage() {
                       >{s.linecards.length}{lcMatchedBySearch ? ' 🏷' : ''}</span>
                     : <span className="muted">—</span>}
                 </td>
-                <td style={{fontSize:11,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.payment_terms||'—'}</td>
+                <td style={{maxWidth:130,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.payment_terms||'—'}</td>
                 <td>{s.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
-                <td style={{fontSize:11,color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(s.created||s.created_at)}</td>
-                <td style={{textAlign:'right',display:'flex',gap:4,justifyContent:'flex-end'}}>
+                <td style={{color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(s.created||s.created_at)}</td>
+                <td style={{textAlign:'right',whiteSpace:'nowrap'}}>
                   {lcMatchedBySearch && (
-                    <button className="btn btn-xs" style={{fontSize:10}} onClick={()=>openModal(s,'linecards')} title="Open Line Cards tab">🏷 Line Cards</button>
+                    <button className="btn btn-xs" style={{marginRight:4}} onClick={()=>openModal(s,'linecards')} title="Open Line Cards tab">🏷 Line Cards</button>
                   )}
                   <button className="btn btn-xs btn-primary" onClick={()=>openModal(s)}>✏ Manage</button>
                 </td>

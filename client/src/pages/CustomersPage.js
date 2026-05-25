@@ -494,7 +494,7 @@ export function CustomerModal({ customer, onClose, onSaved }) {
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
-        <div className="modal-body" style={{paddingBottom:0, padding:'20px 28px 0 28px'}}>
+        <div className="modal-body" style={{padding:'16px 24px 0 24px', display:'flex', flexDirection:'column', minHeight:0}}>
 
           {/* ── Top always-visible fields ── */}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:13,marginBottom:13}}>
@@ -578,11 +578,12 @@ export function CustomerModal({ customer, onClose, onSaved }) {
           </div>
 
           {/* ── Tabs ── */}
-          <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginTop:10,overflowX:'auto'}}>
+          <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginTop:10,overflowX:'auto',flexShrink:0}}>
             {[['details','Other Details'],['address','Address'],['contacts','Contact Persons'],['bank','Bank Details'],['remarks','Remarks']].map(([k,l])=>(
               <Tab key={k} label={l} active={tab===k} onClick={()=>setTab(k)}/>
             ))}
           </div>
+          <div style={{flex:1,overflowY:'auto',minHeight:0}}>
 
           {/* ── Tab: Other Details ── */}
           {tab==='details' && (
@@ -838,6 +839,7 @@ export function CustomerModal({ customer, onClose, onSaved }) {
             </div>
           )}
 
+          </div>{/* end tab scroll wrapper */}
         </div>
         <div className="modal-footer">
           {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
@@ -897,14 +899,14 @@ export default function CustomersPage() {
             <th>Cust. No.</th><th>Company / Name</th><th>Scope</th>
             <th>Contact</th><th>Email</th><th>Location</th>
             <th>GSTIN / VAT</th><th>Cur.</th><th>Orders</th><th>Status</th><th>Created</th>
-            <th style={{textAlign:'right'}}>Actions</th>
+            <th style={{textAlign:'right',whiteSpace:'nowrap'}}>Actions</th>
           </tr></thead>
           <tbody>
             {filtered.length===0&&<tr><td colSpan={12}><div className="empty-state"><div className="empty-icon">👤</div><div>No customers yet</div></div></td></tr>}
             {filtered.map(c=>(
               <tr key={c.id}>
                 <td>
-                  <span className="mono" style={{fontWeight:700,color:'var(--accent)',fontSize:12}}>{c.customer_no||c.id}</span>
+                  <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{c.customer_no||c.id}</span>
                 </td>
                 <td>
                   <div className="bold">{c.name}</div>
@@ -915,15 +917,15 @@ export default function CustomersPage() {
                     ? <span className="badge badge-blue">🌐 Intl</span>
                     : <span className="badge badge-green">🇮🇳 Dom</span>}
                 </td>
-                <td style={{fontSize:12}}>{c.contact||'—'}</td>
-                <td style={{color:'var(--accent)',fontSize:12}}>{c.email||'—'}</td>
-                <td style={{fontSize:12}}>{[c.city,c.state].filter(Boolean).join(', ')||'—'}</td>
-                <td className="mono" style={{fontSize:11}}>{c.gstin||c.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
-                <td style={{fontSize:12}}>{c.currency||'INR'}</td>
+                <td>{c.contact||'—'}</td>
+                <td style={{color:'var(--accent)'}}>{c.email||'—'}</td>
+                <td>{[c.city,c.state].filter(Boolean).join(', ')||'—'}</td>
+                <td className="mono">{c.gstin||c.vat_number||<span style={{color:'var(--text3)'}}>—</span>}</td>
+                <td>{c.currency||'INR'}</td>
                 <td><span className="badge badge-blue">{c.orders||0}</span></td>
                 <td>{c.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
-                <td style={{fontSize:11,color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(c.created||c.created_at)}</td>
-                <td style={{textAlign:'right'}}>
+                <td style={{color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(c.created||c.created_at)}</td>
+                <td style={{textAlign:'right',whiteSpace:'nowrap'}}>
                   <button className="btn btn-xs btn-primary" onClick={()=>setModal(c)}>✏ Manage</button>
                 </td>
               </tr>

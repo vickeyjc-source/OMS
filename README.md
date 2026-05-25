@@ -104,7 +104,7 @@ PG_HOST=localhost
 PG_PORT=5432
 PG_DB=ciflux_oms
 PG_USER=ciflux
-PG_PASSWORD=ciflux_pass
+PG_PASSWORD=Ciflux@123
 JWT_SECRET=replace_with_a_long_random_secret
 SESSION_SECRET=replace_with_another_long_random_secret
 AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=...
