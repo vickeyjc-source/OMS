@@ -1494,18 +1494,29 @@ app.post('/api/approvals/requests/:id/action', auth, asyncRoute(async (req, res)
 
 // ── ADMIN: MASTER DELETE (admin-only, logged) ────────────────────────────────
 const DELETABLE_MODULES = {
-  orders:    { label:'All Orders',        tables:['order_history','order_documents','customer_shipping','supplier_order_items','supplier_orders','order_items','orders'] },
+  orders:    { label:'All Orders',        tables:['shipment_items','shipments','grn_records','order_history','order_documents','customer_shipping','supplier_order_items','supplier_orders','order_items','orders','customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'] },
   enquiries: { label:'All Enquiries',     tables:['enquiry_history','enquiry_sourcing','enquiry_items','enquiries'] },
   quotes:    { label:'All Quotes',        tables:['quotes'] },
   sourcing:  { label:'All Sourcing Data', tables:['enquiry_sourcing'] },
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
+  finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
 };
+
+async function deleteBlobsForFiles(fileRows) {
+  if (!fileRows || !fileRows.length) return;
+  const container = getAzureContainerClient();
+  await Promise.all(fileRows.map(f => container.getBlockBlobClient(f.blob_name).deleteIfExists().catch(()=>{})));
+}
 
 app.delete('/api/admin/delete/:module', adminOnly, asyncRoute(async (req, res) => {
   const mod = DELETABLE_MODULES[req.params.module];
   if (!mod) return res.status(400).json({ error:'Unknown module' });
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
   let deleted = 0;
+  if (mod.tables.includes('app_files')) {
+    const files = await allAsync('SELECT blob_name FROM app_files').catch(()=>[]);
+    await deleteBlobsForFiles(files);
+  }
   for (const t of mod.tables) {
     const n = (await getAsync('SELECT COUNT(*) as n FROM '+t)||{n:0}).n;
     await runAsync('DELETE FROM '+t);
@@ -1519,9 +1530,14 @@ app.delete('/api/admin/delete/:module', adminOnly, asyncRoute(async (req, res) =
 app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
   if (req.body?.confirm_text !== 'DELETE ALL DATA') return res.status(400).json({ error:'Confirmation text mismatch' });
-  const tables = ['order_history','order_documents','customer_shipping','supplier_order_items',
+  const tables = ['shipment_items','shipments','grn_records',
+    'order_history','order_documents','customer_shipping','supplier_order_items',
     'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
-    'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows'];
+    'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
+    'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'];
+  // Delete blobs before clearing DB records
+  const files = await allAsync('SELECT blob_name FROM app_files').catch(()=>[]);
+  await deleteBlobsForFiles(files);
   let deleted = 0;
   for (const t of tables) {
     const n = (await getAsync('SELECT COUNT(*) as n FROM '+t)||{n:0}).n;
@@ -1769,6 +1785,12 @@ initDb().then(async () => {
   // Backfill: mark enquiries as closed if their linked order is closed
   try {
     await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
+  } catch(_) {}
+  // Fix: revert orders incorrectly auto-healed to customer_payment_status='paid' without going through
+  // the Release step. A properly released order has status='open' (set by customer-release endpoint).
+  // If status is still 'payment_approval', the payment was never formally released — revert to 'payment_recorded'.
+  try {
+    await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
   } catch(_) {}
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
   // customer_payments table created by db.js initDb() via pool.query()
@@ -2207,17 +2229,24 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       _computed_paid: paid,
     };
   });
-  // Auto-heal: if actual payments already cover the total, mark order as paid and exclude from queue
+  // Auto-heal: if actual payments already fully cover the total but status is still payment_approval
+  // (e.g. legacy data or test records), bump it to payment_recorded so Finance sees the Release button
+  // instead of a dead "Record Payment" that errors with "already fully paid".
+  // Do NOT set 'paid' here — that only happens when Finance explicitly clicks Release.
   const healPromises = [];
   for (const o of enriched) {
-    if (o._computed_total > 0 && o._computed_paid >= o._computed_total && o.customer_payment_status !== 'paid') {
-      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='paid' WHERE id=?", [o.id]).catch(()=>{}));
+    if (o._computed_total > 0 && o._computed_paid >= o._computed_total && o.customer_payment_status === 'payment_approval') {
+      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
     }
   }
   if (healPromises.length) await Promise.all(healPromises);
-  const result = enriched
-    .filter(o => !(o._computed_total > 0 && o._computed_paid >= o._computed_total))
-    .map(({ _computed_total, _computed_paid, ...rest }) => rest);
+  const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => {
+    // Reflect healed status in response immediately without waiting for next request
+    if (_computed_total > 0 && _computed_paid >= _computed_total && o.customer_payment_status === 'payment_approval') {
+      return { ...o, customer_payment_status: 'payment_recorded' };
+    }
+    return o;
+  });
   res.json(result);
 }));
 
