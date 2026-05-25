@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import { StatusBadge } from '../utils/helpers';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtM = (n, c='INR') => {
@@ -1218,13 +1219,7 @@ export default function FinancePage() {
                         ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:600}}>✅ {o.pi_no}</span>
                         : <span style={{fontSize:11,color:'var(--text3)'}}>Not generated</span>}
                     </td>
-                    <td>
-                      <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,
-                        background:o.status==='payment_approval'?'var(--amber-lt,#fffbeb)':'var(--green-lt)',
-                        color:o.status==='payment_approval'?'var(--amber,#d97706)':'var(--green)',fontWeight:600}}>
-                        {o.status}
-                      </span>
-                    </td>
+                    <td><StatusBadge s={o.status}/></td>
                     <td style={{textAlign:'right'}}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         <button className="btn btn-xs" onClick={()=>handleGeneratePI(o)}
@@ -1301,13 +1296,7 @@ export default function FinancePage() {
                           </div>
                         ) : '—'}
                       </td>
-                      <td>
-                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,
-                          background:o.customer_payment_status==='paid'?'var(--green-lt)':'var(--surface2)',
-                          color:o.customer_payment_status==='paid'?'var(--green)':'var(--text3)',fontWeight:600}}>
-                          {o.customer_payment_status||'pending'}
-                        </span>
-                      </td>
+                      <td><StatusBadge s={o.customer_payment_status||'pending'}/></td>
                       <td style={{textAlign:'right'}}>
                         {o.balance_due > 0 && (
                           <button className="btn btn-xs btn-primary"
@@ -1457,14 +1446,7 @@ export default function FinancePage() {
                           </div>
                         ) : '—'}
                       </td>
-                      <td>
-                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,
-                          background:isPartial?'var(--amber-lt,#fffbeb)':'var(--surface2)',
-                          color:isPartial?'var(--amber,#d97706)':'var(--text3)',fontWeight:600,
-                          border:isPartial?'1px solid var(--amber,#d97706)33':undefined}}>
-                          {isPartial ? 'partial paid' : (r.status||'pending')}
-                        </span>
-                      </td>
+                      <td><StatusBadge s={r.status||'pending'}/></td>
                       <td style={{textAlign:'right'}}>
                         <button className="btn btn-xs btn-primary"
                           onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}

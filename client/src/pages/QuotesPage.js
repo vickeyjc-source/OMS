@@ -8,8 +8,8 @@ import { toast } from 'react-hot-toast';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
-const STATUS_FILTERS = ['all', 'active', 'superseded', 'order_created', 'returned_to_sourcing'];
-const STATUS_PRIORITY = ['active', 'returned_to_sourcing', 'order_created', 'superseded'];
+const STATUS_FILTERS = ['all', 'active', 'superseded', 'order_created', 'returned_to_sourcing', 'closed'];
+const STATUS_PRIORITY = ['active', 'returned_to_sourcing', 'order_created', 'superseded', 'closed'];
 
 function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const qc = useQueryClient();
@@ -662,6 +662,7 @@ export default function QuotesPage() {
     superseded:            enquiryGroups.filter(q=>q.status==='superseded').length,
     order_created:         enquiryGroups.filter(q=>q.status==='order_created').length,
     returned_to_sourcing:  enquiryGroups.filter(q=>q.status==='returned_to_sourcing').length,
+    closed:                enquiryGroups.filter(q=>q.status==='closed').length,
   };
 
   const filterLabels = {
@@ -670,6 +671,7 @@ export default function QuotesPage() {
     superseded:           `Superseded (${counts.superseded})`,
     order_created:        `Order Created (${counts.order_created})`,
     returned_to_sourcing: `Sent to Revision (${counts.returned_to_sourcing})`,
+    closed:               `Closed (${counts.closed})`,
   };
 
   return (

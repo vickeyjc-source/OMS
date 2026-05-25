@@ -1382,6 +1382,11 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
     if (o.enquiry_id) {
       await runAsync("UPDATE enquiries SET status='closed', updated_at=? WHERE id=?", [nowStr(), o.enquiry_id]);
     }
+    if (o.quote_id) {
+      await runAsync("UPDATE quotes SET status='closed' WHERE id=?", [o.quote_id]);
+    } else if (o.enquiry_id) {
+      await runAsync("UPDATE quotes SET status='closed' WHERE enquiry_id=? AND status NOT IN ('superseded')", [o.enquiry_id]);
+    }
   }
 
   if (d.lineItems !== undefined) {
@@ -1556,6 +1561,13 @@ app.post('/api/admin/heal', adminOnly, asyncRoute(async (req, res) => {
     const r = await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('closed')`);
     if (r && r.rowCount) fixes.push(`${r.rowCount} enquiries marked closed`);
   } catch(e) { fixes.push('enquiry-close heal failed: ' + e.message); }
+  // Fix quotes whose linked order is closed but quote not yet marked closed
+  try {
+    const r1 = await runAsync(`UPDATE quotes SET status='closed' WHERE id IN (SELECT quote_id FROM orders WHERE status='closed' AND quote_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
+    const r2 = await runAsync(`UPDATE quotes SET status='closed' WHERE enquiry_id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
+    const n = (r1?.rowCount||0) + (r2?.rowCount||0);
+    if (n) fixes.push(`${n} quotes marked closed`);
+  } catch(e) { fixes.push('quote-close heal failed: ' + e.message); }
   // Fix orders with payments >= total but stuck at payment_approval
   try {
     const r = await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
@@ -1802,6 +1814,15 @@ initDb().then(async () => {
     const r = await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
     if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'enquiries → closed');
   } catch(e) { console.error('[STARTUP] Enquiry close backfill failed:', e.message); }
+  // Backfill: mark quotes as closed if their linked order is closed
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='closed' WHERE id IN (SELECT quote_id FROM orders WHERE status='closed' AND quote_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
+    if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'quotes → closed');
+  } catch(e) { console.error('[STARTUP] Quote close backfill failed:', e.message); }
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='closed' WHERE enquiry_id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
+    if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'quotes → closed (via enquiry)');
+  } catch(e) { console.error('[STARTUP] Quote close backfill (enquiry) failed:', e.message); }
   // Fix: revert orders incorrectly auto-healed to customer_payment_status='paid' without going through
   // the Release step. A properly released order has status='open' (set by customer-release endpoint).
   // If status is still 'payment_approval', the payment was never formally released — revert to 'payment_recorded'.

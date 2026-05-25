@@ -99,6 +99,7 @@ export const STATUS_BADGE = {
   received:              ['badge-green',  'Received'],
   paid:                  ['badge-green',  'Paid'],
   partial_paid:          ['badge-amber',  'Partial Paid'],
+  payment_recorded:      ['badge-purple', 'Payment Recorded'],
   rejected:              ['badge-red',    'Rejected'],
   approved:              ['badge-green',  'Approved'],
   'in-transit':          ['badge-teal',   'In Transit'],
