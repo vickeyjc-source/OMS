@@ -449,6 +449,12 @@ export default function InventoryPage() {
     refetchInterval: 30000,
   });
 
+  const { data: holdsMap = {} } = useQuery({
+    queryKey: ['inventory-holds'],
+    queryFn: () => api.get('/inventory/holds').then(r => r.data || {}),
+    refetchInterval: 30000,
+  });
+
   const { data: customers = [] } = useQuery({
     queryKey: ['customers'],
     queryFn: () => api.get('/customers').then(r => Array.isArray(r.data) ? r.data : []),
@@ -496,14 +502,16 @@ export default function InventoryPage() {
 
   const totalItems     = inventory.length;
   const totalAvailable = inventory.reduce((s, r) => s + (r.quantity_available || 0), 0);
+  const totalOnHold    = inventory.reduce((s, r) => s + (holdsMap[r.id] || 0), 0);
+  const totalFree      = Math.max(0, totalAvailable - totalOnHold);
   const customerCount  = inventory.filter(r => r.holder_type === 'customer').length;
   const supplierCount  = inventory.filter(r => r.holder_type === 'supplier').length;
 
   const CARDS = [
     { label: 'Total Items',         value: totalItems,           color: 'var(--accent)', bg: 'var(--accent-lt)' },
     { label: 'Total Available Qty', value: fmt(totalAvailable),  color: '#15803d',       bg: '#f0fdf4' },
-    { label: 'Customer Stock',      value: customerCount,        color: '#d97706',       bg: '#fffbeb' },
-    { label: 'Supplier Stock',      value: supplierCount,        color: '#7c3aed',       bg: '#f5f3ff' },
+    { label: 'On Hold (Active Orders)', value: fmt(totalOnHold), color: '#d97706',       bg: '#fffbeb' },
+    { label: 'Free (Ready to Source)', value: fmt(totalFree),    color: '#2563eb',       bg: '#eff6ff' },
   ];
 
   const modalProps = {
@@ -580,6 +588,8 @@ export default function InventoryPage() {
                 <th>Manufacturer</th>
                 <th>Date Code</th>
                 <th style={{ color: '#15803d' }}>Available Qty</th>
+                <th style={{ color: '#d97706' }}>On Hold</th>
+                <th style={{ color: '#2563eb' }}>Free Qty</th>
                 <th>Sell Price</th>
                 <th>Type</th>
                 <th>Holder</th>
@@ -590,44 +600,74 @@ export default function InventoryPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((row, idx) => (
-                <tr key={row.id}>
-                  <td style={{ color: 'var(--text3)', fontSize: 11 }}>{idx + 1}</td>
-                  <td><span style={{ fontWeight: 700, color: 'var(--accent)' }}>{row.component}</span></td>
-                  <td style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'monospace' }}>{row.ipn || '—'}</td>
-                  <td style={{ fontSize: 12 }}>{row.manufacturer || '—'}</td>
-                  <td style={{ fontSize: 11 }}>
-                    {row.date_code
-                      ? <span style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 3, color: '#6b7280', fontWeight: 600, fontSize: 11 }}>{row.date_code}</span>
-                      : '—'}
-                  </td>
-                  <td style={{ textAlign: 'right' }}>
-                    <span style={{
-                      fontWeight: 800, fontSize: 13,
-                      color: row.quantity_available > 0 ? '#15803d' : '#dc2626',
-                      background: row.quantity_available > 0 ? '#dcfce7' : '#fee2e2',
-                      padding: '2px 8px', borderRadius: 999,
-                      border: '1px solid ' + (row.quantity_available > 0 ? '#86efac' : '#fca5a5'),
-                    }}>
-                      {fmt(row.quantity_available)}
-                    </span>
-                  </td>
-                  <td style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>
-                    {row.target_price ? row.target_currency + ' ' + fmt(row.target_price) : '—'}
-                  </td>
-                  <td><HolderBadge type={row.holder_type} /></td>
-                  <td style={{ fontWeight: 600, fontSize: 12 }}>{row.holder_display || '—'}</td>
-                  <td style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'monospace' }}>{row.reference_order_id || '—'}</td>
-                  <td style={{ fontSize: 11, color: 'var(--text2)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.notes || '—'}</td>
-                  <td style={{ fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDateTime(row.added_at)}</td>
-                  <td>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button className="btn btn-xs" title="Edit" onClick={() => setEditItem(row)}>✏️</button>
-                      <button className="btn btn-xs btn-danger" title="Delete" onClick={() => setDeleteTarget(row)}>🗑</button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((row, idx) => {
+                const onHold = holdsMap[row.id] || 0;
+                const freeQty = Math.max(0, (row.quantity_available || 0) - onHold);
+                return (
+                  <tr key={row.id}>
+                    <td style={{ color: 'var(--text3)', fontSize: 11 }}>{idx + 1}</td>
+                    <td><span style={{ fontWeight: 700, color: 'var(--accent)' }}>{row.component}</span></td>
+                    <td style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'monospace' }}>{row.ipn || '—'}</td>
+                    <td style={{ fontSize: 12 }}>{row.manufacturer || '—'}</td>
+                    <td style={{ fontSize: 11 }}>
+                      {row.date_code
+                        ? <span style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 3, color: '#6b7280', fontWeight: 600, fontSize: 11 }}>{row.date_code}</span>
+                        : '—'}
+                    </td>
+                    {/* Available Qty */}
+                    <td style={{ textAlign: 'right' }}>
+                      <span style={{
+                        fontWeight: 800, fontSize: 13,
+                        color: row.quantity_available > 0 ? '#15803d' : '#dc2626',
+                        background: row.quantity_available > 0 ? '#dcfce7' : '#fee2e2',
+                        padding: '2px 8px', borderRadius: 999,
+                        border: '1px solid ' + (row.quantity_available > 0 ? '#86efac' : '#fca5a5'),
+                      }}>
+                        {fmt(row.quantity_available)}
+                      </span>
+                    </td>
+                    {/* On Hold */}
+                    <td style={{ textAlign: 'right' }}>
+                      {onHold > 0 ? (
+                        <span style={{
+                          fontWeight: 700, fontSize: 12,
+                          color: '#d97706', background: '#fffbeb',
+                          padding: '2px 8px', borderRadius: 999,
+                          border: '1px solid #fde68a',
+                        }}>
+                          🔒 {fmt(onHold)}
+                        </span>
+                      ) : <span style={{ color: 'var(--text3)', fontSize: 12 }}>—</span>}
+                    </td>
+                    {/* Free Qty */}
+                    <td style={{ textAlign: 'right' }}>
+                      <span style={{
+                        fontWeight: 700, fontSize: 12,
+                        color: freeQty > 0 ? '#2563eb' : '#dc2626',
+                        background: freeQty > 0 ? '#eff6ff' : '#fee2e2',
+                        padding: '2px 8px', borderRadius: 999,
+                        border: '1px solid ' + (freeQty > 0 ? '#bfdbfe' : '#fca5a5'),
+                      }}>
+                        {fmt(freeQty)}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: 12, textAlign: 'right', fontWeight: 600 }}>
+                      {row.target_price ? row.target_currency + ' ' + fmt(row.target_price) : '—'}
+                    </td>
+                    <td><HolderBadge type={row.holder_type} /></td>
+                    <td style={{ fontWeight: 600, fontSize: 12 }}>{row.holder_display || '—'}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text3)', fontFamily: 'monospace' }}>{row.reference_order_id || '—'}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text2)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.notes || '—'}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}>{fmtDateTime(row.added_at)}</td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button className="btn btn-xs" title="Edit" onClick={() => setEditItem(row)}>✏️</button>
+                        <button className="btn btn-xs btn-danger" title="Delete" onClick={() => setDeleteTarget(row)}>🗑</button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

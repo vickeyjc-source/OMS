@@ -7,17 +7,16 @@ import { StatusBadge, ENQ_STATUSES, DaysBadge, fmtDateTime, maskName } from '../
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import { ALL_CURRENCIES, fmtC } from '../utils/currencies';
-import { getTaxRatesForCurrency } from '../utils/taxRates';
+import { getTaxRatesForCurrency, seedTaxRateCache } from '../utils/taxRates';
 
 // ── Get tax rates for currency (maps rates to dropdown format) ────────────────
 const getTaxRates = (currency) => {
-  const { rates, country } = getTaxRatesForCurrency(currency);
-  const isGST = currency === 'INR';
-  const label = isGST ? 'GST' : 'VAT';
-  return rates.map(rate => ({
+  const entry = getTaxRatesForCurrency(currency);
+  const label = entry.vat_label || (currency === 'INR' ? 'GST' : 'VAT');
+  return (entry.rates || []).map(rate => ({
     label: `${label} ${rate}%`,
     rate: rate,
-    country: country,
+    country: entry.country,
   }));
 };
 
@@ -1267,6 +1266,7 @@ export default function SourcingBinPage() {
   const { data: users=[] }      = useQuery({ queryKey:['users'],      queryFn:()=>api.get('/users').then(r=>r.data) });
   const { data: quotes=[] }     = useQuery({ queryKey:['quotes'],     queryFn:()=>api.get('/quotes').then(r=>r.data) });
   const { data: orders=[] }     = useQuery({ queryKey:['orders'],     queryFn:()=>api.get('/orders').then(r=>r.data).catch(()=>[]) });
+  useQuery({ queryKey:['tax-rates'], queryFn:()=>api.get('/tax-rates').then(r=>{ seedTaxRateCache(r.data); return r.data; }), staleTime: 5*60*1000 });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
   const userName = id => users.find(u=>u.id===id)?.name || 'Unassigned';

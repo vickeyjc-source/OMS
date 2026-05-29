@@ -419,11 +419,22 @@ export default function NewOrderPage() {
   const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
   const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
 
-  // Navigate to linked enquiry for editing, then back through sourcing → quote → order
-  const handleEditViaEnquiry = () => {
-    const enq = enquiries.find(e => e.id === form.enquiry_id);
-    if (!enq) { toast.error('Linked enquiry not found — check enquiry ID'); return; }
-    navigate('/enquiries/new', { state: { editEnquiry: enq, returnToOrder: true } });
+  const [showModifyConfirm, setShowModifyConfirm] = useState(false);
+  const [modifyBusy, setModifyBusy] = useState(false);
+
+  const handleModifyRequest = async () => {
+    if (!form.enquiry_id) { toast.error('No linked enquiry'); return; }
+    setModifyBusy(true);
+    try {
+      await api.post('/enquiries/' + form.enquiry_id + '/modify-request');
+      toast.success('✅ Modify request sent — Enquiry section can now edit this enquiry');
+      navigate('/orders');
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed');
+    } finally {
+      setModifyBusy(false);
+      setShowModifyConfirm(false);
+    }
   };
 
   // Derived customer info
@@ -816,12 +827,28 @@ export default function NewOrderPage() {
         {/* ── Line Items — read-only from enquiry/quote ── */}
         <div className="section-divider" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <span>Line Items <span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:6}}>Read-only · sourced from enquiry/quote</span></span>
-          {form.enquiry_id && (
+          {form.enquiry_id && !showModifyConfirm && (
             <button className="btn btn-sm"
-              onClick={handleEditViaEnquiry}
-              style={{fontSize:12,fontWeight:600,color:'var(--accent)',borderColor:'var(--accent)',background:'var(--accent-lt)'}}>
-              ✏ Modify Items via Enquiry
+              onClick={() => setShowModifyConfirm(true)}
+              style={{fontSize:12,fontWeight:600,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)'}}>
+              ✏ Modify via Enquiry
             </button>
+          )}
+          {form.enquiry_id && showModifyConfirm && (
+            <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
+              borderRadius:'var(--r-sm)',background:'var(--amber-lt,#fffbeb)',
+              border:'1px solid var(--amber,#d97706)'}}>
+              <span style={{fontSize:12,color:'var(--amber,#d97706)',fontWeight:600}}>
+                Send modify request? Enquiry section will edit and re-submit to sourcing.
+              </span>
+              <button className="btn btn-xs"
+                style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
+                disabled={modifyBusy}
+                onClick={handleModifyRequest}>
+                {modifyBusy ? '…' : 'Yes, Send'}
+              </button>
+              <button className="btn btn-xs" onClick={() => setShowModifyConfirm(false)}>Cancel</button>
+            </div>
           )}
         </div>
 
@@ -922,6 +949,7 @@ export default function NewOrderPage() {
           </button>
         </div>
       </div>
+
     </div>
   );
 }

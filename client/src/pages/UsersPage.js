@@ -101,6 +101,7 @@ const MODULES = [
   { key:'sourcing',  label:'Sourcing Data Only', icon:'🔍', desc:'Deletes only sourcing rows (supplier prices/availability) — keeps enquiries intact.',  color:'var(--amber,#d97706)' },
   { key:'approvals', label:'All Approvals',      icon:'✅', desc:'Deletes all approval workflows, requests and actions.',                                color:'var(--amber,#d97706)' },
   { key:'finance',   label:'All Finance Data',   icon:'💰', desc:'Deletes all customer payments, supplier finance queue entries and PO requests — keeps orders intact.',  color:'var(--amber,#d97706)' },
+  { key:'inventory', label:'All Inventory',       icon:'🏭', desc:'Deletes all stock inventory records — warehouse and customer-held stock entries.',                         color:'var(--amber,#d97706)' },
 ];
 
 function DangerZone() {
@@ -197,7 +198,7 @@ function DangerZone() {
               <span style={{fontSize:24}}>💣</span>
               <div>
                 <div style={{fontWeight:800,fontSize:15,color:'var(--red)'}}>Master Delete — Wipe Everything</div>
-                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Deletes ALL Orders, Enquiries, Quotes, Sourcing data and Approvals in one shot. Customers, Suppliers and Users are kept.</div>
+                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Deletes ALL Orders, Enquiries, Quotes, Sourcing data, Approvals and Inventory in one shot. Customers, Suppliers and Users are kept.</div>
               </div>
             </div>
             <button
@@ -255,7 +256,7 @@ function DangerZone() {
                 <div style={{fontSize:48,marginBottom:12}}>💣</div>
                 <div style={{fontWeight:800,fontSize:16,color:'var(--red)',marginBottom:8}}>This will wipe ALL operational data</div>
                 <div style={{fontSize:13,color:'var(--text2)',marginBottom:20,lineHeight:1.7}}>
-                  All <strong>Orders</strong>, <strong>Enquiries</strong>, <strong>Quotes</strong>, <strong>Sourcing</strong> and <strong>Approval</strong> records will be <strong>permanently deleted</strong>.
+                  All <strong>Orders</strong>, <strong>Enquiries</strong>, <strong>Quotes</strong>, <strong>Sourcing</strong>, <strong>Approval</strong> and <strong>Inventory</strong> records will be <strong>permanently deleted</strong>.
                   <br/>Customers, Suppliers, Line Cards and Users will <strong>not</strong> be affected.
                 </div>
                 <div style={{marginBottom:8,fontSize:12,fontWeight:600,color:'var(--text2)'}}>

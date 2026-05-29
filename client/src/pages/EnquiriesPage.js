@@ -1,7 +1,7 @@
 // client/src/pages/EnquiriesPage.js
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
@@ -205,7 +205,8 @@ export default function EnquiriesPage() {
   const { data: users=[] }      = useQuery({ queryKey:['users'],     queryFn:()=>api.get('/users').then(r=>r.data) });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
-  const FILTERS = ['all','draft','new','sourcing','quoted','ordered','closed'];
+  const FILTERS = ['all','draft','new','modify_requested','sourcing','quoted','ordered','closed'];
+  const FILTER_LABELS = { modify_requested: 'Modify Requested' };
   const filtered = enqs.filter(e => {
     if (filter!=='all' && e.status!==filter) return false;
     if (!search) return true;
@@ -223,7 +224,7 @@ export default function EnquiriesPage() {
         <button className="btn btn-primary" onClick={()=>navigate('/enquiries/new')}>+ New Enquiry</button>
       </div>
       <div className="filter-row">
-        {FILTERS.map(f=><span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>{f==='all'?'All':f.charAt(0).toUpperCase()+f.slice(1)}</span>)}
+        {FILTERS.map(f=><span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>{f==='all'?'All':(FILTER_LABELS[f]||f.charAt(0).toUpperCase()+f.slice(1))}</span>)}
       </div>
       <div className="table-wrap">
         <table>

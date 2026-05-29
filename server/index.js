@@ -718,6 +718,44 @@ app.delete('/api/linecards/:id', auth, asyncRoute(async (req, res) => {
   await runAsync('DELETE FROM linecards WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
 }));
 
+// ── TAX RATES ────────────────────────────────────────────────
+app.get('/api/tax-rates', auth, asyncRoute(async (req, res) => {
+  const rows = await allAsync('SELECT * FROM tax_rates ORDER BY region, currency');
+  res.json(rows.map(r => ({ ...r, rates: JSON.parse(r.rates) })));
+}));
+app.post('/api/tax-rates', auth, asyncRoute(async (req, res) => {
+  const d = req.body;
+  if (!d.currency || !d.country || !d.region || !Array.isArray(d.rates))
+    return res.status(400).json({ error: 'currency, country, region, rates required' });
+  const cur = d.currency.toUpperCase();
+  const existing = await getAsync('SELECT 1 FROM tax_rates WHERE currency=?', [cur]);
+  if (existing) return res.status(409).json({ error: `Currency ${cur} already exists — use Edit to modify it` });
+  const now = new Date().toISOString();
+  await runAsync(
+    'INSERT INTO tax_rates(currency,country,region,rates,vat_label,updated_at) VALUES(?,?,?,?,?,?)',
+    [cur, d.country, d.region, JSON.stringify(d.rates), d.vat_label||'VAT', now]
+  );
+  res.json({ ok: true });
+}));
+app.put('/api/tax-rates/:currency', auth, asyncRoute(async (req, res) => {
+  const d = req.body;
+  const cur = req.params.currency.toUpperCase();
+  const existing = await getAsync('SELECT * FROM tax_rates WHERE currency=?', [cur]);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
+  const now = new Date().toISOString();
+  await runAsync(
+    'UPDATE tax_rates SET country=?,region=?,rates=?,vat_label=?,updated_at=? WHERE currency=?',
+    [d.country||existing.country, d.region||existing.region,
+     JSON.stringify(d.rates||JSON.parse(existing.rates)),
+     d.vat_label||existing.vat_label, now, cur]
+  );
+  res.json({ ok: true });
+}));
+app.delete('/api/tax-rates/:currency', auth, asyncRoute(async (req, res) => {
+  await runAsync('DELETE FROM tax_rates WHERE currency=?', [req.params.currency.toUpperCase()]);
+  res.json({ ok: true });
+}));
+
 // ── SUPPLIERS ────────────────────────────────────────────────
 app.get('/api/suppliers', auth, asyncRoute(async (req, res) => {
   // Single query for suppliers, single query for all linecards — no nesting
@@ -979,8 +1017,14 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   // Persist existing_order_id when provided (set when order triggers enquiry revision)
   const newExistingOrderId = d.existing_order_id !== undefined ? (d.existing_order_id || null) : (e.existing_order_id || null);
   try { await runAsync('ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
+  // If enquiry is being set to 'quoted' but a live order already exists for it, keep it as 'ordered'
+  let resolvedStatus = d.status || e.status;
+  if (resolvedStatus === 'quoted') {
+    const liveOrder = await getAsync("SELECT id FROM orders WHERE enquiry_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
+    if (liveOrder) resolvedStatus = 'ordered';
+  }
   await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,updated_at=? WHERE id=?',
-    [d.status||e.status, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
+    [resolvedStatus, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
      d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, now, req.params.id]);
   if (d.items !== undefined) {
     await runAsync('DELETE FROM enquiry_items WHERE enquiry_id=?', [req.params.id]);
@@ -1009,8 +1053,8 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
     for (const s of d.sourcing) {
       try {
         // Always use UPSERT so quote_price is always written regardless of existing/new
-        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
@@ -1029,7 +1073,9 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
                updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
-               sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment)`,
+               sales_comment=COALESCE(enquiry_sourcing.sales_comment, EXCLUDED.sales_comment),
+               src_dc=EXCLUDED.src_dc,
+               delivery_promise_date=EXCLUDED.delivery_promise_date`,
           [s.id||uuid(), req.params.id, s.enquiry_item_id, s.supplier_id||'',
            toNum(s.sourced_price), s.sourced_currency||'INR',
            toNum(s.src_price_foreign), toNum(s.exchange_rate),
@@ -1045,7 +1091,8 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            s.quote_currency||'INR',
            toNum(s.tax_rate),
            req.session.user.id, now,
-           s.sourcing_revision_notes||null, s.sales_comment||null]);
+           s.sourcing_revision_notes||null, s.sales_comment||null,
+           s.src_dc||'', s.delivery_promise_date||'']);
         // Also update preferred_delivery_date on the enquiry item if provided
         if (s.preferred_delivery_date !== undefined && s.enquiry_item_id) {
           await runAsync('UPDATE enquiry_items SET preferred_delivery_date=? WHERE id=?',
@@ -1093,6 +1140,19 @@ app.post('/api/quotes', auth, asyncRoute(async (req, res) => {
   }
   saveNow(); res.json({ id });
 }));
+// Modify request — order section signals ENQ needs changes before order is created
+app.post('/api/enquiries/:id/modify-request', auth, asyncRoute(async (req, res) => {
+  const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
+  if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
+  const now = nowStr();
+  await runAsync("UPDATE enquiries SET status='modify_requested', updated_at=? WHERE id=?", [now, req.params.id]);
+  try {
+    await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+      [uuid(), req.params.id, 'Modify requested from Order — ENQ opened for editing', req.session.user.name, now]);
+  } catch(_) {}
+  res.json({ ok: true });
+}));
+
 // Returns enquiry line items with quote_price for order creation
 // Create a revision of an existing quote
 app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
@@ -1227,6 +1287,12 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
   const d   = req.body;
   const old = await getAsync('SELECT * FROM quotes WHERE id=?', [req.params.id]);
   if (!old) return res.status(404).json({ error: 'Quote not found' });
+  // If status is being set to 'active' but a live order already exists for this quote's enquiry, use 'order_created' instead
+  let resolvedQuoteStatus = d.status ?? old.status ?? 'active';
+  if (resolvedQuoteStatus === 'active' && old.enquiry_id) {
+    const liveOrder = await getAsync("SELECT id FROM orders WHERE (quote_id=? OR enquiry_id=?) AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id, old.enquiry_id]);
+    if (liveOrder) resolvedQuoteStatus = 'order_created';
+  }
   await runAsync(`UPDATE quotes SET
        quote_no=?, zoho_quote_no=?, file_ref=?, status=?, valid_until=?, notes=?,
        customer_response=?, customer_response_date=?, customer_response_notes=?, customer_response_by=?,
@@ -1238,7 +1304,7 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
       d.quote_no      ?? old.quote_no,
       d.zoho_quote_no ?? old.zoho_quote_no ?? '',
       d.file_ref      ?? old.file_ref      ?? '',
-      d.status        ?? old.status        ?? 'active',
+      resolvedQuoteStatus,
       d.valid_until   ?? old.valid_until   ?? '',
       d.notes         ?? old.notes         ?? '',
       d.customer_response       ?? old.customer_response       ?? null,
@@ -1505,6 +1571,7 @@ const DELETABLE_MODULES = {
   sourcing:  { label:'All Sourcing Data', tables:['enquiry_sourcing'] },
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
   finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
+  inventory: { label:'All Inventory',     tables:['stock_inventory'] },
 };
 
 async function deleteBlobsForFiles(fileRows) {
@@ -1546,7 +1613,7 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
     'order_history','order_documents','customer_shipping','supplier_order_items',
     'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
     'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
-    'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'];
+    'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files','stock_inventory'];
   const deleted = await safeDeleteTables(tables, true);
   saveNow();
   console.warn('[MASTER DELETE]', req.session.user.username, 'wiped ALL data. Rows:', deleted);
@@ -1573,6 +1640,17 @@ app.post('/api/admin/heal', adminOnly, asyncRoute(async (req, res) => {
     const r = await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
     if (r && r.rowCount) fixes.push(`${r.rowCount} orders reverted from paid→payment_recorded`);
   } catch(e) { fixes.push('payment heal failed: ' + e.message); }
+  // Fix enquiries stuck at 'returned_to_sourcing' or 'quoted' when a live order exists → mark 'ordered'
+  // Note: 'modify_requested' is intentional — do NOT auto-fix it
+  try {
+    const r = await runAsync(`UPDATE enquiries SET status='ordered', updated_at=NOW() WHERE status IN ('returned_to_sourcing','quoted') AND id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL)`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} enquiries fixed: returned_to_sourcing/quoted → ordered`);
+  } catch(e) { fixes.push('enquiry revision heal failed: ' + e.message); }
+  // Fix quotes stuck at 'returned_to_sourcing' or 'active' when a live order exists → mark 'order_created'
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND (id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) OR enquiry_id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL))`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} quotes fixed: returned_to_sourcing/active → order_created`);
+  } catch(e) { fixes.push('quote revision heal failed: ' + e.message); }
   res.json({ ok: true, fixes });
 }));
 
@@ -1643,7 +1721,7 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     international: await g("SELECT COUNT(*) as c FROM suppliers WHERE type='international'"),
     linecards:     await g("SELECT COUNT(*) as c FROM linecards"),
     enquiries:     await g("SELECT COUNT(*) as c FROM enquiries"),
-    enq_new:       await g("SELECT COUNT(*) as c FROM enquiries WHERE status='new'"),
+    enq_new:       await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('new','modify_requested')"),
     enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('sourcing','returned_to_sourcing')"),
     enq_quoted:    await g("SELECT COUNT(*) as c FROM enquiries WHERE status='quoted'"),
     sourcing:      await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
@@ -1746,6 +1824,30 @@ app.post('/api/inventory/bulk', auth, asyncRoute(async (req, res) => {
   res.json({ created: created.length, errors });
 }));
 
+// ── GET /api/inventory/holds — returns on-hold qty per inventory item ────────
+// Must be defined BEFORE /:id route so Express doesn't treat "holds" as an ID.
+// An item is "on hold" when an enquiry sourcing row references __inv__<id>
+// and the enquiry is not yet delivered/closed/cancelled.
+app.get('/api/inventory/holds', auth, asyncRoute(async (req, res) => {
+  const srcRows = await allAsync(
+    `SELECT es.supplier_id, ei.quantity, e.status
+     FROM enquiry_sourcing es
+     JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
+     JOIN enquiries e ON e.id = es.enquiry_id
+     LEFT JOIN orders o ON o.enquiry_id = e.id AND o.status NOT IN ('deleted','cancelled')
+     WHERE es.supplier_id LIKE '__inv__%'
+       AND e.status NOT IN ('closed','cancelled','deleted')
+       AND (o.id IS NULL OR o.status NOT IN ('delivery_hub','partial_hub','transit_customer','partial_dispatched','closed'))`
+  );
+  const holds = {};
+  for (const row of srcRows) {
+    const invId = row.supplier_id.slice(7);
+    const qty   = parseInt(row.quantity) || 0;
+    holds[invId] = (holds[invId] || 0) + qty;
+  }
+  res.json(holds);
+}));
+
 app.put('/api/inventory/:id', auth, asyncRoute(async (req, res) => {
   const inv = await getAsync('SELECT * FROM stock_inventory WHERE id=?', [req.params.id]);
   if (!inv) return res.status(404).json({ error: 'Not found' });
@@ -1831,6 +1933,16 @@ initDb().then(async () => {
     const r = await runAsync(`UPDATE quotes SET status='closed' WHERE enquiry_id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
     if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'quotes → closed (via enquiry)');
   } catch(e) { console.error('[STARTUP] Quote close backfill (enquiry) failed:', e.message); }
+  // Fix: enquiries stuck at 'returned_to_sourcing' or 'quoted' that already have a live order → mark 'ordered'
+  try {
+    const r = await runAsync(`UPDATE enquiries SET status='ordered', updated_at=NOW() WHERE status IN ('returned_to_sourcing','quoted') AND id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL)`);
+    if (r && r.rowCount) console.log('[STARTUP] Fixed', r.rowCount, 'enquiries stuck in returned_to_sourcing/quoted → ordered');
+  } catch(e) { console.error('[STARTUP] Enquiry revision heal failed:', e.message); }
+  // Fix: quotes stuck at 'returned_to_sourcing' or 'active' that already have a live order → mark 'order_created'
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND (id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) OR enquiry_id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL))`);
+    if (r && r.rowCount) console.log('[STARTUP] Fixed', r.rowCount, 'quotes stuck in returned_to_sourcing/active → order_created');
+  } catch(e) { console.error('[STARTUP] Quote revision heal failed:', e.message); }
   // Fix: revert orders incorrectly auto-healed to customer_payment_status='paid' without going through
   // the Release step. A properly released order has status='open' (set by customer-release endpoint).
   // If status is still 'payment_approval', the payment was never formally released — revert to 'payment_recorded'.
@@ -2732,6 +2844,41 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     if (newPoStatus !== soRow.status) {
       await runAsync('UPDATE supplier_orders SET status=? WHERE id=?', [newPoStatus, soId]);
     }
+  }
+
+  // ── Auto-deduct stock inventory when sourcing used internal stock ─────────
+  // For each GRN record, check if the order item was sourced from stock (__inv__)
+  // by looking up the enquiry_sourcing row. If yes, decrement quantity_available.
+  try {
+    const enquiryRow = await getAsync('SELECT enquiry_id FROM orders WHERE id=?', [req.params.id]);
+    if (enquiryRow?.enquiry_id) {
+      for (const r of records) {
+        const qty = parseInt(r.qty_received) || 0;
+        if (!qty) continue;
+        // Find sourcing row for this order item's component
+        const li = await getAsync('SELECT * FROM order_items WHERE id=?', [r.order_item_id]);
+        if (!li) continue;
+        // Match enquiry_sourcing by enquiry + component name
+        const srcRow = await getAsync(
+          `SELECT es.supplier_id FROM enquiry_sourcing es
+           JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
+           WHERE es.enquiry_id=? AND LOWER(ei.component)=LOWER(?) AND es.supplier_id LIKE '__inv__%'
+           LIMIT 1`,
+          [enquiryRow.enquiry_id, li.component || '']
+        );
+        if (srcRow?.supplier_id?.startsWith('__inv__')) {
+          const invId = srcRow.supplier_id.slice(7);
+          const inv = await getAsync('SELECT quantity_available, quantity_total FROM stock_inventory WHERE id=?', [invId]);
+          if (inv) {
+            const newAvail = Math.max(0, (parseInt(inv.quantity_available) || 0) - qty);
+            const newTotal = Math.max(0, (parseInt(inv.quantity_total) || 0) - qty);
+            await runAsync('UPDATE stock_inventory SET quantity_available=?, quantity_total=? WHERE id=?', [newAvail, newTotal, invId]);
+          }
+        }
+      }
+    }
+  } catch(stockErr) {
+    console.error('[GRN] Stock deduction error:', stockErr.message);
   }
 
   const cnNo = cnNoInput || (anyShort ? 'CN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0') : '');

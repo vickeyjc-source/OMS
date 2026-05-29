@@ -300,6 +300,35 @@ export default function EnquiryDetailPage() {
         )}
       </div>
 
+      {/* ── Modify Requested action bar — ENQ opened for editing by Order section ── */}
+      {enq.status === 'modify_requested' && (
+        <div style={{marginTop:20,padding:'16px 20px',borderRadius:'var(--r)',
+          background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',
+          display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <span style={{fontSize:20}}>✏</span>
+            <div>
+              <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>Modification Requested from Order</div>
+              <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Edit the enquiry items, then submit to Sourcing for re-pricing. Quote and Sourcing sections are locked until you submit.</div>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn"
+              onClick={() => navigate('/enquiries/new', { state: { editEnquiry: enq } })}
+              style={{fontWeight:600,fontSize:13}}>
+              ✏ Edit Enquiry
+            </button>
+            <button className="btn btn-primary"
+              disabled={submitting}
+              onClick={submitToSourcing}
+              style={{fontWeight:700,fontSize:13,background:'var(--amber,#d97706)',
+                borderColor:'var(--amber,#d97706)',color:'#fff'}}>
+              {submitting ? 'Submitting…' : '📤 Submit to Sourcing'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Draft action bar — only shown when ENQ is still a draft ── */}
       {enq.status === 'draft' && (
         <div style={{marginTop:20,padding:'16px 20px',borderRadius:'var(--r)',

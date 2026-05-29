@@ -23,6 +23,7 @@ import DeliveryHubPage from './pages/DeliveryHubPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import ReportsPage from './pages/ReportsPage';
 import SourcingBinPage from './pages/SourcingBinPage';
+import SourcingBinDrawerPage from './pages/SourcingBinDrawerPage';
 import ProcurementBinPage from './pages/ProcurementBinPage';
 import ClosedBinPage from './pages/ClosedBinPage';
 import DeletedBinPage from './pages/DeletedBinPage';
@@ -81,7 +82,7 @@ function AppRoutes() {
         <Route path="delivery-hub" element={<RequireSection section="delivery-hub"><DeliveryHubPage /></RequireSection>} />
         <Route path="approvals" element={<RequireSection section="approvals"><ApprovalsPage /></RequireSection>} />
         <Route path="reports" element={<RequireSection section="reports"><ReportsPage /></RequireSection>} />
-        <Route path="sourcing-bin" element={<RequireSection section="sourcing-bin"><SourcingBinPage /></RequireSection>} />
+        <Route path="sourcing-bin" element={<RequireSection section="sourcing-bin"><SourcingBinDrawerPage /></RequireSection>} />
         <Route path="procurement-bin" element={<RequireSection section="procurement-bin"><ProcurementBinPage /></RequireSection>} />
         <Route path="closed-bin" element={<RequireSection section="closed-bin"><ClosedBinPage /></RequireSection>} />
         <Route path="deleted-bin" element={<RequireSection section="deleted-bin"><DeletedBinPage /></RequireSection>} />

@@ -73,7 +73,20 @@ function ShipperSelect({ value, onChange, shippers }) {
 
 function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRefresh }) {
   const { user } = useAuth();
-  const navigate = useNavigate();
+  const [showModifyConfirm, setShowModifyConfirm] = useState(false);
+  const [modifyBusy, setModifyBusy] = useState(false);
+  const handleModifyRequest = async () => {
+    if (!order.enquiry_id) return;
+    setModifyBusy(true);
+    try {
+      await api.post('/enquiries/' + order.enquiry_id + '/modify-request');
+      toast.success('✅ Modify request sent — Enquiry section can now edit this enquiry');
+      setShowModifyConfirm(false);
+      onClose();
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed');
+    } finally { setModifyBusy(false); }
+  };
   const qc = useQueryClient();
   const perms = user.perms || {};
   const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
@@ -320,25 +333,25 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           <div className="card card-sm">
             <div className="card-title">
               <span>📦 Line Items ({order.lineItems?.length||0})</span>
-              {canEdit && order.enquiry_id && linkedEnquiry && !['payment_approval','procurement','shipped','delivered_hub','delivered_customer','closed'].includes(order.status) && order.customer_payment_status !== 'paid' && (
+              {canEdit && order.enquiry_id && linkedEnquiry && !['payment_approval','procurement','shipped','delivered_hub','delivered_customer','closed'].includes(order.status) && order.customer_payment_status !== 'paid' && !showModifyConfirm && (
                 <button className="btn btn-xs"
-                  onClick={() => navigate('/enquiries/new', { state: {
-                    editEnquiry: linkedEnquiry,
-                    returnToOrder: true,
-                    existingOrder: {
-                      id:               order.id,
-                      order_no:         order.customer_ref || order.id,
-                      po_number:        order.po_number || '',
-                      delivery_address: order.delivery_address || '',
-                      tentative_date:   order.tentative_date || '',
-                      notes:            order.notes || '',
-                      quote_id:         order.quote_id || '',
-                      quote_no:         order.quote_no || '',
-                    }
-                  } })}
-                  style={{fontSize:11,fontWeight:600,color:'var(--accent)',borderColor:'var(--accent)',background:'var(--accent-lt)'}}>
-                  ✏ Modify Items via Enquiry
+                  onClick={() => setShowModifyConfirm(true)}
+                  style={{fontSize:11,fontWeight:600,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)'}}>
+                  ✏ Modify via Enquiry
                 </button>
+              )}
+              {showModifyConfirm && (
+                <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 10px',
+                  borderRadius:'var(--r-sm)',background:'var(--amber-lt,#fffbeb)',
+                  border:'1px solid var(--amber,#d97706)'}}>
+                  <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>Send modify request to Enquiry section?</span>
+                  <button className="btn btn-xs"
+                    style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
+                    disabled={modifyBusy} onClick={handleModifyRequest}>
+                    {modifyBusy ? '…' : 'Yes'}
+                  </button>
+                  <button className="btn btn-xs" onClick={() => setShowModifyConfirm(false)}>Cancel</button>
+                </div>
               )}
             </div>
             <div style={{overflowX:'auto'}}>
@@ -952,6 +965,7 @@ export default function OrdersPage() {
   const [filter, setFilter]     = useState('all');
   const [selected, setSelected] = useState(null);
   const [managing, setManaging] = useState(null);
+
   const [seenOrders, setSeenOrders] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem('seen_orders')||'[]')); } catch(_) { return new Set(); }
   });
@@ -1337,7 +1351,8 @@ export default function OrdersPage() {
           </tbody>
         </table>
       </div>
-      {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===selected.id);if(up)setSelected(up);});}} />}
+      {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers}
+        onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===selected.id);if(up)setSelected(up);}); }} />}
       {managing&&<ManageOrderModal order={managing} viewOnly={true} onClose={()=>setManaging(null)} suppliers={suppliers} customers={customers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===managing.id);if(up)setManaging(up);});}} />}
     </div>
   );
