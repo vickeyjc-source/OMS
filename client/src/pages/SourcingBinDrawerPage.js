@@ -823,27 +823,34 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               };
 
               const handleSupChange = (supId) => {
-                if (!supId) { updSrc(idx,'supplier_id',''); return; }
+                if (!supId) {
+                  updSrc(idx,'supplier_id','');
+                  setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
+                  return;
+                }
                 if (supId.startsWith('__inv__')) {
                   const hit = inventoryItems.find(h => h.id === supId.slice(7));
                   const stCur = hit?.target_currency || 'INR';
                   const isStockIntl = stCur !== 'INR';
                   const price = hit?.target_price ? String(hit.target_price) : '';
                   if (isStockIntl) {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   } else {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price||r.sourced_price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   }
-                  updQuote(idx,'quote_currency','INR'); return;
+                  setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
+                  setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
+                  return;
                 }
                 const sup = suppliers.find(s => s.id === supId);
                 const st  = sup?.type || 'domestic';
                 if (st === 'international') {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 } else {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 }
-                updQuote(idx,'quote_currency','INR');
+                setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
+                setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
               };
 
               const handleSrcPrice = (val) => {
@@ -930,9 +937,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Source Price (INR) */}
                     {isDomestic
-                      ? <input {...inp} type="number" step="0.01" value={row.sourced_price||''} disabled={isReadOnly}
+                      ? <input {...inp} type="number" step="0.01" min="0" value={row.sourced_price||''} disabled={isReadOnly}
                           style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:aboveTarget?'var(--red)':undefined, background:aboveTarget?'#fee2e2':undefined }}
-                          onChange={e=>handleSrcPrice(e.target.value)} />
+                          onChange={e=>{ if(Number(e.target.value)<0) return; handleSrcPrice(e.target.value); }} />
                       : <div style={{ textAlign:'center', fontWeight:700, color:srcUnit>0?'var(--text)':'var(--text3)', fontSize:13 }}>
                           {srcUnit>0 ? <>
                             <div>{`₹${fmt(srcUnit)}`}</div>
@@ -944,9 +951,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     {/* Margin/Unit */}
                     {isDomestic
                       ? <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-                          <input className="input" type="number" step="0.01" value={row.margin_pct||''} disabled={isReadOnly}
+                          <input className="input" type="number" step="0.01" min="0" value={row.margin_pct||''} disabled={isReadOnly}
                             style={{ flex:1, height:32, fontSize:13, minWidth:0, textAlign:'center' }}
-                            onChange={e=>handleMargin(e.target.value)} />
+                            onChange={e=>{ if(Number(e.target.value)<0) return; handleMargin(e.target.value); }} />
                           <UnitToggle mode={marginMode} onToggle={toggleMarginMode} disabled={isReadOnly} />
                         </div>
                       : (() => {
@@ -961,9 +968,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Quote/Unit — input if domestic, value or dash otherwise */}
                     {isDomestic
-                      ? <input {...inp} type="number" step="0.01" value={qrow.quote_price||''} disabled={isReadOnly}
+                      ? <input {...inp} type="number" step="0.01" min="0" value={qrow.quote_price||''} disabled={isReadOnly}
                           style={{ height:32, fontSize:13, width:'100%', textAlign:'center', fontWeight:700, background:qrow.quote_price?'var(--green-lt)':undefined, borderColor:qrow.quote_price?'var(--green)':undefined }}
-                          onChange={e=>updQuote(idx,'quote_price',e.target.value)} />
+                          onChange={e=>{ if(Number(e.target.value)<0) return; updQuote(idx,'quote_price',e.target.value); }} />
                       : <div style={{ textAlign:'center', fontWeight:700, color:quoteUnit>0?'var(--green)':'var(--text3)', fontSize:13 }}>{quoteUnit>0?`₹${fmt(quoteUnit)}`:'—'}</div>}
 
                     {/* Quote Total (×qty) — always read-only */}
