@@ -80,10 +80,10 @@ function calcLanded(src, item, modes = {}) {
   const importCost = cifValue + bcdAmount + swsAmount + cessAmount;
 
   const bankINR   = applyMode(m.bank,   raw(src.bank_fixed_inr), importCost);
-  const marginAmt = applyMode(m.margin, raw(src.margin_pct),     importCost);
   const bufferINR = applyMode(m.buffer, raw(src._buffer),        importCost);
 
   const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankINR;
+  const marginAmt = applyMode(m.margin, raw(src.margin_pct),     landedBeforeMargin);
   const finalCost      = landedBeforeMargin + marginAmt + bufferINR;
   const unitLandedCost = qty > 0 ? finalCost / qty : 0;
   const gstPct    = Number(src._gst_pct || 0);
