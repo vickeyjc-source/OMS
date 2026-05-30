@@ -25,8 +25,7 @@ export default function Layout() {
       <a href="#main-content" className="skip-to-content">Skip to content</a>
       <aside className="sidebar">
         <div className="sb-logo">
-          <div className="sb-logo-mark">⚡ Cif<span>lux</span> OMS</div>
-          <div className="sb-logo-sub">Electronic Components v2</div>
+          <div className="sb-logo-mark">⚡ Cif<span>lux</span> OMS v1</div>
         </div>
         <div className="sb-user">
           <div className="avatar">{initials(user.name)}</div>
@@ -167,7 +166,7 @@ export default function Layout() {
         <main id="main-content" className="page-content"><Outlet /></main>
       </div>
       {showKb && <KeyboardShortcutsPanel onClose={() => setShowKb(false)} />}
-      <div style={{position:'fixed',bottom:10,right:16,fontSize:10,color:'var(--text3)',opacity:0.6,pointerEvents:'none',userSelect:'none',zIndex:9999,fontWeight:700}}>
+      <div style={{position:'fixed',bottom:10,right:16,fontSize:10,color:'#000000',opacity:1,pointerEvents:'none',userSelect:'none',zIndex:9999,fontWeight:700}}>
         Powered by Sencilla Tec Solutions &nbsp;|&nbsp; All rights reserved
       </div>
     </div>
@@ -176,7 +175,7 @@ export default function Layout() {
 
 function PageTitle() {
   const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance','/inventory':'Stock Inventory'};
-  return map[window.location.pathname] || 'Ciflux OMS';
+  return map[window.location.pathname] || 'Supply Chain Management System';
 }
 
 // ── Keyboard Shortcuts Panel ──────────────────────────────────────────────────

@@ -297,24 +297,34 @@ export default function DashboardPage() {
         </div>
         <div className="card" style={{marginBottom:0}}>
           <div className="card-title">Order Pipeline</div>
-          <div style={{display:'grid',gridTemplateColumns:'160px 1fr',gap:14,alignItems:'center',marginBottom:10}}>
+          {/* chart left + legend right */}
+          <div style={{display:'grid',gridTemplateColumns:'150px 1fr',gap:16,alignItems:'center',marginBottom:10}}>
             <div style={{display:'flex',justifyContent:'center'}}>
-              <div style={{position:'relative',width:146,height:146,borderRadius:'50%',background:pipelineRing,display:'grid',placeItems:'center'}}>
-                <div style={{width:96,height:96,borderRadius:'50%',background:'var(--surface)',border:'1px solid var(--border)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}}>
-                  <div style={{fontSize:22,fontWeight:800,color:'var(--text)'}}>{totalPipe}</div>
-                  <div style={{fontSize:10,color:'var(--text3)',fontWeight:600,letterSpacing:0.3}}>TOTAL ORDERS</div>
+              <div style={{width:140,height:140,borderRadius:'50%',background:pipelineRing,display:'grid',placeItems:'center'}}>
+                <div style={{width:90,height:90,borderRadius:'50%',background:'var(--surface)',border:'1px solid var(--border)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center'}}>
+                  <div style={{fontSize:20,fontWeight:800,color:'var(--text)'}}>{totalPipe}</div>
+                  <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,letterSpacing:0.3}}>TOTAL ORDERS</div>
                 </div>
               </div>
             </div>
-            <div style={{display:'grid',gap:8}}>
-              {pipelineSegments.map(seg => {
+            <div style={{display:'grid',gap:7}}>
+              {[
+                {key:'open',      label:'Open',      count:summary.open||openOrders.length,   color:'var(--accent)',  desc:'Orders currently active'},
+                {key:'delivered', label:'Delivered',  count:summary.delivered||0,              color:'var(--green)',   desc:'All items delivered'},
+                {key:'closed',    label:'Closed',     count:summary.closed||0,                 color:'var(--teal)',    desc:'Order fully closed'},
+                {key:'hold',      label:'Hold',       count:summary.hold||0,                   color:'var(--amber)',   desc:'On hold'},
+                {key:'failed',    label:'Failed',     count:summary.failed||0,                 color:'var(--red)',     desc:'Failed orders'},
+              ].map(seg => {
                 const pct = totalPipe ? Math.round((seg.count / totalPipe) * 100) : 0;
                 return (
                   <div key={seg.key} style={{display:'flex',alignItems:'center',gap:8}}>
                     <span style={{width:10,height:10,borderRadius:'50%',background:seg.color,flexShrink:0}}/>
-                    <span style={{fontSize:12,color:'var(--text2)',flex:1}}>{seg.label}</span>
-                    <span className="mono" style={{fontSize:12,fontWeight:700,minWidth:28,textAlign:'right'}}>{seg.count}</span>
-                    <span style={{fontSize:11,color:'var(--text3)',minWidth:34,textAlign:'right'}}>{pct}%</span>
+                    <div style={{flex:1}}>
+                      <span style={{fontSize:12,color:'var(--text2)',fontWeight:600}}>{seg.label}</span>
+                      <span style={{fontSize:10,color:'var(--text3)',marginLeft:6}}>{seg.desc}</span>
+                    </div>
+                    <span className="mono" style={{fontSize:12,fontWeight:700,minWidth:24,textAlign:'right',color:seg.color}}>{seg.count}</span>
+                    <span style={{fontSize:10,color:'var(--text3)',minWidth:32,textAlign:'right'}}>{pct}%</span>
                   </div>
                 );
               })}

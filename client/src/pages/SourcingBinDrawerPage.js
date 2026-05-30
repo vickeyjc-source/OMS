@@ -709,7 +709,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
   return (
     <div className="overlay" style={{ padding: '16px', alignItems: 'stretch' }}>
-      <div className="modal" style={{ width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 32px)', maxHeight: 'calc(100vh - 32px)' }}>
+      <div className="modal" style={{ width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
 
         {/* Modal Header */}
         <div className="modal-header" style={{ padding: '12px 20px' }}>
@@ -776,9 +776,24 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
             {/* Single unified grid — heading always visible, same columns always */}
             {/* Columns: # | MPN | Manufacturer | Supplier | Qty | HSN | Lead Time | Src Price | Margin | Quote/Unit | Quote Total | GST | Quote+GST | action */}
-            <div style={{ display:'grid', gridTemplateColumns:'32px 1.3fr 1fr 1.3fr 50px 90px 110px 110px 110px 110px 110px 100px 140px 120px', gap:'0 8px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
-              {['#','MPN','Manufacturer','Supplier','Qty','HSN','Lead Time','Src Price','Margin/Unit','Quote/Unit','Quote Total','GST','Quote+GST',''].map((h,i) => (
-                <div key={i} style={{ fontSize:10, fontWeight:700, color:'#fff', textTransform:'uppercase', letterSpacing:'.04em', whiteSpace:'nowrap', textAlign: i >= 4 ? 'right' : 'left' }}>{h}</div>
+            <div style={{ display:'grid', gridTemplateColumns:'24px 1fr 0.5fr 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
+              {[
+                {l:'#',          align:'center'},
+                {l:'MPN',        align:'center'},
+                {l:'Mfr',        align:'center'},
+                {l:'Supplier',   align:'center'},
+                {l:'Qty',        align:'center'},
+                {l:'HSN',        align:'center'},
+                {l:'Lead Time',  align:'center'},
+                {l:'Src Price',  align:'center'},
+                {l:'Margin/Unit',align:'center'},
+                {l:'Quote/Unit', align:'center'},
+                {l:'Quote Total',align:'center'},
+                {l:'GST',        align:'center'},
+                {l:'Quote+GST',  align:'center'},
+                {l:'',           align:'center'},
+              ].map((h,i) => (
+                <div key={i} style={{ fontSize:10, fontWeight:700, color:'#fff', textTransform:'uppercase', letterSpacing:'.04em', whiteSpace:'nowrap', textAlign:h.align }}>{h.l}</div>
               ))}
             </div>
 
@@ -861,29 +876,29 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 return _mfr?(map[_comp+'|'+_mfr]||[]):(map[_comp+'|']||[]);
               })();
 
-              const inp = { className:'input', style:{ height:30, fontSize:11, width:'100%' } };
+              const inp = { className:'input', style:{ height:32, fontSize:13, width:'100%', textAlign:'center' } };
 
               return (
                 <div key={item.id} style={{ borderTop:'1px solid var(--border)', background:mrow.aboveTarget?'#fff5f5':'#fff' }}>
 
                   {/* ── Main row grid ── */}
-                  <div style={{ display:'grid', gridTemplateColumns:'32px 1.3fr 1fr 1.3fr 50px 90px 110px 110px 110px 110px 110px 100px 140px 120px', gap:'0 8px', padding:'8px 14px', alignItems:'center' }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'24px 1fr 0.5fr 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', alignItems:'center' }}>
 
                     {/* # */}
-                    <div style={{ fontSize:12, fontWeight:700, color:'var(--text3)' }}>{idx+1}</div>
+                    <div style={{ fontSize:13, fontWeight:700, color:'var(--text3)', textAlign:'center' }}>{idx+1}</div>
 
                     {/* MPN */}
-                    <div>
+                    <div style={{ textAlign:'center' }}>
                       <div style={{ fontWeight:800, fontSize:13, color:'var(--accent)', letterSpacing:'-.01em' }}>{item.component}</div>
                       {item.ipn && <div style={{ fontSize:9, fontFamily:'monospace', color:'#9ca3af' }}>IPN: {item.ipn}</div>}
                     </div>
 
                     {/* Manufacturer */}
-                    <div style={{ fontSize:12, color:'var(--text2)' }}>{item.manufacturer||'—'}</div>
+                    <div style={{ fontSize:13, color:'var(--text2)', textAlign:'center' }}>{item.manufacturer||'—'}</div>
 
                     {/* Supplier dropdown — always */}
                     <select {...inp} value={row.supplier_id||''} disabled={isReadOnly}
-                      style={{ height:30, fontSize:11, width:'100%', fontWeight:row.supplier_id?600:400, borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
+                      style={{ height:32, fontSize:13, width:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
                       onChange={e=>handleSupChange(e.target.value)}>
                       <option value="">— Select —</option>
                       {itemStockHits.length>0 && <optgroup label="📦 IN STOCK">{itemStockHits.map(h=><option key={'__inv__'+h.id} value={'__inv__'+h.id}>{h.holder_type==='customer'?'👤':h.holder_type==='supplier'?'🏢':'🏭'} {h.holder_display||h.holder_name||'Warehouse'}{h.target_price?' — '+(h.target_currency||'INR')+' '+Number(h.target_price).toLocaleString('en-IN',{maximumFractionDigits:2}):''} ({h.quantity_available} pcs)</option>)}</optgroup>}
@@ -892,33 +907,33 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     </select>
 
                     {/* Qty */}
-                    <div style={{ textAlign:'right', fontWeight:700, fontSize:13 }}>{item.quantity}</div>
+                    <div style={{ textAlign:'center', fontWeight:700, fontSize:13 }}>{item.quantity}</div>
 
                     {/* HSN */}
                     {isDomestic
                       ? <input {...inp} value={row.hsn_code||''} disabled={isReadOnly} onChange={e=>updSrc(idx,'hsn_code',e.target.value)} />
-                      : <div style={{ textAlign:'right', color:row.hsn_code?'var(--text2)':'var(--text3)', fontSize:12 }}>{row.hsn_code||'—'}</div>}
+                      : <div style={{ textAlign:'center', color:row.hsn_code?'var(--text2)':'var(--text3)', fontSize:13 }}>{row.hsn_code||'—'}</div>}
 
                     {/* Lead Time */}
                     {isDomestic
                       ? <div style={{ display:'flex', gap:3 }}>
-                          <input className="input" style={{ flex:1, height:30, fontSize:11, minWidth:0 }} type="number" min="1"
+                          <input className="input" style={{ flex:1, height:32, fontSize:13, textAlign:'center', minWidth:0 }} type="number" min="1"
                             value={(row.lead_time||'').replace(/[^0-9]/g,'')} disabled={isReadOnly}
                             onChange={e=>{ const u=(row.lead_time||'').replace(/[0-9]/g,'').trim()||'Days'; updSrc(idx,'lead_time',e.target.value?e.target.value+' '+u:''); }} />
-                          <select className="input" style={{ width:50, height:30, fontSize:10 }}
-                            value={(row.lead_time||'').replace(/[0-9]/g,'').trim()||'Days'} disabled={isReadOnly}
+                          <select className="input" style={{ flex:'1 1 0', height:32, fontSize:12, minWidth:0, cursor:'pointer' }}
+                            value={(row.lead_time||'').replace(/[0-9]/g,'').trim()||'Days'}
                             onChange={e=>{ const n=(row.lead_time||'').replace(/[^0-9]/g,'')||''; updSrc(idx,'lead_time',n?n+' '+e.target.value:''); }}>
-                            <option>Days</option><option>Weeks</option><option>Months</option>
+                            <option value="Days">Days</option><option value="Weeks">Weeks</option><option value="Months">Months</option>
                           </select>
                         </div>
-                      : <div style={{ textAlign:'right', color:row.lead_time?'var(--text2)':'var(--text3)', fontSize:12 }}>{row.lead_time||'—'}</div>}
+                      : <div style={{ textAlign:'center', color:row.lead_time?'var(--text2)':'var(--text3)', fontSize:13 }}>{row.lead_time||'—'}</div>}
 
                     {/* Source Price (INR) */}
                     {isDomestic
                       ? <input {...inp} type="number" step="0.01" value={row.sourced_price||''} disabled={isReadOnly}
-                          style={{ height:30, fontSize:11, width:'100%', borderColor:aboveTarget?'var(--red)':undefined, background:aboveTarget?'#fee2e2':undefined }}
+                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:aboveTarget?'var(--red)':undefined, background:aboveTarget?'#fee2e2':undefined }}
                           onChange={e=>handleSrcPrice(e.target.value)} />
-                      : <div style={{ textAlign:'right', fontWeight:700, color:srcUnit>0?'var(--text)':'var(--text3)', fontSize:12 }}>
+                      : <div style={{ textAlign:'center', fontWeight:700, color:srcUnit>0?'var(--text)':'var(--text3)', fontSize:13 }}>
                           {srcUnit>0 ? <>
                             <div>{`₹${fmt(srcUnit)}`}</div>
                             {row.src_price_foreign && row.sourced_currency && row.sourced_currency!=='INR' &&
@@ -930,7 +945,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     {isDomestic
                       ? <div style={{ display:'flex', alignItems:'center', gap:3 }}>
                           <input className="input" type="number" step="0.01" value={row.margin_pct||''} disabled={isReadOnly}
-                            style={{ flex:1, height:30, fontSize:11, minWidth:0 }}
+                            style={{ flex:1, height:32, fontSize:13, minWidth:0, textAlign:'center' }}
                             onChange={e=>handleMargin(e.target.value)} />
                           <UnitToggle mode={marginMode} onToggle={toggleMarginMode} disabled={isReadOnly} />
                         </div>
@@ -938,7 +953,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                           const mAmt = mrow.lc?.marginAmt;
                           const hasMargin = mAmt != null && Number(mAmt) !== 0;
                           return (
-                            <div style={{ textAlign:'right', fontSize:12, color: hasMargin?'#7c3aed':'var(--text3)', fontWeight: hasMargin?700:400 }}>
+                            <div style={{ textAlign:'center', fontSize:13, color: hasMargin?'#7c3aed':'var(--text3)', fontWeight: hasMargin?700:400 }}>
                               {hasMargin ? `₹${fmt(mAmt)}` : '—'}
                             </div>
                           );
@@ -947,25 +962,25 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     {/* Quote/Unit — input if domestic, value or dash otherwise */}
                     {isDomestic
                       ? <input {...inp} type="number" step="0.01" value={qrow.quote_price||''} disabled={isReadOnly}
-                          style={{ height:30, fontSize:11, width:'100%', fontWeight:700, background:qrow.quote_price?'var(--green-lt)':undefined, borderColor:qrow.quote_price?'var(--green)':undefined }}
+                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', fontWeight:700, background:qrow.quote_price?'var(--green-lt)':undefined, borderColor:qrow.quote_price?'var(--green)':undefined }}
                           onChange={e=>updQuote(idx,'quote_price',e.target.value)} />
-                      : <div style={{ textAlign:'right', fontWeight:700, color:quoteUnit>0?'var(--green)':'var(--text3)', fontSize:12 }}>{quoteUnit>0?`₹${fmt(quoteUnit)}`:'—'}</div>}
+                      : <div style={{ textAlign:'center', fontWeight:700, color:quoteUnit>0?'var(--green)':'var(--text3)', fontSize:13 }}>{quoteUnit>0?`₹${fmt(quoteUnit)}`:'—'}</div>}
 
                     {/* Quote Total (×qty) — always read-only */}
-                    <div style={{ textAlign:'right', fontWeight:700, fontSize:12, color:quoteTotal>0?'#7c3aed':'var(--text3)' }}>{quoteTotal>0?`₹${fmt(quoteTotal)}`:'—'}</div>
+                    <div style={{ textAlign:'center', fontWeight:700, fontSize:13, color:quoteTotal>0?'#7c3aed':'var(--text3)' }}>{quoteTotal>0?`₹${fmt(quoteTotal)}`:'—'}</div>
 
                     {/* GST — select if domestic, display value for intl */}
                     {isDomestic
                       ? <select {...inp} value={qrow.tax_rate??''} disabled={isReadOnly}
-                          style={{ height:30, fontSize:11, width:'100%', borderColor:(!qrow.tax_rate&&qrow.tax_rate!==0)?'#ef4444':undefined }}
+                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:(!qrow.tax_rate&&qrow.tax_rate!==0)?'#ef4444':undefined }}
                           onChange={e=>updQuote(idx,'tax_rate',e.target.value)}>
                           <option value="">—GST—</option>
                           {getTaxRates('INR').map(t=><option key={t.label} value={t.rate}>{t.label}</option>)}
                         </select>
-                      : <div style={{ textAlign:'right', color:gstRate>0?'var(--text2)':'var(--text3)', fontSize:12 }}>{gstRate>0?`${gstRate}%`:'—'}</div>}
+                      : <div style={{ textAlign:'center', color:gstRate>0?'var(--text2)':'var(--text3)', fontSize:13 }}>{gstRate>0?`${gstRate}%`:'—'}</div>}
 
                     {/* Quote+GST — always read-only */}
-                    <div style={{ textAlign:'right', fontWeight:800, fontSize:12, color:quoteTotalGST>0&&gstRate>0?'#16a34a':quoteTotalGST>0?'var(--text)':'var(--text3)' }}>
+                    <div style={{ textAlign:'center', fontWeight:800, fontSize:13, color:quoteTotalGST>0&&gstRate>0?'#16a34a':quoteTotalGST>0?'var(--text)':'var(--text3)' }}>
                       {quoteTotalGST>0
                         ? <><div>{`₹${fmt(quoteTotalGST)}`}</div>{gstRate>0&&<div style={{ fontSize:9, fontWeight:600, color:'#6b7280' }}>incl. {gstRate}% GST</div>}</>
                         : '—'}
@@ -1027,22 +1042,21 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                   {/* ── Domestic sub-row: only shown after supplier selected ── */}
                   {isDomestic && row.supplier_id && (
-                    <div style={{ display:'flex', alignItems:'center', gap:8, padding:'4px 14px 8px', borderTop:'1px dashed #e5e7eb', background:'#fafafa' }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:12, padding:'5px 14px 7px', borderTop:'1px dashed #e5e7eb', background:'#fafafa' }}>
 
-                      {/* Line Note */}
-                      <div style={{ flex:'2 1 180px', minWidth:120 }}>
-                        <div style={{ fontSize:9, fontWeight:700, color:'#6b7280', letterSpacing:.4, marginBottom:2 }}>LINE NOTE</div>
-                        <input className="input" value={row.notes||''} placeholder="Note to team…"
-                          onChange={e=>updSrc(idx,'notes',e.target.value)} disabled={isReadOnly}
-                          style={{ width:'100%', height:26, fontSize:11, padding:'2px 7px' }}/>
-                      </div>
+                      {/* Line Note — label + field inline */}
+                      <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap', flexShrink:0 }}>LINE NOTE</span>
+                      <input className="input" value={row.notes||''} placeholder="Note to team…"
+                        onChange={e=>updSrc(idx,'notes',e.target.value)} disabled={isReadOnly}
+                        style={{ flex:'1 1 0', minWidth:100, maxWidth:320, height:28, fontSize:11, padding:'2px 8px' }}/>
 
-                      {/* Target Price from item — read-only */}
-                      {Number(item.target_price) > 0 && (
-                        <div style={{ flexShrink:0 }}>
-                          <div style={{ fontSize:9, fontWeight:700, color:'#6b7280', letterSpacing:.4, marginBottom:2 }}>TARGET PRICE</div>
+                      {/* right-side chips — label + chip inline, pushed to far right */}
+                      <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:12, flexShrink:0 }}>
+
+                        {Number(item.target_price) > 0 && <>
+                          <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap' }}>TARGET PRICE</span>
                           <div style={{
-                            height:26, fontSize:11, padding:'2px 10px',
+                            height:28, fontSize:11, padding:'2px 10px',
                             background: mrow.aboveTarget ? '#fee2e2' : '#dcfce7',
                             border: `1px solid ${mrow.aboveTarget ? '#fca5a5' : '#86efac'}`,
                             borderRadius:'var(--r-sm)', fontWeight:700,
@@ -1051,29 +1065,23 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                           }}>
                             🎯 {item.target_currency||'INR'} {item.target_price}{mrow.aboveTarget?' ⚠':''}
                           </div>
-                        </div>
-                      )}
+                        </>}
 
-                      {/* DC from item — read-only */}
-                      {item.date_code && (
-                        <div style={{ flexShrink:0 }}>
-                          <div style={{ fontSize:9, fontWeight:700, color:'#6b7280', letterSpacing:.4, marginBottom:2 }}>DC</div>
-                          <div style={{ height:26, fontSize:11, padding:'2px 10px', background:'#f3f4f6', border:'1px solid #d1d5db', borderRadius:'var(--r-sm)', fontWeight:700, color:'#374151', display:'flex', alignItems:'center', whiteSpace:'nowrap' }}>
+                        {item.date_code && <>
+                          <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap' }}>DC</span>
+                          <div style={{ height:28, fontSize:11, padding:'2px 10px', background:'#f3f4f6', border:'1px solid #d1d5db', borderRadius:'var(--r-sm)', fontWeight:700, color:'#374151', display:'flex', alignItems:'center', whiteSpace:'nowrap' }}>
                             {item.date_code}
                           </div>
-                        </div>
-                      )}
+                        </>}
 
-                      {/* Promise Date — fetched from enquiry item, read-only */}
-                      {item.preferred_delivery_date && (
-                        <div style={{ flexShrink:0 }}>
-                          <div style={{ fontSize:9, fontWeight:700, color:'#6b7280', letterSpacing:.4, marginBottom:2 }}>PROMISE DATE</div>
-                          <div style={{ height:26, fontSize:11, padding:'2px 10px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'var(--r-sm)', fontWeight:700, color:'#1d4ed8', display:'flex', alignItems:'center', whiteSpace:'nowrap' }}>
+                        {item.preferred_delivery_date && <>
+                          <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap' }}>PROMISE DATE</span>
+                          <div style={{ height:28, fontSize:11, padding:'2px 10px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'var(--r-sm)', fontWeight:700, color:'#1d4ed8', display:'flex', alignItems:'center', whiteSpace:'nowrap' }}>
                             📅 {new Date(item.preferred_delivery_date).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })}
                           </div>
-                        </div>
-                      )}
+                        </>}
 
+                      </div>
                     </div>
                   )}
 
@@ -1146,29 +1154,29 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         </div>
 
         {/* Modal Footer */}
-        <div className="modal-footer" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '10px 20px' }}>
-          <button className="btn" onClick={onClose}>Close</button>
+        <div className="modal-footer" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 24px' }}>
+          <button className="btn" style={{ padding:'10px 24px', fontSize:14 }} onClick={onClose}>Close</button>
           {isReadOnly ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: 'var(--green-lt,#f0fdf4)', border: '1px solid var(--green,#16a34a)', borderRadius: 'var(--r)', fontSize: 12, color: 'var(--green,#16a34a)', fontWeight: 600 }}>
-              <span style={{ fontSize: 16 }}>✅</span>Sourcing completed — view only
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'var(--green-lt,#f0fdf4)', border: '1px solid var(--green,#16a34a)', borderRadius: 'var(--r)', fontSize: 14, color: 'var(--green,#16a34a)', fontWeight: 600 }}>
+              <span style={{ fontSize: 18 }}>✅</span>Sourcing completed — view only
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <button className="btn" disabled={saving} onClick={() => handleSave('draft')} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 2v5h6V2"/><rect x="9" y="2" width="2" height="3"/></svg>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button className="btn" disabled={saving} onClick={() => handleSave('draft')} style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14 }}>
+                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 2v5h6V2"/><rect x="9" y="2" width="2" height="3"/></svg>
                 {saving && saveMode === 'draft' ? 'Saving…' : 'Save as Draft'}
               </button>
               {isRevision ? (
                 <button className="btn btn-primary" disabled={saving || !allFieldsFilled} onClick={() => handleSave('return_revision')}
-                  style={{ display: 'flex', alignItems: 'center', gap: 6, background: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
-                  <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 28px', fontSize:14, background: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
                   {saving && saveMode === 'return_revision' ? 'Returning…' : '↩ Return to Quote Bin — ' + (pendingRevision?.quote_no || 'Revision')}
                 </button>
               ) : (
                 <button className="btn btn-primary" disabled={saving || !allFieldsFilled} onClick={() => handleSave('quote')}
-                  style={{ display: 'flex', alignItems: 'center', gap: 6, background: allFieldsFilled ? 'var(--accent)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--accent)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
-                  <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
-                  {saving && saveMode === 'quote' ? 'Sending...' : 'Send to Quote Bin ->'}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 28px', fontSize:14, background: allFieldsFilled ? 'var(--accent)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--accent)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
+                  {saving && saveMode === 'quote' ? 'Sending...' : 'Send to Quote Bin →'}
                 </button>
               )}
             </div>
