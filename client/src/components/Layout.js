@@ -166,7 +166,7 @@ export default function Layout() {
         <main id="main-content" className="page-content"><Outlet /></main>
       </div>
       {showKb && <KeyboardShortcutsPanel onClose={() => setShowKb(false)} />}
-      <div style={{position:'fixed',bottom:10,right:16,fontSize:10,color:'#000000',opacity:1,pointerEvents:'none',userSelect:'none',zIndex:9999,fontWeight:700}}>
+      <div style={{position:'fixed',bottom:10,right:16,fontSize:10,color:'#000000',opacity:1,pointerEvents:'none',userSelect:'none',zIndex:100,fontWeight:700}}>
         Powered by Sencilla Tec Solutions &nbsp;|&nbsp; All rights reserved
       </div>
     </div>
