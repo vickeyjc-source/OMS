@@ -364,15 +364,24 @@ function stripSensitive(order, user) {
 
 // ── AUTH ─────────────────────────────────────────────────────
 app.post('/api/auth/login', asyncRoute(async (req, res) => {
-  const { username, password } = req.body;
+  const { username: rawUsername, password: rawPassword } = req.body;
+  const username = (rawUsername || '').trim();
+  const password = (rawPassword || '').trim();
   if (!username || !password) {
     console.log(`[AUTH] LOGIN FAILED reason=MissingCredentials body=${JSON.stringify({ username: !!username, password: !!password })}`);
     return res.status(400).json({ error: 'Required' });
   }
 
-  const user = await getAsync("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username]);
-  if (!user || !bcrypt.compareSync(password, user.password)) {
-    console.log(`[AUTH] LOGIN FAILED username=${username} reason=InvalidCredentials`);
+  const user = await getAsync("SELECT * FROM users WHERE (LOWER(username)=LOWER(?) OR LOWER(email)=LOWER(?)) AND status='active'", [username, username]);
+  console.log(`[AUTH] LOOKUP username=${JSON.stringify(username)} found=${!!user} dbUsername=${user?.username||'none'} dbEmail=${user?.email||'none'} status=${user?.status||'none'}`);
+  if (!user) {
+    console.log(`[AUTH] LOGIN FAILED username=${username} reason=UserNotFound`);
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+  const pwMatch = bcrypt.compareSync(password, user.password);
+  console.log(`[AUTH] PASSWORD CHECK username=${username} match=${pwMatch}`);
+  if (!pwMatch) {
+    console.log(`[AUTH] LOGIN FAILED username=${username} reason=WrongPassword`);
     return res.status(401).json({ error: 'Invalid credentials' });
   }
   const payload = { id: user.id, name: user.name, role: user.role, department: user.department, username: user.username };
@@ -388,7 +397,7 @@ app.post('/api/auth/verify-manager', auth, asyncRoute(async (req, res) => {
   if (!password) return res.status(400).json({ error: 'Password required' });
   // Look up by provided username (must be manager/admin), fallback to session user
   const user = username
-    ? await getAsync("SELECT * FROM users WHERE (username=? OR email=?) AND status='active'", [username, username])
+    ? await getAsync("SELECT * FROM users WHERE (LOWER(username)=LOWER(?) OR LOWER(email)=LOWER(?)) AND status='active'", [username, username])
     : await getAsync('SELECT * FROM users WHERE id=?', [req.session.user.id]);
   if (!user) return res.status(401).json({ error: 'User not found' });
   if (!['admin','manager'].includes(user.role)) return res.status(403).json({ error: 'Only managers or admins can unlock' });

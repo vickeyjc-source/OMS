@@ -13,12 +13,15 @@ function UserModal({ u, onClose }) {
   const { user: me } = useAuth();
   const isNew = !u?.id;
   const [form, setForm] = useState(u
-    ? { ...u, password: u.plain_password || '' }
+    ? { ...u, password: '' }
     : {name:'',username:'',email:'',password:'',department:'sales',role:'user',status:'active'});
   const [showPass, setShowPass] = useState(false);
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
   const mutation = useMutation({
-    mutationFn: d => isNew ? api.post('/users',d) : api.put(`/users/${u.id}`,d),
+    mutationFn: d => {
+      if (!isNew && !d.password) { const { password, ...rest } = d; return api.put(`/users/${u.id}`, rest); }
+      return isNew ? api.post('/users', d) : api.put(`/users/${u.id}`, d);
+    },
     onSuccess: ()=>{ qc.invalidateQueries(['users']); toast.success('User saved'); onClose(); },
     onError: e=>toast.error(e.response?.data?.error||'Failed'),
   });
@@ -39,9 +42,9 @@ function UserModal({ u, onClose }) {
             <div className="form-group"><label className="label">Email</label><input className="input" type="email" value={form.email} onChange={e=>set('email',e.target.value)} /></div>
           </div>
           <div className="form-group">
-            <label className="label">Password <span className="req">*</span></label>
+            <label className="label">Password {isNew ? <span className="req">*</span> : <span style={{fontWeight:400,color:'var(--text3)',fontSize:12}}>(leave blank to keep current)</span>}</label>
             <div style={{position:'relative'}}>
-              <input className="input" type={showPass?'text':'password'} value={form.password||''} onChange={e=>set('password',e.target.value)} style={{width:'100%',paddingRight:38}} />
+              <input className="input" type={showPass?'text':'password'} value={form.password||''} onChange={e=>set('password',e.target.value)} style={{width:'100%',paddingRight:38}} placeholder={isNew ? '' : 'Enter new password to change'} />
               <button type="button" onClick={()=>setShowPass(v=>!v)}
                 style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',
                   background:'none',border:'none',cursor:'pointer',padding:2,
