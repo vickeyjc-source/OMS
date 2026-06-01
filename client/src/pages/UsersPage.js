@@ -32,7 +32,7 @@ function UserModal({ u, onClose }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   return (
     <>
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header"><h2>{isNew?'Add User':'Edit User'}</h2><button className="close-x" onClick={onClose}>×</button></div>
         <div className="modal-body">
