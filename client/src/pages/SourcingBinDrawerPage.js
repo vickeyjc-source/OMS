@@ -545,7 +545,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
 // SOURCING MODAL  — full-screen modal, same as old design but items use
 //                   new card-table row with Calculate button at the end
 // ─────────────────────────────────────────────────────────────────────────────
-function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSaved, onSavedDraft, forceReadOnly = false }) {
+function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSaved, onSavedDraft, forceReadOnly = false, pageMode = false }) {
   const { user } = useAuth();
 
   const { data: inventoryItems = [] } = useQuery({
@@ -824,36 +824,54 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     setQuoteRows(p => p.map((r, i) => i === idx ? { ...r, ...qrow } : r));
   };
 
-  return (
-    <div className="overlay" style={{ padding: '16px', alignItems: 'stretch' }}>
-      <div className="modal" style={{ width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
+  const pageWrap = pageMode
+    ? { display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--surface)', borderRadius: 0 }
+    : {};
+  const outerWrap = pageMode
+    ? { display: 'flex', flexDirection: 'column', height: '100%' }
+    : { padding: '16px', alignItems: 'stretch' };
 
-        {/* Modal Header */}
-        <div className="modal-header" style={{ padding: '12px 20px' }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--border)' }}>📩 {enq.id}</span>
-              {enq.sourcing_no && <>
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-lt)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--accent)33', fontWeight: 600 }}>🔍 {enq.sourcing_no}</span>
-              </>}
-              {pendingRevision && <>
-                <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--amber,#d97706)', background: 'var(--amber-lt,#fffbeb)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--amber,#d97706)44', fontWeight: 700 }}>📄 {pendingRevision.quote_no}</span>
-              </>}
-            </div>
-            <h2 style={{ marginBottom: 0 }}>🔍 {maskName(custName(enq.customer_id))}</h2>
-            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
-              {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''} · Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'inherit' }}>{enq.priority}</strong> · Created {fmtDateTime(enq.created_at)}
+  return (
+    <div className={pageMode ? '' : 'overlay'} style={outerWrap}>
+      <div className={pageMode ? '' : 'modal'} style={pageMode ? pageWrap : { width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
+
+        {/* Header */}
+        <div className={pageMode ? '' : 'modal-header'} style={{ padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--surface)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            {pageMode && (
+              <button
+                className="btn"
+                onClick={onClose}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', fontSize: 13, flexShrink: 0, marginTop: 2 }}
+              >
+                ← Back
+              </button>
+            )}
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--border)' }}>📩 {enq.id}</span>
+                {enq.sourcing_no && <>
+                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-lt)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--accent)33', fontWeight: 600 }}>🔍 {enq.sourcing_no}</span>
+                </>}
+                {pendingRevision && <>
+                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--amber,#d97706)', background: 'var(--amber-lt,#fffbeb)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--amber,#d97706)44', fontWeight: 700 }}>📄 {pendingRevision.quote_no}</span>
+                </>}
+              </div>
+              <h2 style={{ marginBottom: 0 }}>🔍 {maskName(custName(enq.customer_id))}</h2>
+              <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
+                {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''} · Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'inherit' }}>{enq.priority}</strong> · Created {fmtDateTime(enq.created_at)}
+              </div>
             </div>
           </div>
           <div className="flex gap-8">
             <StatusBadge s={enq.status} />
-            <button className="close-x" onClick={onClose}>×</button>
+            {!pageMode && <button className="close-x" onClick={onClose}>×</button>}
           </div>
         </div>
 
-        <div className="modal-body" style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 20px' }} onClick={() => setNotePopover(null)}>
+        <div className={pageMode ? '' : 'modal-body'} style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 20px' }} onClick={() => setNotePopover(null)}>
 
           {/* modify_requested banner — locked message for whole-ENQ or order-section; info for specific-item */}
           {enq.status === 'modify_requested' && (
@@ -1335,9 +1353,13 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           </div>
         </div>
 
-        {/* Modal Footer */}
-        <div className="modal-footer" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 24px' }}>
-          <button className="btn" style={{ padding:'10px 24px', fontSize:14 }} onClick={onClose}>Close</button>
+        {/* Footer */}
+        <div className={pageMode ? '' : 'modal-footer'} style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 24px', display: 'flex', alignItems: 'center', borderTop: '1px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
+          {pageMode ? (
+            <button className="btn" style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '10px 24px', fontSize: 14 }} onClick={onClose}>← Back to Sourcing Bin</button>
+          ) : (
+            <button className="btn" style={{ padding: '10px 24px', fontSize: 14 }} onClick={onClose}>Close</button>
+          )}
           {isReadOnly ? (
             isModifyWholeEnqLocked ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: '#fff7ed', border: '1.5px solid #f97316', borderRadius: 'var(--r)', fontSize: 14, color: '#c2410c', fontWeight: 600 }}>
@@ -1532,6 +1554,26 @@ export default function SourcingBinDrawerPage() {
   const high       = binEnqs.filter(e => e.priority === 'high').length;
   const unassigned = binEnqs.filter(e => !e.assigned_to).length;
 
+  // When a card is selected, show the detail screen full-page instead of list
+  if (selected) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+        <SourcingModal
+          enq={selected}
+          suppliers={suppliers}
+          customers={customers}
+          users={users}
+          quotes={quotes}
+          pageMode={true}
+          forceReadOnly={hasDownstreamOrder(selected) || ['ordered', 'order_created'].includes(selected.status)}
+          onClose={() => setSelected(null)}
+          onSaved={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); qc.invalidateQueries(['summary']); setSelected(null); }}
+          onSavedDraft={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div>
       {/* Stats */}
@@ -1668,19 +1710,6 @@ export default function SourcingBinDrawerPage() {
         </table>
       </div>
 
-      {selected && (
-        <SourcingModal
-          enq={selected}
-          suppliers={suppliers}
-          customers={customers}
-          users={users}
-          quotes={quotes}
-          forceReadOnly={hasDownstreamOrder(selected) || ['ordered', 'order_created'].includes(selected.status)}
-          onClose={() => setSelected(null)}
-          onSaved={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); qc.invalidateQueries(['summary']); setSelected(null); }}
-          onSavedDraft={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); }}
-        />
-      )}
     </div>
   );
 }
