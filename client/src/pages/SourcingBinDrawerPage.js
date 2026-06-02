@@ -824,16 +824,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     setQuoteRows(p => p.map((r, i) => i === idx ? { ...r, ...qrow } : r));
   };
 
-  const pageWrap = pageMode
-    ? { display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--surface)', borderRadius: 0 }
-    : {};
-  const outerWrap = pageMode
-    ? { display: 'flex', flexDirection: 'column', height: '100%' }
-    : { padding: '16px', alignItems: 'stretch' };
-
   return (
-    <div className={pageMode ? '' : 'overlay'} style={outerWrap}>
-      <div className={pageMode ? '' : 'modal'} style={pageMode ? pageWrap : { width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
+    <div className={pageMode ? '' : 'overlay'} style={pageMode ? {} : { padding: '16px', alignItems: 'stretch' }}>
+      <div className={pageMode ? '' : 'modal'} style={pageMode
+        ? {
+            position: 'fixed',
+            top: 44, left: 196, right: 0, bottom: 0,
+            display: 'flex', flexDirection: 'column',
+            background: 'var(--surface)',
+            overflow: 'hidden',
+            zIndex: 10,
+          }
+        : { width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
 
         {/* Header */}
         <div className={pageMode ? '' : 'modal-header'} style={{ padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--surface)' }}>
@@ -871,7 +873,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           </div>
         </div>
 
-        <div className={pageMode ? '' : 'modal-body'} style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 20px' }} onClick={() => setNotePopover(null)}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }} onClick={() => setNotePopover(null)}>
+        {/* TOP HALF — components table, scrollable, 50% */}
+        <div className={pageMode ? '' : 'modal-body'} style={{ flex: '1 1 50%', overflowY: 'auto', overflowX: 'hidden', minHeight: 0, padding: '14px 20px' }}>
 
           {/* modify_requested banner — locked message for whole-ENQ or order-section; info for specific-item */}
           {enq.status === 'modify_requested' && (
@@ -1290,10 +1294,13 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             })}
           </div>
 
-        </div>
+        </div>{/* end top-half scroll */}
 
-        {/* ── Margin Summary — fixed above footer, always visible ── */}
-        <div style={{ borderTop: '2px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
+        {/* BOTTOM HALF — margin summary, scrollable, 50% */}
+        <div style={{ flex: '1 1 50%', overflowY: 'auto', minHeight: 0, borderTop: '2px solid var(--border)', background: 'var(--surface)' }}>
+
+        {/* ── Margin Summary ── */}
+        <div style={{ background: 'var(--surface)' }}>
           <div className="card card-sm" style={{ margin: '0', border: 'none', borderRadius: 0, boxShadow: 'none' }}>
             <div className="card-title" style={{ padding: '8px 18px 0' }}>📊 Margin Summary</div>
             <div style={{ padding: '8px 18px 10px' }}>
@@ -1351,7 +1358,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               )}
             </div>
           </div>
-        </div>
+        </div>{/* end inner margin div */}
+        </div>{/* end bottom-half scroll */}
+        </div>{/* end flex column wrapper */}
 
         {/* Footer */}
         <div className={pageMode ? '' : 'modal-footer'} style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 24px', display: 'flex', alignItems: 'center', borderTop: '1px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
