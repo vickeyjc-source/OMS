@@ -874,8 +874,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         </div>
 
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }} onClick={() => setNotePopover(null)}>
-        {/* TOP HALF — components table, scrollable, 50% */}
-        <div className={pageMode ? '' : 'modal-body'} style={{ flex: '1 1 50%', overflowY: 'auto', overflowX: 'hidden', minHeight: 0, padding: '14px 20px' }}>
+        {/* TOP — components table, grows to fill space, scrollable */}
+        <div className={pageMode ? '' : 'modal-body'} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', minHeight: 0, padding: '14px 20px' }}>
 
           {/* modify_requested banner — locked message for whole-ENQ or order-section; info for specific-item */}
           {enq.status === 'modify_requested' && (
@@ -1296,8 +1296,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
         </div>{/* end top-half scroll */}
 
-        {/* BOTTOM HALF — margin summary, scrollable, 50% */}
-        <div style={{ flex: '1 1 50%', overflowY: 'auto', minHeight: 0, borderTop: '2px solid var(--border)', background: 'var(--surface)' }}>
+        {/* BOTTOM — margin summary, fixed height based on content, never grows */}
+        <div style={{ flexShrink: 0, overflowY: 'auto', maxHeight: '45%', borderTop: '2px solid var(--border)', background: 'var(--surface)' }}>
 
         {/* ── Margin Summary ── */}
         <div style={{ background: 'var(--surface)' }}>
