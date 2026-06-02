@@ -844,6 +844,12 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               ← Back
             </button>
           )}
+          {/* customer name — first, with label, masked */}
+          <span style={{ fontSize: 12, color: 'var(--text2)', flexShrink: 0 }}>
+            Customer: <strong style={{ color: 'var(--text)' }}>{maskName(custName(enq.customer_id))}</strong>
+          </span>
+          {/* divider */}
+          <span style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />
           {/* breadcrumb */}
           <span className="mono" style={{ fontSize: 11, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 7px', borderRadius: 999, border: '1px solid var(--border)', flexShrink: 0 }}>📩 {enq.id}</span>
           {enq.sourcing_no && <>
@@ -856,23 +862,24 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           </>}
           {/* divider */}
           <span style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />
-          {/* customer */}
-          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', flexShrink: 0 }}>🔍 {maskName(custName(enq.customer_id))}</span>
-          {/* divider */}
-          <span style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />
           {/* meta */}
-          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
-            {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''}
-          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>{enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''}</span>
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
-          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
-            Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'var(--text2)' }}>{enq.priority}</strong>
-          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'var(--text2)' }}>{enq.priority}</strong></span>
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>Created {fmtDateTime(enq.created_at)}</span>
-          {/* status + close pushed to right */}
+          {enq.notes && <>
+            <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
+            <span style={{ fontSize: 11, color: 'var(--text2)', flexShrink: 0 }}>📝 {enq.notes}</span>
+          </>}
+          {/* status + assigned pushed to right */}
           <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             <StatusBadge s={enq.status} />
+            <span style={{ fontSize: 11, color: 'var(--text3)' }}>Assigned:</span>
+            <select className="input" style={{ padding: '3px 8px', fontSize: 12, minWidth: 130, height: 28 }} value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={isReadOnly}>
+              <option value="">— Unassigned —</option>
+              {srcingUsers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
             {!pageMode && <button className="close-x" onClick={onClose}>×</button>}
           </div>
         </div>
@@ -925,18 +932,6 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             </div>
           )}
 
-          {/* Enquiry info bar */}
-          <div style={{ background: 'var(--accent-lt)', border: '1px solid rgba(27,79,158,.2)', borderRadius: 'var(--r-sm)', padding: '9px 14px', marginBottom: 14, fontSize: 12, display: 'flex', gap: 20, flexWrap: 'wrap' }}>
-            <span>📋 <strong>Customer:</strong> {maskName(custName(enq.customer_id))}</span>
-            {enq.notes && <span>📝 <strong>Notes:</strong> {enq.notes}</span>}
-            <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <label className="label" style={{ margin: 0 }}>Assigned:</label>
-              <select className="input" style={{ padding: '3px 8px', fontSize: 12, minWidth: 140 }} value={assignTo} onChange={e => setAssignTo(e.target.value)} disabled={isReadOnly}>
-                <option value="">— Unassigned —</option>
-                {srcingUsers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-              </select>
-            </span>
-          </div>
 
           {/* ── Per-Item Cards ── */}
           <div className="card card-sm" style={{ marginBottom: 0, overflowX: 'auto' }}>
