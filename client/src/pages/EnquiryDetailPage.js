@@ -191,16 +191,20 @@ export default function EnquiryDetailPage() {
                   <thead>
                     <tr>
                       <th>#</th><th>Component</th><th>Manufacturer</th><th>Supplier</th>
-                      <th>Src Price</th><th>Lead Time</th><th>Quote Price</th>
-                      <th>GST / VAT</th><th>Quote Total</th><th>Notes</th>
+                      <th>Src Price</th><th>Lead Time</th><th>Qty</th>
+                      <th>Quote Price / Per Unit</th>
+                      <th>Quote Total</th><th>GST / VAT</th><th>Quote Total (incl. GST)</th>
+                      <th>Notes</th>
                     </tr>
                   </thead>
                   <tbody>
                     {enq.items?.map((item, i) => {
-                      const src    = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
-                      const qty    = Number(item.quantity) || 0;
-                      const qp     = Number(src?.quote_price) || 0;
-                      const qTotal = qp * qty;
+                      const src       = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
+                      const qty       = Number(item.quantity) || 0;
+                      const qp        = Number(src?.quote_price) || 0;
+                      const qTotal    = qp * qty;
+                      const taxRate   = src?.tax_rate != null && src.tax_rate !== '' ? Number(src.tax_rate) : null;
+                      const qTotalGst = taxRate != null ? qTotal * (1 + taxRate / 100) : null;
                       const isSentBack = src?.sent_to_enquiry;
                       return (
                         <tr key={item.id} style={{ background: isSentBack ? '#fef3c7' : undefined, borderLeft: isSentBack ? '4px solid #d97706' : undefined }}>
@@ -210,7 +214,7 @@ export default function EnquiryDetailPage() {
                           <td>{src?.supplier_id ? supName(src.supplier_id) : <span className="muted">—</span>}</td>
                           <td className="mono">
                             {src?.sourced_price
-                              ? <span style={{color:'var(--accent)',fontWeight:600}}>{fmtC(src.sourced_price, src.sourced_currency||'USD')}</span>
+                              ? <span style={{color:'var(--accent)',fontWeight:600}}>{fmtC(src.sourced_price, 'INR')}</span>
                               : <span className="muted">—</span>}
                           </td>
                           <td>
@@ -218,19 +222,25 @@ export default function EnquiryDetailPage() {
                               ? <span style={{fontWeight:600}}>{src.lead_time}</span>
                               : <span className="muted">—</span>}
                           </td>
+                          <td className="mono" style={{fontWeight:600}}>{qty || '—'}</td>
                           <td className="mono">
                             {src?.quote_price
                               ? <span style={{color:'var(--green)',fontWeight:700}}>{fmtC(src.quote_price, src.quote_currency||'INR')}</span>
                               : <span className="muted">—</span>}
                           </td>
-                          <td>
-                            {src?.tax_rate != null && src.tax_rate !== ''
-                              ? <span className="badge badge-gray">{src.tax_rate}%</span>
-                              : <span className="muted">—</span>}
-                          </td>
                           <td className="mono">
                             {qTotal > 0
                               ? <span style={{fontWeight:700}}>{fmtC(qTotal, src?.quote_currency||'INR')}</span>
+                              : <span className="muted">—</span>}
+                          </td>
+                          <td>
+                            {taxRate != null
+                              ? <span className="badge badge-gray">{taxRate}%</span>
+                              : <span className="muted">—</span>}
+                          </td>
+                          <td className="mono">
+                            {qTotalGst != null && qTotalGst > 0
+                              ? <span style={{fontWeight:700,color:'var(--green)'}}>{fmtC(qTotalGst, src?.quote_currency||'INR')}</span>
                               : <span className="muted">—</span>}
                           </td>
                           <td style={{color:'var(--text2)',fontSize:11}}>
