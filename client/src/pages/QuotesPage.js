@@ -28,6 +28,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   // Track whether details have been saved — Next → Customer Response only enabled after Save
   const [detailsSavedOnce, setDetailsSavedOnce] = useState(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
   const [confirmRevision, setConfirmRevision] = useState(false);
+  const [confirmCreateOrder, setConfirmCreateOrder] = useState(false);
 
   // Sync editable fields when parent passes updated quote data (after save+refresh)
   useEffect(() => {
@@ -154,8 +155,9 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     (savedResponse === 'negotiating' || sentToCustomer);
 
   // Confirm → save details → create order
-  const handleCreateOrder = () => {
-    if (!window.confirm('Are you sure you want to create an order from this quote?\nThis will save the details and open the new order form.')) return;
+  const handleCreateOrder = () => setConfirmCreateOrder(true);
+  const doCreateOrder = () => {
+    setConfirmCreateOrder(false);
     saveMutation.mutate(
       { zoho_quote_no: zohoQuote.trim(), valid_until: validUntil, sent_to_customer: 1 },
       { onSuccess: () => createOrderMutation.mutate() }
@@ -594,6 +596,31 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
         </div>
       </div>
+
+      {/* Create Order confirm modal */}
+      {confirmCreateOrder && (
+        <div className="overlay" style={{zIndex:600}} onClick={() => setConfirmCreateOrder(false)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+            <div className="modal-header">
+              <h2 style={{fontSize:16}}>Create Order</h2>
+              <button className="close-x" onClick={() => setConfirmCreateOrder(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:13, color:'var(--text2)', lineHeight:1.6}}>
+                Are you sure you want to create an order from this quote? This will save the details and open the new order form.
+              </div>
+            </div>
+            <div className="modal-footer" style={{justifyContent:'flex-end', gap:8}}>
+              <button className="btn" onClick={() => setConfirmCreateOrder(false)}>Cancel</button>
+              <button className="btn btn-primary"
+                style={{fontWeight:700}}
+                onClick={doCreateOrder}>
+                Create Order
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Send to Revision confirm modal */}
       {confirmRevision && (

@@ -629,6 +629,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   const isWholeEnquirySent = enq.status === 'modify_requested' && srcRows.length > 0 && srcRows.every(r => Boolean(r.sent_to_enquiry));
   // isReadOnly: only for completed/quoted states — NOT for modify_requested (rowLocked handles that per-item)
   const isReadOnly = forceReadOnly || isQuoted || ['ordered', 'order_created'].includes(enq.status);
+  // Once this enquiry has gone to quote at least once, never show "Send to ENQ" again
+  const hasEverBeenQuoted = (quotes || []).some(q => q.enquiry_id === enq.id);
 
   const marginData = useMemo(() => {
     const rows = (enq.items || []).map((item, idx) => {
@@ -1101,7 +1103,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
                         Calculate
                       </button>}
-                      {!isReadOnly && (!rowLocked ? (
+                      {!isReadOnly && !hasEverBeenQuoted && (!rowLocked ? (
                         <button className="btn btn-xs btn-secondary" onClick={() => handleSendToEnquiry(idx)} style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
                           Send to ENQ
                         </button>
@@ -1305,9 +1307,11 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 2v5h6V2"/><rect x="9" y="2" width="2" height="3"/></svg>
                 {saving && saveMode === 'draft' ? 'Saving…' : 'Save as Draft'}
               </button>
-              <button className="btn btn-secondary" disabled={sendInProgress || isWholeEnquirySent} onClick={() => handleSendToEnquiry(null)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14, background: isWholeEnquirySent ? 'var(--surface2)' : undefined, borderColor: isWholeEnquirySent ? 'var(--border)' : undefined, color: isWholeEnquirySent ? 'var(--text3)' : undefined }}>
-                {sendInProgress ? 'Sending…' : isWholeEnquirySent ? 'Sent to Enquiry' : 'Send full enquiry to ENQ'}
-              </button>
+              {!hasEverBeenQuoted && (
+                <button className="btn btn-secondary" disabled={sendInProgress || isWholeEnquirySent} onClick={() => handleSendToEnquiry(null)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14, background: isWholeEnquirySent ? 'var(--surface2)' : undefined, borderColor: isWholeEnquirySent ? 'var(--border)' : undefined, color: isWholeEnquirySent ? 'var(--text3)' : undefined }}>
+                  {sendInProgress ? 'Sending…' : isWholeEnquirySent ? 'Sent to Enquiry' : 'Send full enquiry to ENQ'}
+                </button>
+              )}
               {isRevision ? (
                 <button className="btn btn-primary" disabled={saving || !allFieldsFilled} onClick={() => handleSave('return_revision')}
                   style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 28px', fontSize:14, background: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
