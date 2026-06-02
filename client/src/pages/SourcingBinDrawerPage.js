@@ -833,41 +833,45 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             display: 'flex', flexDirection: 'column',
             background: 'var(--surface)',
             overflow: 'hidden',
-            zIndex: 10,
+            zIndex: 110,
           }
         : { width: '100%', maxWidth: '100%', margin: '0', borderRadius: 12, display: 'flex', flexDirection: 'column', height: 'calc(100vh - 10px)', maxHeight: 'calc(100vh - 10px)' }}>
 
-        {/* Header */}
-        <div className={pageMode ? '' : 'modal-header'} style={{ padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--surface)' }}>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-            {pageMode && (
-              <button
-                className="btn"
-                onClick={onClose}
-                style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', fontSize: 13, flexShrink: 0, marginTop: 2 }}
-              >
-                ← Back
-              </button>
-            )}
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
-                <span className="mono" style={{ fontSize: 11, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--border)' }}>📩 {enq.id}</span>
-                {enq.sourcing_no && <>
-                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-lt)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--accent)33', fontWeight: 600 }}>🔍 {enq.sourcing_no}</span>
-                </>}
-                {pendingRevision && <>
-                  <span style={{ fontSize: 11, color: 'var(--text3)' }}>→</span>
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--amber,#d97706)', background: 'var(--amber-lt,#fffbeb)', padding: '2px 8px', borderRadius: 999, border: '1px solid var(--amber,#d97706)44', fontWeight: 700 }}>📄 {pendingRevision.quote_no}</span>
-                </>}
-              </div>
-              <h2 style={{ marginBottom: 0 }}>🔍 {maskName(custName(enq.customer_id))}</h2>
-              <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>
-                {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''} · Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'inherit' }}>{enq.priority}</strong> · Created {fmtDateTime(enq.created_at)}
-              </div>
-            </div>
-          </div>
-          <div className="flex gap-8">
+        {/* Header — single line */}
+        <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--border)', flexShrink: 0, background: 'var(--surface)', flexWrap: 'nowrap', minHeight: 0 }}>
+          {pageMode && (
+            <button className="btn" onClick={onClose} style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 12px', fontSize: 12, flexShrink: 0 }}>
+              ← Back
+            </button>
+          )}
+          {/* breadcrumb */}
+          <span className="mono" style={{ fontSize: 11, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 7px', borderRadius: 999, border: '1px solid var(--border)', flexShrink: 0 }}>📩 {enq.id}</span>
+          {enq.sourcing_no && <>
+            <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>→</span>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-lt)', padding: '2px 7px', borderRadius: 999, border: '1px solid var(--accent)33', fontWeight: 600, flexShrink: 0 }}>🔍 {enq.sourcing_no}</span>
+          </>}
+          {pendingRevision && <>
+            <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>→</span>
+            <span className="mono" style={{ fontSize: 11, color: 'var(--amber,#d97706)', background: 'var(--amber-lt,#fffbeb)', padding: '2px 7px', borderRadius: 999, border: '1px solid var(--amber,#d97706)44', fontWeight: 700, flexShrink: 0 }}>📄 {pendingRevision.quote_no}</span>
+          </>}
+          {/* divider */}
+          <span style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />
+          {/* customer */}
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)', flexShrink: 0 }}>🔍 {maskName(custName(enq.customer_id))}</span>
+          {/* divider */}
+          <span style={{ width: 1, height: 18, background: 'var(--border)', flexShrink: 0 }} />
+          {/* meta */}
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
+            {enq.items?.length || 0} component{enq.items?.length !== 1 ? 's' : ''}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>
+            Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'var(--text2)' }}>{enq.priority}</strong>
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>Created {fmtDateTime(enq.created_at)}</span>
+          {/* status + close pushed to right */}
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             <StatusBadge s={enq.status} />
             {!pageMode && <button className="close-x" onClick={onClose}>×</button>}
           </div>
@@ -1296,69 +1300,65 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
         </div>{/* end top-half scroll */}
 
-        {/* BOTTOM — margin summary, fixed height based on content, never grows */}
-        <div style={{ flexShrink: 0, overflowY: 'auto', maxHeight: '45%', borderTop: '2px solid var(--border)', background: 'var(--surface)' }}>
+        {/* BOTTOM — margin summary: cards fixed, table scrolls */}
+        <div style={{ flexShrink: 0, maxHeight: '45%', borderTop: '2px solid var(--border)', background: 'var(--surface)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-        {/* ── Margin Summary ── */}
-        <div style={{ background: 'var(--surface)' }}>
-          <div className="card card-sm" style={{ margin: '0', border: 'none', borderRadius: 0, boxShadow: 'none' }}>
-            <div className="card-title" style={{ padding: '8px 18px 0' }}>📊 Margin Summary</div>
-            <div style={{ padding: '8px 18px 10px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10 }}>
-                {(() => {
-                  const hasSrc = md.totalSrcValue > 0;
-                  return [
-                    { label: 'Total Source Value (₹ INR)', val: md.totalSrcValue,    cur: 'INR', color: 'var(--accent)',                              show: md.totalSrcValue > 0 },
-                    { label: 'Total Quote Value',           val: md.totalQuoteValue,  cur: quoteRows[0]?.quote_currency || 'INR', color: 'var(--green)', show: hasSrc && md.totalQuoteValue > 0 },
-                    { label: 'Gross Margin (Quote − Source)', val: md.totalGrossMargin, cur: 'INR', color: md.totalGrossMargin >= 0 ? 'var(--green)' : 'var(--red)', show: hasSrc && md.totalQuoteValue > 0 },
-                    { label: 'Net Margin (after all charges)', val: md.totalNetMargin, cur: 'INR', color: md.totalNetMargin >= 0 ? 'var(--teal,#0d9488)' : 'var(--red)', sub: hasSrc && md.totalQuoteValue > 0 ? (md.addlCost > 0 ? `Addl. costs: −₹${fmt(md.addlCost)}` : 'No addl. costs') : null, show: hasSrc && md.totalQuoteValue > 0 },
-                  ].map(s => (
-                    <div key={s.label} style={{ background: 'var(--surface2)', borderRadius: 'var(--r)', padding: '10px 14px', borderLeft: `3px solid ${s.show ? s.color : 'var(--border)'}`, boxShadow: `0 0 0 1px ${s.show ? s.color + '22' : 'transparent'}` }}>
-                      <div style={{ fontSize: 11, color: 'var(--text2)', marginBottom: 4, fontWeight: 700, letterSpacing: .2 }}>{s.label}</div>
-                      <div style={{ fontSize: 20, fontWeight: 800, color: s.show ? s.color : 'var(--text3)', letterSpacing: '-.03em', lineHeight: 1.1 }}>{s.show ? fmtC(s.val, s.cur) : '—'}</div>
-                      {s.sub && <div style={{ fontSize: 11, color: s.color, marginTop: 3, fontWeight: 700, opacity: .85 }}>{s.sub}</div>}
-                    </div>
-                  ));
-                })()}
-              </div>
-
-              {/* Per-item margin table */}
-              {md.rows.some(r => r.srcUnit > 0 && r.quoteUnit > 0) && (
-                <div style={{ marginTop: 10, overflowX: 'auto' }}>
-                  <table className="li-table">
-                    <thead>
-                      <tr><th>Component</th><th>Qty</th><th>Source/Unit</th><th>Quote/Unit</th><th>Gross Margin/Unit</th><th>Gross Margin Total</th><th>vs Target</th></tr>
-                    </thead>
-                    <tbody>
-                      {(enq.items || []).map((item, idx) => {
-                        const m   = md.rows[idx] || {};
-                        const src = srcRows[idx]   || {};
-                        const q   = quoteRows[idx] || {};
-                        if (!m.srcUnit && !m.quoteUnit) return null;
-                        const isIntlRow  = m.srcCurrency && m.srcCurrency !== 'INR' && m.exchangeRate > 1;
-                        const foreignSrc = isIntlRow ? m.srcForeign : 0;
-                        const marginForeign = (isIntlRow && m.exchangeRate > 1) ? (m.grossMarginUnit / m.exchangeRate) : null;
-                        return (
-                          <tr key={item.id}>
-                            <td className="bold" style={{ fontSize: 12 }}>{item.component}</td>
-                            <td>{item.quantity}</td>
-                            <td className="mono" style={{ color: 'var(--accent)', fontSize: 11 }}>{m.srcUnit ? (isIntlRow ? <span>{fmtC(foreignSrc, m.srcCurrency)}<span style={{ color: 'var(--text3)', fontSize: 9, display: 'block' }}>=₹{fmt(m.srcUnit)}</span></span> : fmtC(m.srcUnit, 'INR')) : '—'}</td>
-                            <td className="mono" style={{ color: 'var(--green)', fontSize: 11 }}>{m.quoteUnit ? fmtC(m.quoteUnit, q.quote_currency || 'INR') : '—'}</td>
-                            <td className="mono bold" style={{ fontSize: 11, color: m.grossMarginUnit >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                              {m.grossMarginUnit ? <span>{m.grossMarginUnit >= 0 ? '+' : ''}{fmtC(m.grossMarginUnit, 'INR')}{Number(src.sourced_price) > 0 && Number(src.margin_pct) > 0 && <span style={{ display: 'block', fontSize: 9, fontWeight: 700, opacity: .8 }}>{(Number(src.margin_pct) / Number(src.sourced_price) * 100).toFixed(1)}%</span>}{marginForeign != null && <span style={{ color: 'var(--text3)', fontSize: 9, display: 'block' }}>{marginForeign >= 0 ? '+' : ''}{fmtC(marginForeign, m.srcCurrency)}</span>}</span> : '—'}
-                            </td>
-                            <td className="mono bold" style={{ fontSize: 11, color: m.grossMarginTotal >= 0 ? 'var(--green)' : 'var(--red)' }}>{m.grossMarginTotal ? `${m.grossMarginTotal >= 0 ? '+' : ''}${fmtC(m.grossMarginTotal, 'INR')}` : '—'}</td>
-                            <td>{Number(item.target_price) > 0 ? <span style={{ background: m.aboveTarget ? 'var(--red)' : 'var(--green-lt)', color: m.aboveTarget ? '#fff' : 'var(--green)', padding: '2px 8px', borderRadius: 999, fontSize: 10, fontWeight: 600 }}>{m.aboveTarget ? '⚠ Above' : '✓ Within'} {item.target_currency} {item.target_price}</span> : <span className="muted">—</span>}</td>
-                          </tr>
-                        );
-                      }).filter(Boolean)}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+          {/* 4 summary cards — fixed, never scrolls */}
+          <div style={{ flexShrink: 0, padding: '8px 18px 10px', background: 'var(--surface)' }}>
+            <div className="card-title" style={{ padding: '0 0 8px' }}>📊 Margin Summary</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 10 }}>
+              {(() => {
+                const hasSrc = md.totalSrcValue > 0;
+                return [
+                  { label: 'Total Source Value (₹ INR)', val: md.totalSrcValue,    cur: 'INR', color: 'var(--accent)',                              show: md.totalSrcValue > 0 },
+                  { label: 'Total Quote Value',           val: md.totalQuoteValue,  cur: quoteRows[0]?.quote_currency || 'INR', color: 'var(--green)', show: hasSrc && md.totalQuoteValue > 0 },
+                  { label: 'Gross Margin (Quote − Source)', val: md.totalGrossMargin, cur: 'INR', color: md.totalGrossMargin >= 0 ? 'var(--green)' : 'var(--red)', show: hasSrc && md.totalQuoteValue > 0 },
+                  { label: 'Net Margin (after all charges)', val: md.totalNetMargin, cur: 'INR', color: md.totalNetMargin >= 0 ? 'var(--teal,#0d9488)' : 'var(--red)', sub: hasSrc && md.totalQuoteValue > 0 ? (md.addlCost > 0 ? `Addl. costs: −₹${fmt(md.addlCost)}` : 'No addl. costs') : null, show: hasSrc && md.totalQuoteValue > 0 },
+                ].map(s => (
+                  <div key={s.label} style={{ background: 'var(--surface2)', borderRadius: 'var(--r)', padding: '10px 14px', borderLeft: `3px solid ${s.show ? s.color : 'var(--border)'}`, boxShadow: `0 0 0 1px ${s.show ? s.color + '22' : 'transparent'}` }}>
+                    <div style={{ fontSize: 11, color: 'var(--text2)', marginBottom: 4, fontWeight: 700, letterSpacing: .2 }}>{s.label}</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: s.show ? s.color : 'var(--text3)', letterSpacing: '-.03em', lineHeight: 1.1 }}>{s.show ? fmtC(s.val, s.cur) : '—'}</div>
+                    {s.sub && <div style={{ fontSize: 11, color: s.color, marginTop: 3, fontWeight: 700, opacity: .85 }}>{s.sub}</div>}
+                  </div>
+                ));
+              })()}
             </div>
           </div>
-        </div>{/* end inner margin div */}
+
+          {/* Per-item margin table — scrollable */}
+          {md.rows.some(r => r.srcUnit > 0 && r.quoteUnit > 0) && (
+            <div style={{ flex: 1, overflowY: 'auto', overflowX: 'auto', borderTop: '1px solid var(--border)', minHeight: 0 }}>
+              <table className="li-table">
+                <thead>
+                  <tr><th>Component</th><th>Qty</th><th>Source/Unit</th><th>Quote/Unit</th><th>Gross Margin/Unit</th><th>Gross Margin Total</th><th>vs Target</th></tr>
+                </thead>
+                <tbody>
+                  {(enq.items || []).map((item, idx) => {
+                    const m   = md.rows[idx] || {};
+                    const src = srcRows[idx]   || {};
+                    const q   = quoteRows[idx] || {};
+                    if (!m.srcUnit && !m.quoteUnit) return null;
+                    const isIntlRow  = m.srcCurrency && m.srcCurrency !== 'INR' && m.exchangeRate > 1;
+                    const foreignSrc = isIntlRow ? m.srcForeign : 0;
+                    const marginForeign = (isIntlRow && m.exchangeRate > 1) ? (m.grossMarginUnit / m.exchangeRate) : null;
+                    return (
+                      <tr key={item.id}>
+                        <td className="bold" style={{ fontSize: 12 }}>{item.component}</td>
+                        <td>{item.quantity}</td>
+                        <td className="mono" style={{ color: 'var(--accent)', fontSize: 11 }}>{m.srcUnit ? (isIntlRow ? <span>{fmtC(foreignSrc, m.srcCurrency)}<span style={{ color: 'var(--text3)', fontSize: 9, display: 'block' }}>=₹{fmt(m.srcUnit)}</span></span> : fmtC(m.srcUnit, 'INR')) : '—'}</td>
+                        <td className="mono" style={{ color: 'var(--green)', fontSize: 11 }}>{m.quoteUnit ? fmtC(m.quoteUnit, q.quote_currency || 'INR') : '—'}</td>
+                        <td className="mono bold" style={{ fontSize: 11, color: m.grossMarginUnit >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          {m.grossMarginUnit ? <span>{m.grossMarginUnit >= 0 ? '+' : ''}{fmtC(m.grossMarginUnit, 'INR')}{Number(src.sourced_price) > 0 && Number(src.margin_pct) > 0 && <span style={{ display: 'block', fontSize: 9, fontWeight: 700, opacity: .8 }}>{(Number(src.margin_pct) / Number(src.sourced_price) * 100).toFixed(1)}%</span>}{marginForeign != null && <span style={{ color: 'var(--text3)', fontSize: 9, display: 'block' }}>{marginForeign >= 0 ? '+' : ''}{fmtC(marginForeign, m.srcCurrency)}</span>}</span> : '—'}
+                        </td>
+                        <td className="mono bold" style={{ fontSize: 11, color: m.grossMarginTotal >= 0 ? 'var(--green)' : 'var(--red)' }}>{m.grossMarginTotal ? `${m.grossMarginTotal >= 0 ? '+' : ''}${fmtC(m.grossMarginTotal, 'INR')}` : '—'}</td>
+                        <td>{Number(item.target_price) > 0 ? <span style={{ background: m.aboveTarget ? 'var(--red)' : 'var(--green-lt)', color: m.aboveTarget ? '#fff' : 'var(--green)', padding: '2px 8px', borderRadius: 999, fontSize: 10, fontWeight: 600 }}>{m.aboveTarget ? '⚠ Above' : '✓ Within'} {item.target_currency} {item.target_price}</span> : <span className="muted">—</span>}</td>
+                      </tr>
+                    );
+                  }).filter(Boolean)}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>{/* end bottom-half scroll */}
         </div>{/* end flex column wrapper */}
 
