@@ -309,35 +309,48 @@ export default function EnquiryDetailPage() {
         )}
       </div>
 
-      {/* ── Modify Requested action bar — ENQ opened for editing by Sourcing section ── */}
+      {/* ── Modify Requested action bar ── */}
       {enq.status === 'modify_requested' && (() => {
-        const sentItems = (enq.items || []).filter(item => {
-          const src = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
-          return src?.sent_to_enquiry;
-        });
-        const allSent = sentItems.length === (enq.items || []).length;
-        // For whole-ENQ send: single note on enquiry. For specific items: per-item notes.
-        const wholeNote = allSent ? (enq.send_to_enq_note || null) : null;
-        const itemNotes = !allSent ? sentItems.map(item => {
+        const allItems   = enq.items || [];
+        const totalItems = allItems.length;
+        // Determine source of modify request
+        const fromOrder      = !!(enq.modify_reason);
+        // Whole-ENQ from Sourcing: send_to_enq_note is set on the enquiry itself
+        const fromSourcingAll = !fromOrder && !!(enq.send_to_enq_note);
+        // Specific items from Sourcing: individual sent_to_enquiry flags
+        const sentItems  = fromOrder || fromSourcingAll
+          ? []
+          : allItems.filter(item => enq.sourcing?.find(s => s.enquiry_item_id === item.id && s.sent_to_enquiry));
+
+        const wholeNote  = fromSourcingAll ? enq.send_to_enq_note : null;
+        const itemNotes  = (!fromOrder && !fromSourcingAll) ? sentItems.map(item => {
           const src = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
           return src?.sent_to_enquiry_note ? `${item.component}: ${src.sent_to_enquiry_note}` : null;
         }).filter(Boolean) : [];
+
+        const title    = fromOrder
+          ? `Modify Required — ${totalItems} item${totalItems !== 1 ? 's' : ''}`
+          : fromSourcingAll
+            ? `Full Enquiry Sent Back (${totalItems} item${totalItems !== 1 ? 's' : ''})`
+            : `${sentItems.length} Item${sentItems.length !== 1 ? 's' : ''} Sent Back for Update`;
+        const subtitle = fromOrder
+          ? 'Order section requested changes. Edit the enquiry items and re-submit to Sourcing.'
+          : fromSourcingAll
+            ? 'Sourcing returned the full enquiry. Edit items below, then submit back to Sourcing.'
+            : `Sourcing returned specific item${sentItems.length !== 1 ? 's' : ''} for update (highlighted in amber). Edit and submit back to Sourcing.`;
+
         return (
           <div style={{marginTop:20,padding:'16px 20px',borderRadius:'var(--r)',
             background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)'}}>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
               <div style={{display:'flex',alignItems:'center',gap:10}}>
-                <span style={{fontSize:20}}>🔄</span>
+                <span style={{fontSize:20}}>{fromOrder ? '📋' : '🔄'}</span>
                 <div>
-                  <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>
-                    {allSent ? 'Full Enquiry Sent to Enquiry Section' : `${sentItems.length} Item${sentItems.length>1?'s':''} Sent Back for Update`}
-                  </div>
-                  <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>
-                    {allSent
-                      ? 'Sourcing returned the full enquiry. Edit items below, then submit back to Sourcing.'
-                      : `Sourcing returned specific item${sentItems.length>1?'s':''} for update (highlighted in amber above). Edit and submit back to Sourcing.`}
-                  </div>
-                  {sentItems.length > 0 && <div style={{fontSize:11,marginTop:4,color:'var(--text2)'}}>Items: {sentItems.map(i=>i.component).join(', ')}</div>}
+                  <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>{title}</div>
+                  <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>{subtitle}</div>
+                  {!fromOrder && sentItems.length > 0 && (
+                    <div style={{fontSize:11,marginTop:4,color:'var(--text2)'}}>Items: {sentItems.map(i=>i.component).join(', ')}</div>
+                  )}
                 </div>
               </div>
               <div style={{display:'flex',gap:8}}>
@@ -355,17 +368,24 @@ export default function EnquiryDetailPage() {
                 </button>
               </div>
             </div>
-            {/* Whole-ENQ: single note */}
+            {/* Reason from Order section */}
+            {enq.modify_reason && (
+              <div style={{marginTop:10,padding:'8px 12px',background:'#fff7ed',borderRadius:'var(--r-sm)',border:'1px solid #fb923c',fontSize:12}}>
+                <div style={{fontWeight:700,color:'#9a3412',marginBottom:3}}>📋 Reason from Order Section:</div>
+                <div style={{color:'#9a3412',fontStyle:'italic'}}>"{enq.modify_reason}"</div>
+              </div>
+            )}
+            {/* Reason from Sourcing — whole ENQ */}
             {wholeNote && (
               <div style={{marginTop:10,padding:'8px 12px',background:'#fff',borderRadius:'var(--r-sm)',border:'1px solid #fcd34d',fontSize:12}}>
-                <div style={{fontWeight:700,color:'#92400e',marginBottom:4}}>📝 Reason from Sourcing:</div>
+                <div style={{fontWeight:700,color:'#92400e',marginBottom:3}}>📝 Reason from Sourcing:</div>
                 <div style={{color:'#92400e',fontStyle:'italic'}}>"{wholeNote}"</div>
               </div>
             )}
-            {/* Specific items: per-item notes */}
+            {/* Reason from Sourcing — per-item */}
             {itemNotes.length > 0 && (
               <div style={{marginTop:10,padding:'8px 12px',background:'#fff',borderRadius:'var(--r-sm)',border:'1px solid #fcd34d',fontSize:12}}>
-                <div style={{fontWeight:700,color:'#92400e',marginBottom:4}}>📝 Reason from Sourcing:</div>
+                <div style={{fontWeight:700,color:'#92400e',marginBottom:3}}>📝 Reason from Sourcing:</div>
                 {itemNotes.map((n,i) => <div key={i} style={{color:'#92400e',fontStyle:'italic'}}>{n}</div>)}
               </div>
             )}

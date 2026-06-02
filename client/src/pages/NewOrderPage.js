@@ -420,20 +420,24 @@ export default function NewOrderPage() {
   const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
 
   const [showModifyConfirm, setShowModifyConfirm] = useState(false);
-  const [modifyBusy, setModifyBusy] = useState(false);
+  const [showModifyModal, setShowModifyModal]   = useState(false);
+  const [modifyReason, setModifyReason]         = useState('');
+  const [modifyBusy, setModifyBusy]             = useState(false);
 
   const handleModifyRequest = async () => {
     if (!form.enquiry_id) { toast.error('No linked enquiry'); return; }
     setModifyBusy(true);
     try {
-      await api.post('/enquiries/' + form.enquiry_id + '/modify-request');
+      await api.post('/enquiries/' + form.enquiry_id + '/modify-request', { reason: modifyReason.trim() });
       toast.success('✅ Modify request sent — Enquiry section can now edit this enquiry');
+      setShowModifyModal(false);
+      setShowModifyConfirm(false);
+      setModifyReason('');
       navigate('/orders');
     } catch(e) {
       toast.error(e.response?.data?.error || 'Failed');
     } finally {
       setModifyBusy(false);
-      setShowModifyConfirm(false);
     }
   };
 
@@ -692,6 +696,7 @@ export default function NewOrderPage() {
   const busy = mutation.isPending;
 
   return (
+    <>
     <div style={{ maxWidth: 1500 }}>
       <div className="card">
         <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:4 }}>
@@ -843,9 +848,8 @@ export default function NewOrderPage() {
               </span>
               <button className="btn btn-xs"
                 style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
-                disabled={modifyBusy}
-                onClick={handleModifyRequest}>
-                {modifyBusy ? '…' : 'Yes, Send'}
+                onClick={() => { setModifyReason(''); setShowModifyModal(true); }}>
+                Yes, Send
               </button>
               <button className="btn btn-xs" onClick={() => setShowModifyConfirm(false)}>Cancel</button>
             </div>
@@ -951,5 +955,42 @@ export default function NewOrderPage() {
       </div>
 
     </div>
+
+    {/* ── Modify Request Reason Modal ── */}
+    {showModifyModal && (
+      <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.45)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center'}}>
+        <div style={{background:'#fff',borderRadius:'var(--r)',padding:'28px 28px 20px',width:460,maxWidth:'90vw',boxShadow:'0 8px 32px rgba(0,0,0,0.18)'}}>
+          <div style={{fontWeight:700,fontSize:15,marginBottom:6,color:'var(--amber,#d97706)'}}>📝 Send Modify Request</div>
+          <div style={{fontSize:13,color:'var(--text2)',marginBottom:16}}>
+            The enquiry will be opened for editing and sent back to the enquiry section. Optionally add a reason so they know what to change.
+          </div>
+          <label style={{fontSize:12,fontWeight:600,color:'var(--text2)',display:'block',marginBottom:6}}>
+            Reason / Note <span style={{fontWeight:400,color:'var(--text3)'}}>(optional)</span>
+          </label>
+          <textarea
+            autoFocus
+            className="input"
+            rows={3}
+            placeholder="e.g. Please update qty for component X, target price changed…"
+            value={modifyReason}
+            onChange={e => setModifyReason(e.target.value)}
+            style={{width:'100%',resize:'vertical',marginBottom:20}}
+          />
+          <div style={{display:'flex',justifyContent:'flex-end',gap:10}}>
+            <button className="btn" onClick={() => { setShowModifyModal(false); setModifyReason(''); }} disabled={modifyBusy}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',color:'#fff',fontWeight:700}}
+              disabled={modifyBusy}
+              onClick={handleModifyRequest}>
+              {modifyBusy ? 'Sending…' : '✅ Confirm & Send'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

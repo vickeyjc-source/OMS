@@ -619,16 +619,31 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   const updSrc   = (idx, k, v) => setSrcRows(p  => p.map((r, i) => i === idx ? { ...r, [k]: v } : r));
   const updQuote = (idx, k, v) => setQuoteRows(p => p.map((r, i) => i === idx ? { ...r, [k]: v } : r));
 
-  const pendingRevision = enq.status === 'returned_to_sourcing'
-    ? ((quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'active' && (q.revision || 1) > 1) || null)
+  // pendingRevision: active revision quote waiting for re-pricing
+  // Covers returned_to_sourcing (normal revision) AND sourcing (Flow B: order-section modify → ENQ → Sourcing)
+  const pendingRevision = (enq.status === 'returned_to_sourcing' || enq.status === 'sourcing')
+    ? ((quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'returned_to_sourcing') ||
+       (enq.status === 'returned_to_sourcing'
+         ? ((quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'active' && (q.revision || 1) > 1) || null)
+         : null))
     : null;
   const isRevision = !!pendingRevision;
   const isQuoted   = enq.status === 'quoted' && !pendingRevision;
-  // isWholeEnquirySent: all items have sent_to_enquiry flag AND status is still modify_requested
-  // Used only for footer banner — not for isReadOnly (rowLocked handles per-item locking)
-  const isWholeEnquirySent = enq.status === 'modify_requested' && srcRows.length > 0 && srcRows.every(r => Boolean(r.sent_to_enquiry));
-  // isReadOnly: only for completed/quoted states — NOT for modify_requested (rowLocked handles that per-item)
-  const isReadOnly = forceReadOnly || isQuoted || ['ordered', 'order_created'].includes(enq.status);
+  // Whole ENQ sent: every enquiry item is flagged (via srcRows), or no sourcing rows but send_to_enq_note set
+  const totalEnqItems = (enq.items || []).length;
+  const sentCount = srcRows.filter(r => Boolean(r.sent_to_enquiry)).length;
+  const isWholeEnquirySent = enq.status === 'modify_requested' && totalEnqItems > 0 && (
+    sentCount === totalEnqItems ||
+    (srcRows.length === 0 && !!(enq.send_to_enq_note))
+  );
+  // isReadOnly: completed/quoted states, OR modify_requested where the whole ENQ is locked
+  // (whole-ENQ send: isWholeEnquirySent, or Order/Quote section modify: modify_reason set, or no sourcing rows yet)
+  // Specific-item send: isReadOnly stays false — rowLocked handles per-item locking
+  const isModifyWholeEnqLocked = enq.status === 'modify_requested' && (
+    !!(enq.modify_reason) || isWholeEnquirySent || (enq.send_to_enq_note && srcRows.every(r => !r.sent_to_enquiry))
+  );
+  const isReadOnly = forceReadOnly || isQuoted || ['ordered', 'order_created'].includes(enq.status)
+    || isModifyWholeEnqLocked;
   // Once this enquiry has gone to quote at least once, never show "Send to ENQ" again
   const hasEverBeenQuoted = (quotes || []).some(q => q.enquiry_id === enq.id);
 
@@ -751,21 +766,34 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     setSendModal(null);
     setSendInProgress(true);
     try {
-      // Update local state to show locks immediately
-      const updatedRows = itemIdx === null
-        ? srcRows.map(r => ({ ...r, sent_to_enquiry: 1, sent_to_enquiry_note: null }))
-        : srcRows.map((r, idx) => idx === itemIdx ? { ...r, sent_to_enquiry: 1, sent_to_enquiry_note: note } : r);
-      setSrcRows(updatedRows);
+      // Additive: never clear already-sent items. Only add newly selected item(s).
+      // Flags only reset when ENQ re-submits to Sourcing (handled server-side).
+      const allItems = enq.items || [];
 
-      // Only send the sent_to_enquiry flag — NOT the sourcing data (prices, supplier etc)
-      // Unsaved field edits are discarded; only "Save as Draft" persists sourcing data
-      const flagRowsOnly = itemIdx === null
-        ? (enq.sourcing || []).map(s => ({ _flagOnly: true, id: s.id, enquiry_item_id: s.enquiry_item_id, sent_to_enquiry: 1, sent_to_enquiry_note: null }))
-        : (() => {
-            const srcItem = enq.items[itemIdx];
-            const existing = (enq.sourcing || []).find(s => s.enquiry_item_id === srcItem.id);
-            return [{ _flagOnly: true, id: existing?.id || null, enquiry_item_id: srcItem.id, sent_to_enquiry: 1, sent_to_enquiry_note: note }];
-          })();
+      const flagRowsOnly = allItems.map(it => {
+        const existing = (enq.sourcing || []).find(s => s.enquiry_item_id === it.id);
+        const alreadySent = Boolean(existing?.sent_to_enquiry);
+        const isTarget = itemIdx === null || enq.items[itemIdx]?.id === it.id;
+        // Keep already-sent items locked; only update the target item(s)
+        if (!isTarget && alreadySent) {
+          return { _flagOnly: true, id: existing.id, enquiry_item_id: it.id, sent_to_enquiry: 1, sent_to_enquiry_note: existing.sent_to_enquiry_note || null };
+        }
+        if (!isTarget) return null; // not sent before, not a target — skip (no-op)
+        return {
+          _flagOnly: true,
+          id: existing?.id || null,
+          enquiry_item_id: it.id,
+          sent_to_enquiry: 1,
+          sent_to_enquiry_note: itemIdx !== null ? note : null,
+        };
+      }).filter(Boolean);
+
+      // Update local state immediately
+      setSrcRows(prev => prev.map(r => {
+        const flag = flagRowsOnly.find(f => f.enquiry_item_id === r.enquiry_item_id);
+        if (!flag) return r;
+        return { ...r, sent_to_enquiry: flag.sent_to_enquiry, sent_to_enquiry_note: flag.sent_to_enquiry_note };
+      }));
 
       const actionText = itemIdx === null
         ? `Sent full enquiry back to Enquiry: ${note}`
@@ -775,10 +803,11 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         sourcing: flagRowsOnly,
         status: 'modify_requested',
         assigned_to: assignTo || null,
+        // Only update send_to_enq_note for whole-ENQ sends; leave it untouched for specific items
         ...(itemIdx === null ? { send_to_enq_note: note } : {}),
         _action: actionText,
       });
-      toast.success(itemIdx === null ? '✅ Enquiry sent back to Enquiry section.' : `✅ "${item.component}" sent back to Enquiry section.`);
+      toast.success(itemIdx === null ? '✅ Full enquiry sent to Enquiry section.' : `✅ "${item.component}" sent to Enquiry section.`);
       onSaved();
     } catch (e) {
       toast.error(e.response?.data?.error || 'Send to Enquiry failed');
@@ -826,16 +855,32 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
         <div className="modal-body" style={{ flex: 1, overflowY: 'auto', minHeight: 0, padding: '14px 20px' }} onClick={() => setNotePopover(null)}>
 
-          {/* Whole-ENQ sent-to-ENQ banner — single note for whole enquiry */}
-          {isWholeEnquirySent && enq.send_to_enq_note && (
-            <div style={{ marginBottom: 14, padding: '12px 16px', borderRadius: 'var(--r)', border: '2px solid #d97706', background: '#fffbeb', display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-              <span style={{ fontSize: 18, flexShrink: 0 }}>📨</span>
+          {/* modify_requested banner — locked message for whole-ENQ or order-section; info for specific-item */}
+          {enq.status === 'modify_requested' && (
+            <div style={{ marginBottom: 14, padding: '12px 16px', borderRadius: 'var(--r)',
+              border: `2px solid ${isModifyWholeEnqLocked ? '#f97316' : '#d97706'}`,
+              background: isModifyWholeEnqLocked ? '#fff7ed' : '#fffbeb',
+              display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+              <span style={{ fontSize: 18, flexShrink: 0 }}>{isModifyWholeEnqLocked ? '🔒' : '📨'}</span>
               <div>
-                <div style={{ fontWeight: 700, fontSize: 13, color: '#d97706', marginBottom: 4 }}>Full Enquiry sent to Enquiry section</div>
-                <div style={{ fontSize: 12, color: '#92400e', fontStyle: 'italic' }}>Reason: "{enq.send_to_enq_note}"</div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: isModifyWholeEnqLocked ? '#c2410c' : '#d97706', marginBottom: 3 }}>
+                  {enq.modify_reason
+                    ? 'Sourcing locked — Modify requested by Order/Quote section'
+                    : isModifyWholeEnqLocked
+                      ? 'Sourcing locked — Full enquiry sent back to ENQ section'
+                      : 'Specific items sent to ENQ section — other items still editable'}
+                </div>
+                <div style={{ fontSize: 12, color: isModifyWholeEnqLocked ? '#9a3412' : '#92400e' }}>
+                  {isModifyWholeEnqLocked
+                    ? 'Enquiry section is updating. Sourcing will unlock once they re-submit.'
+                    : 'Locked rows (highlighted) are awaiting ENQ update. You can still edit and save the remaining items.'}
+                </div>
+                {enq.modify_reason && <div style={{ fontSize: 12, color: '#9a3412', fontStyle: 'italic', marginTop: 4 }}>📋 Reason: "{enq.modify_reason}"</div>}
+                {!enq.modify_reason && enq.send_to_enq_note && <div style={{ fontSize: 12, color: '#9a3412', fontStyle: 'italic', marginTop: 4 }}>📝 Note sent: "{enq.send_to_enq_note}"</div>}
               </div>
             </div>
           )}
+
 
           {/* Revision banners */}
           {isRevision && pendingRevision.sales_revision_notes && (
@@ -1294,9 +1339,15 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         <div className="modal-footer" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 24px' }}>
           <button className="btn" style={{ padding:'10px 24px', fontSize:14 }} onClick={onClose}>Close</button>
           {isReadOnly ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'var(--green-lt,#f0fdf4)', border: '1px solid var(--green,#16a34a)', borderRadius: 'var(--r)', fontSize: 14, color: 'var(--green,#16a34a)', fontWeight: 600 }}>
-              <span style={{ fontSize: 18 }}>✅</span>Sourcing completed — view only
-            </div>
+            isModifyWholeEnqLocked ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: '#fff7ed', border: '1.5px solid #f97316', borderRadius: 'var(--r)', fontSize: 14, color: '#c2410c', fontWeight: 600 }}>
+                <span style={{ fontSize: 18 }}>🔒</span>Locked — waiting for Enquiry section to update
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: 'var(--green-lt,#f0fdf4)', border: '1px solid var(--green,#16a34a)', borderRadius: 'var(--r)', fontSize: 14, color: 'var(--green,#16a34a)', fontWeight: 600 }}>
+                <span style={{ fontSize: 18 }}>✅</span>Sourcing completed — view only
+              </div>
+            )
           ) : isWholeEnquirySent ? (
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 20px', background: '#fffbeb', border: '1.5px solid #d97706', borderRadius: 'var(--r)', fontSize: 14, color: '#92400e', fontWeight: 600 }}>
               📨 All items sent to Enquiry — waiting for ENQ update

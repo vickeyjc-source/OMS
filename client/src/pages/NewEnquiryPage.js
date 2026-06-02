@@ -329,7 +329,13 @@ export default function NewEnquiryPage() {
         .map(s => s.enquiry_item_id)
     );
   }, [editEnq]);
-  const isModifyRequest = editEnq?.status === 'modify_requested' && sentBackItemIds.size > 0;
+  // Three cases when status is modify_requested:
+  // 1. From Order section: modify_reason set, all items editable
+  // 2. From Sourcing whole-ENQ: send_to_enq_note set, no sent_to_enquiry rows, all items editable
+  // 3. From Sourcing specific items: sentBackItemIds populated, only those items editable
+  const isModifyRequestFromOrder      = editEnq?.status === 'modify_requested' && !!(editEnq?.modify_reason);
+  const isModifyRequestFromSourcingAll= editEnq?.status === 'modify_requested' && !!(editEnq?.send_to_enq_note) && sentBackItemIds.size === 0 && !isModifyRequestFromOrder;
+  const isModifyRequest = editEnq?.status === 'modify_requested';
 
   const [items, setItems] = useState(() => {
     if (editEnq?.items?.length) {
@@ -428,24 +434,24 @@ export default function NewEnquiryPage() {
 
   const cols = [
     { key:'component', label:'Component *', flex:'2 1 130px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" value={li.component} placeholder="e.g. STM32F103C8T6" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'component',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" value={li.component} placeholder="e.g. STM32F103C8T6" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'component',e.target.value)} />; } },
     { key:'ipn', label:'IPN', flex:'1 1 80px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" value={li.ipn} placeholder="IPN-001" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'ipn',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" value={li.ipn} placeholder="IPN-001" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'ipn',e.target.value)} />; } },
     { key:'manufacturer', label:'Manufacturer *', flex:'1.5 1 130px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return locked
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return locked
         ? <input className="input" value={li.manufacturer} disabled style={{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}} readOnly />
         : <ManufacturerField value={li.manufacturer} linecards={linecards} onChange={v=>updateItem(idx,'manufacturer',v)} onAddNew={name=>setAddLcModal({open:true,prefill:name,itemIdx:idx})}/>; },
     },
     { key:'quantity', label:'Qty *', flex:'0.6 1 55px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" type="number" value={li.quantity} placeholder="0" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'quantity',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" type="number" value={li.quantity} placeholder="0" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'quantity',e.target.value)} />; } },
     { key:'target_currency', label:'Cur.', flex:'0.6 1 58px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <select className="input" value={li.target_currency} disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'target_currency',e.target.value)}>{['INR','USD','EUR','SGD'].map(c=><option key={c}>{c}</option>)}</select>; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <select className="input" value={li.target_currency} disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'target_currency',e.target.value)}>{['INR','USD','EUR','SGD'].map(c=><option key={c}>{c}</option>)}</select>; } },
     { key:'target_price', label:'Target Price', flex:'1 1 80px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" type="number" step="0.01" value={li.target_price} placeholder="0.00" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'target_price',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" type="number" step="0.01" value={li.target_price} placeholder="0.00" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'target_price',e.target.value)} />; } },
     { key:'date_code', label:'Date Code', flex:'0.8 1 70px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" value={li.date_code} placeholder="2023+" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'date_code',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" value={li.date_code} placeholder="2023+" disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'date_code',e.target.value)} />; } },
     { key:'preferred_delivery_date', label:'Delivery Date *', flex:'1.1 1 110px',
-      render:(li,idx)=>{ const locked = isModifyRequest && !sentBackItemIds.has(li.id); return <input className="input" type="date" value={li.preferred_delivery_date} disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'preferred_delivery_date',e.target.value)} />; } },
+      render:(li,idx)=>{ const locked = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id); return <input className="input" type="date" value={li.preferred_delivery_date} disabled={locked} style={locked?{opacity:.6,background:'var(--surface2)',cursor:'not-allowed'}:{}} onChange={e=>updateItem(idx,'preferred_delivery_date',e.target.value)} />; } },
 
     { key:'base_value', label:'Base Value', flex:'1 1 88px',
       render:(li)=>{
@@ -484,9 +490,10 @@ export default function NewEnquiryPage() {
     },
   ];
 
+  const allItemsEditable = isModifyRequestFromOrder || isModifyRequestFromSourcingAll;
   const rowStyle = (idx, itemId) => {
-    const isSentBack = isModifyRequest && sentBackItemIds.has(itemId);
-    const isLocked   = isModifyRequest && !sentBackItemIds.has(itemId);
+    const isSentBack = isModifyRequest && (allItemsEditable || sentBackItemIds.has(itemId));
+    const isLocked   = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(itemId);
     return {
       display:'flex', gap:5, alignItems:'center', padding:'4px 6px',
       borderRadius:'var(--r-sm)', marginBottom:2,
@@ -508,38 +515,54 @@ export default function NewEnquiryPage() {
             : 'New Customer Enquiry'}
         </div>
 
-        {/* ── Modify-Request banner — items sent back by sourcing ── */}
+        {/* ── Modify-Request banner ── */}
         {isModifyRequest && (() => {
-          const allSent = sentBackItemIds.size === (editEnq?.items?.length || 0);
-          const wholeNote = allSent ? (editEnq?.send_to_enq_note || null) : null;
-          const itemNotes = !allSent
+          const totalItems = editEnq?.items?.length || 0;
+          const fromSourcingAll = isModifyRequestFromSourcingAll;
+          const fromOrder       = isModifyRequestFromOrder;
+          const itemNotes = (!fromOrder && !fromSourcingAll)
             ? (editEnq?.sourcing || []).filter(s => s.sent_to_enquiry && s.sent_to_enquiry_note).map(s => {
                 const itm = editEnq.items?.find(i => i.id === s.enquiry_item_id);
                 return itm ? { component: itm.component, note: s.sent_to_enquiry_note } : null;
               }).filter(Boolean)
             : [];
+          const title = fromOrder
+            ? `Modify Required — ${totalItems} item${totalItems !== 1 ? 's' : ''}`
+            : fromSourcingAll
+              ? `Sourcing sent back the full enquiry for update (${totalItems} item${totalItems !== 1 ? 's' : ''})`
+              : `Sourcing sent back ${sentBackItemIds.size} item${sentBackItemIds.size > 1 ? 's' : ''} for update`;
           return (
             <div style={{padding:'12px 16px',borderRadius:'var(--r-sm)',marginBottom:14,
               background:'#fffbeb',border:'2px solid #d97706',fontSize:13}}>
               <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
-                <span style={{fontSize:18}}>🔄</span>
-                <div style={{fontWeight:700,color:'#d97706'}}>
-                  {allSent ? 'Sourcing sent back the full enquiry for update' : `Sourcing sent back ${sentBackItemIds.size} item${sentBackItemIds.size>1?'s':''} for update`}
-                </div>
+                <span style={{fontSize:18}}>{fromOrder ? '📋' : '🔄'}</span>
+                <div style={{fontWeight:700,color:'#d97706'}}>{title}</div>
               </div>
-              {!allSent && (
+              {(fromOrder || fromSourcingAll) && (
+                <div style={{color:'var(--text2)',fontSize:12,marginBottom:6}}>
+                  {fromOrder ? 'Order section requested changes.' : 'Sourcing returned the full enquiry.'} All items are editable — update and re-submit to Sourcing.
+                </div>
+              )}
+              {!fromOrder && !fromSourcingAll && (
                 <div style={{color:'var(--text2)',fontSize:12,marginBottom:6}}>
                   Only highlighted items (in amber) can be edited. Other items are locked.
                 </div>
               )}
-              {/* Whole-ENQ: single note */}
-              {wholeNote && (
-                <div style={{fontSize:12,color:'#92400e',fontStyle:'italic',marginTop:4,
-                  padding:'6px 10px',background:'#fff',borderRadius:6,border:'1px solid #fcd34d'}}>
-                  📝 Reason: "{wholeNote}"
+              {/* Reason from Order section */}
+              {fromOrder && editEnq?.modify_reason && (
+                <div style={{fontSize:12,color:'#9a3412',marginTop:4,
+                  padding:'6px 10px',background:'#fff7ed',borderRadius:6,border:'1px solid #fb923c'}}>
+                  📋 Reason from Order Section: <em>"{editEnq.modify_reason}"</em>
                 </div>
               )}
-              {/* Specific items: per-item notes */}
+              {/* Whole-ENQ note from Sourcing */}
+              {fromSourcingAll && editEnq?.send_to_enq_note && (
+                <div style={{fontSize:12,color:'#92400e',fontStyle:'italic',marginTop:4,
+                  padding:'6px 10px',background:'#fff',borderRadius:6,border:'1px solid #fcd34d'}}>
+                  📝 Note from Sourcing: "{editEnq.send_to_enq_note}"
+                </div>
+              )}
+              {/* Per-item notes from Sourcing */}
               {itemNotes.map((n,i) => (
                 <div key={i} style={{fontSize:12,color:'#92400e',fontStyle:'italic',marginTop:2}}>
                   📝 <strong>{n.component}</strong>: {n.note}
@@ -628,8 +651,8 @@ export default function NewEnquiryPage() {
 
         {/* Rows */}
         {items.map((li,idx)=>{
-          const isSentBack = isModifyRequest && sentBackItemIds.has(li.id);
-          const isLocked   = isModifyRequest && !sentBackItemIds.has(li.id);
+          const isSentBack = isModifyRequest && (allItemsEditable || sentBackItemIds.has(li.id));
+          const isLocked   = isModifyRequest && !allItemsEditable && !sentBackItemIds.has(li.id);
           return (
             <div key={li.id} style={rowStyle(idx, li.id)}>
               <div style={{flex:'0 0 22px',fontSize:11,fontWeight:600,color: isSentBack?'#d97706':'var(--text3)',textAlign:'center',userSelect:'none'}}>

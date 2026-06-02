@@ -40,9 +40,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     setDetailsSavedOnce(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
   }, [quote.id, quote.zoho_quote_no, quote.valid_until, quote.sent_to_customer, quote.customer_response, quote.customer_response_notes]);
 
-  // Linked enquiry — tells us if source is still re-pricing (returned_to_sourcing)
+  // Linked enquiry — tells us if source is still re-pricing or awaiting modify
   const linkedEnq = (enquiries||[]).find(e => e.id === quote.enquiry_id) || null;
   const enquiryAwaitingRevision = linkedEnq?.status === 'returned_to_sourcing';
+  const enquiryModifyRequested  = linkedEnq?.status === 'modify_requested';
 
   // Parent quote — for showing previous customer response context in V2+
   const { data: allQuotes=[] } = useQuery({
@@ -81,7 +82,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
       qc.invalidateQueries(['quotes']);
       toast.success('Sent to revision — Sourcing will re-price');
       onRefresh();
-      onClose();
+      // Stay on quotes page — do NOT close
     },
     onError: e => toast.error(e.response?.data?.error || 'Revision failed'),
   });
@@ -107,16 +108,15 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
         tax_rate:         Number(li.tax_rate) || 0,
       }));
 
+      let prefill;
       if (quote.existing_order_id) {
-        // Revision flow — update the existing order's line items and quote reference
         const existingOrder = await api.get('/orders/' + quote.existing_order_id).then(r => r.data).catch(() => null);
-        navigate('/orders/new', { state: { prefill: {
-          customer_id:      quote.customer_id,
-          enquiry_id:       quote.enquiry_id || '',
-          enquiry_no:       quote.enquiry_id || '',
-          quote_id:         quote.id,
-          quote_no:         quote.quote_no,
-          // Pre-fill existing order fields
+        prefill = {
+          customer_id:       quote.customer_id,
+          enquiry_id:        quote.enquiry_id || '',
+          enquiry_no:        quote.enquiry_id || '',
+          quote_id:          quote.id,
+          quote_no:          quote.quote_no,
           existing_order_id: quote.existing_order_id,
           po_number:         existingOrder?.po_number || '',
           delivery_address:  existingOrder?.delivery_address || '',
@@ -124,23 +124,24 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           notes:             existingOrder?.notes || '',
           customer_ref:      existingOrder?.customer_ref || '',
           lineItems,
-        }}});
+        };
       } else {
-        navigate('/orders/new', { state: { prefill: {
+        prefill = {
           customer_id:  quote.customer_id,
           enquiry_id:   quote.enquiry_id || '',
           enquiry_no:   quote.enquiry_id || '',
           quote_id:     quote.id,
           quote_no:     quote.quote_no,
           lineItems,
-        }}});
+        };
       }
+      navigate('/orders/new', { state: { prefill } });
     },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
-  // Cannot create order if sourcing is still re-pricing (ENQ in returned_to_sourcing)
-  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active' && !enquiryAwaitingRevision;
+  // Cannot create order if ENQ is still being re-priced or has a pending modify request
+  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active' && !enquiryAwaitingRevision && !enquiryModifyRequested;
 
   const items = lineData?.items || [];
 
@@ -215,6 +216,34 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
         </div>
 
         <div className="modal-body">
+
+          {/* Re-pricing banner — shown when sourcing is updating prices */}
+          {quote.status === 'returned_to_sourcing' && (
+            <div style={{marginBottom:16,padding:'12px 16px',borderRadius:'var(--r-sm)',
+              background:'#fffbeb',border:'2px solid #d97706',display:'flex',alignItems:'center',gap:10}}>
+              <span style={{fontSize:18,flexShrink:0}}>🔄</span>
+              <div>
+                <div style={{fontWeight:700,fontSize:13,color:'#d97706'}}>Re-pricing in progress — Sourcing is updating prices</div>
+                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>
+                  This quote is locked. Once Sourcing returns it, you can review and create the order.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Sent-to-ENQ banner — shown when sourcing sent items back to enquiry section */}
+          {enquiryModifyRequested && quote.status === 'active' && (
+            <div style={{marginBottom:16,padding:'12px 16px',borderRadius:'var(--r-sm)',
+              background:'#fffbeb',border:'2px solid #d97706',display:'flex',alignItems:'center',gap:10}}>
+              <span style={{fontSize:18,flexShrink:0}}>📨</span>
+              <div>
+                <div style={{fontWeight:700,fontSize:13,color:'#d97706'}}>Sent to Enquiry — awaiting update from ENQ section</div>
+                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>
+                  Sourcing has sent items back to the Enquiry section for update. Create Order is disabled until ENQ re-submits to Sourcing.
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Tab 0: Line Items */}
           {tabIdx === 0 && (
@@ -551,6 +580,15 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 {(saveMutation.isPending || createOrderMutation.isPending) ? 'Processing…' : '➕ Create Order from Quote'}
               </button>
             )}
+            {tabIdx === 2 && savedResponse === 'accepted' && enquiryModifyRequested && (
+              <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
+                borderRadius:'var(--r-sm)',background:'#fffbeb',border:'1px solid #d97706',fontSize:12}}>
+                <span style={{fontSize:15}}>⚠️</span>
+                <span style={{color:'#92400e',fontWeight:600}}>
+                  Modify requested — Enquiry section is updating items. Create Order will be available after they re-submit to Sourcing.
+                </span>
+              </div>
+            )}
 
             {/* Spacer */}
             <span style={{flex:1}}/>
@@ -774,6 +812,9 @@ export default function QuotesPage() {
               <tbody>
                 {filtered.map(q => {
                   const isUnseen = q.status === 'active' && !seenQuotes.has(q.id);
+                  const rowLinkedEnq = enquiries.find(e => e.id === q.enquiry_id) || null;
+                  const rowEnqInEnq  = rowLinkedEnq?.status === 'modify_requested';
+                  const rowEnqInSrc  = rowLinkedEnq?.status === 'sourcing';
                   return (
                   <tr key={q.id} style={{cursor:'pointer',background:isUnseen?'var(--accent-lt)':undefined}} onClick={() => { setSelected(q); markSeen(q.id); }}>
                     <td className="mono bold" style={{color:'var(--accent)'}}>
@@ -783,18 +824,28 @@ export default function QuotesPage() {
                     <td className="mono" style={{fontSize:11,color:'var(--text3)'}}>{q.enquiry_id||'—'}</td>
                     <td><StatusBadge s={q.status}/></td>
                     <td>
-                      {q.customer_response
+                      {rowEnqInEnq && q.status === 'active'
                         ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
-                            background:q.customer_response==='accepted'?'var(--green-lt)':q.customer_response==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
-                            color:q.customer_response==='accepted'?'var(--green)':q.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
-                            {q.customer_response}
+                            background:'#fffbeb',color:'#d97706',border:'1px solid #d97706'}}>
+                            📨 In ENQ
                           </span>
-                        : q.sent_to_customer
+                        : rowEnqInSrc && q.status === 'active'
                           ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
                               background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)'}}>
-                              ⏳ Awaiting confirmation
+                              🔍 In Sourcing
                             </span>
-                          : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
+                          : q.customer_response
+                            ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
+                                background:q.customer_response==='accepted'?'var(--green-lt)':q.customer_response==='rejected'?'var(--red-lt,#fef2f2)':'var(--amber-lt,#fffbeb)',
+                                color:q.customer_response==='accepted'?'var(--green)':q.customer_response==='rejected'?'var(--red)':'var(--amber,#d97706)'}}>
+                                {q.customer_response}
+                              </span>
+                            : q.sent_to_customer
+                              ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
+                                  background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)'}}>
+                                  ⏳ Awaiting confirmation
+                                </span>
+                              : <span style={{color:'var(--text3)',fontSize:11}}>—</span>}
                     </td>
                     <td style={{textAlign:'center'}}>
                       {q.revision||1}

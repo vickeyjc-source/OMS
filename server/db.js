@@ -548,6 +548,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN charges TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiries ADD COLUMN modify_reason TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN tax_rate NUMERIC DEFAULT NULL"); } catch(_) {}
   // ── Migrate quotes — add approval tracking + revision columns ───────────────
   try { await pool.query("ALTER TABLE quotes ADD COLUMN parent_quote_id TEXT DEFAULT NULL"); } catch(_) {}

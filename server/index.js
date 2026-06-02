@@ -1034,11 +1034,13 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
     if (liveOrder) resolvedStatus = 'ordered';
   }
   const newSendToEnqNote = d.send_to_enq_note !== undefined ? (d.send_to_enq_note || null) : (e.send_to_enq_note || null);
-  // Clear whole-ENQ note when submitted back to sourcing
-  const resolvedSendToEnqNote = resolvedStatus === 'sourcing' ? null : newSendToEnqNote;
-  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,send_to_enq_note=?,updated_at=? WHERE id=?',
+  // Clear notes and modify_reason when submitted back to sourcing
+  const clearOnSourcing  = resolvedStatus === 'sourcing' || resolvedStatus === 'returned_to_sourcing';
+  const resolvedSendToEnqNote = clearOnSourcing ? null : newSendToEnqNote;
+  const resolvedModifyReason  = clearOnSourcing ? null : (e.modify_reason || null);
+  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,send_to_enq_note=?,modify_reason=?,updated_at=? WHERE id=?',
     [resolvedStatus, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
-     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, resolvedSendToEnqNote, now, req.params.id]);
+     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, resolvedSendToEnqNote, resolvedModifyReason, now, req.params.id]);
   if (d.items !== undefined) {
     await runAsync('DELETE FROM enquiry_items WHERE enquiry_id=?', [req.params.id]);
     for (let idx = 0; idx < d.items.length; idx++) {
@@ -1062,13 +1064,21 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
       }
     }
   }
-  // When enquiry moves to 'sourcing' from any sent-back state, clear all
-  // sent_to_enquiry flags so sourcing can edit all items freely again
-  if (resolvedStatus === 'sourcing') {
+  // When enquiry moves to 'sourcing' or 'returned_to_sourcing', clear sent_to_enquiry flags
+  // and mark any active quote as returned_to_sourcing (handles modify_reason flow without items change)
+  if (clearOnSourcing) {
     await runAsync(
       "UPDATE enquiry_sourcing SET sent_to_enquiry=0, sent_to_enquiry_note=NULL WHERE enquiry_id=?",
       [req.params.id]
     );
+    const activeQs = await allAsync("SELECT id, quote_no FROM quotes WHERE enquiry_id=? AND status='active'", [req.params.id]);
+    for (const q of activeQs) {
+      await runAsync("UPDATE quotes SET status='returned_to_sourcing' WHERE id=?", [q.id]);
+      try {
+        await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+          [uuid(), req.params.id, 'Quote ' + q.quote_no + ' returned to sourcing — ENQ re-submitted after modify', req.session.user.name, now]);
+      } catch(_) {}
+    }
   }
   if (d.sourcing !== undefined) {
     for (const s of d.sourcing) {
@@ -1080,13 +1090,13 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
               'UPDATE enquiry_sourcing SET sent_to_enquiry=?, sent_to_enquiry_note=?, updated_at=? WHERE id=?',
               [s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null, now, s.id]
             );
-          } else if (s.enquiry_item_id) {
-            // No existing row yet — insert minimal row with flag
+          } else if (s.enquiry_item_id && s.sent_to_enquiry) {
+            // No existing row yet — only insert if actually flagging (skip no-op resets)
             await runAsync(
               `INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_currency,sent_to_enquiry,sent_to_enquiry_note,updated_by,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note, updated_at=EXCLUDED.updated_at`,
-              [uuid(), req.params.id, s.enquiry_item_id, '', 'INR', s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null, req.session.user.id, now]
+              [uuid(), req.params.id, s.enquiry_item_id, '', 'INR', 1, s.sent_to_enquiry_note || null, req.session.user.id, now]
             );
           }
           continue;
@@ -1186,10 +1196,14 @@ app.post('/api/enquiries/:id/modify-request', auth, asyncRoute(async (req, res) 
   const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
   if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
   const now = nowStr();
-  await runAsync("UPDATE enquiries SET status='modify_requested', updated_at=? WHERE id=?", [now, req.params.id]);
+  const reason = (req.body?.reason || '').trim() || null;
+  await runAsync("UPDATE enquiries SET status='modify_requested', modify_reason=?, updated_at=? WHERE id=?", [reason, now, req.params.id]);
   try {
+    const histNote = reason
+      ? `Modify requested from Order — ${reason}`
+      : 'Modify requested from Order — ENQ opened for editing';
     await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
-      [uuid(), req.params.id, 'Modify requested from Order — ENQ opened for editing', req.session.user.name, now]);
+      [uuid(), req.params.id, histNote, req.session.user.name, now]);
   } catch(_) {}
   res.json({ ok: true });
 }));
