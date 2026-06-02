@@ -1252,6 +1252,10 @@ app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
   // Move enquiry back to sourcing for re-pricing — use returned_to_sourcing so Sourcing Bin shows it under Revision Needed
   if (parent.enquiry_id) {
     await runAsync("UPDATE enquiries SET status='returned_to_sourcing', updated_at=? WHERE id=?", [now, parent.enquiry_id]);
+    // Unlock all sourcing rows so sourcing can edit supplier/price freely on revision
+    await runAsync("UPDATE enquiry_sourcing SET sent_to_enquiry=0, sent_to_enquiry_note=NULL WHERE enquiry_id=?", [parent.enquiry_id]);
+    // Remove blank flag-only rows (supplier_id='') that duplicate real sourcing rows — keeps one row per item
+    await runAsync(`DELETE FROM enquiry_sourcing WHERE enquiry_id=? AND (supplier_id='' OR supplier_id IS NULL) AND enquiry_item_id IN (SELECT enquiry_item_id FROM enquiry_sourcing WHERE enquiry_id=? AND supplier_id!='' AND supplier_id IS NOT NULL)`, [parent.enquiry_id, parent.enquiry_id]);
     try {
       await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
         [uuid(), parent.enquiry_id,

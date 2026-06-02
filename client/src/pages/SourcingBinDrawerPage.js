@@ -556,7 +556,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
   const [srcRows, setSrcRows] = useState(() =>
     (enq.items || []).map(item => {
-      const ex = (enq.sourcing || []).find(s => s.enquiry_item_id === item.id);
+      // Prefer the row with real sourcing data (has supplier_id) over flag-only blank rows
+      const candidates = (enq.sourcing || []).filter(s => s.enquiry_item_id === item.id);
+      const ex = candidates.find(s => s.supplier_id) || candidates[0];
       if (ex) {
         const supType = suppliers.find(s => s.id === ex.supplier_id)?.type || 'domestic';
         const isIntl  = supType === 'international';
@@ -589,7 +591,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
   const [quoteRows, setQuoteRows] = useState(() =>
     (enq.items || []).map(item => {
-      const ex = (enq.sourcing || []).find(s => s.enquiry_item_id === item.id);
+      const candidates = (enq.sourcing || []).filter(s => s.enquiry_item_id === item.id);
+      const ex = candidates.find(s => s.supplier_id) || candidates[0];
       return { enquiry_item_id: item.id, quote_price: ex?.quote_price || '', quote_currency: ex?.quote_currency || item.target_currency || 'INR', tax_rate: ex?.tax_rate ?? '' };
     })
   );
