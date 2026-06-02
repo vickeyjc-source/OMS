@@ -11,11 +11,12 @@ export default function EnquiryDetailPage() {
   const { id }    = useParams();
   const navigate  = useNavigate();
   const qc        = useQueryClient();
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [submitting, setSubmitting]   = useState(false);
+  const [historyOpen, setHistoryOpen]       = useState(false);
+  const [submitting, setSubmitting]         = useState(false);
+  const [confirmSubmit, setConfirmSubmit]   = useState(false);
 
   const submitToSourcing = async () => {
-    if (!window.confirm('Submit this draft enquiry to Sourcing?')) return;
+    setConfirmSubmit(false);
     setSubmitting(true);
     try {
       await api.put('/enquiries/' + id, { status: 'sourcing', _action: 'Submitted to Sourcing' });
@@ -23,7 +24,6 @@ export default function EnquiryDetailPage() {
       qc.invalidateQueries(['enquiries']);
       qc.invalidateQueries(['summary']);
       toast.success('✅ Enquiry submitted to Sourcing!');
-      navigate('/sourcing-bin');
     } catch(e) {
       toast.error(e.response?.data?.error || 'Submit failed');
     } finally {
@@ -201,10 +201,11 @@ export default function EnquiryDetailPage() {
                       const qty    = Number(item.quantity) || 0;
                       const qp     = Number(src?.quote_price) || 0;
                       const qTotal = qp * qty;
+                      const isSentBack = src?.sent_to_enquiry;
                       return (
-                        <tr key={item.id}>
+                        <tr key={item.id} style={{ background: isSentBack ? '#fef3c7' : undefined, borderLeft: isSentBack ? '4px solid #d97706' : undefined }}>
                           <td>{i+1}</td>
-                          <td className="bold">{item.component}</td>
+                          <td className="bold">{item.component}{isSentBack && <span style={{fontSize:10,color:'#d97706',fontWeight:700,marginLeft:6}}>🔄 Sent Back</span>}</td>
                           <td>{item.manufacturer||'—'}</td>
                           <td>{src?.supplier_id ? supName(src.supplier_id) : <span className="muted">—</span>}</td>
                           <td className="mono">
@@ -232,7 +233,15 @@ export default function EnquiryDetailPage() {
                               ? <span style={{fontWeight:700}}>{fmtC(qTotal, src?.quote_currency||'INR')}</span>
                               : <span className="muted">—</span>}
                           </td>
-                          <td style={{color:'var(--text2)',fontSize:11}}>{src?.notes||'—'}</td>
+                          <td style={{color:'var(--text2)',fontSize:11}}>
+                            {isSentBack && src?.sent_to_enquiry_note ? (
+                              <div style={{fontStyle:'italic',color:'#d97706',fontWeight:600}}>📝 {src.sent_to_enquiry_note}</div>
+                            ) : src?.notes ? (
+                              src.notes
+                            ) : (
+                              '—'
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
@@ -300,34 +309,69 @@ export default function EnquiryDetailPage() {
         )}
       </div>
 
-      {/* ── Modify Requested action bar — ENQ opened for editing by Order section ── */}
-      {enq.status === 'modify_requested' && (
-        <div style={{marginTop:20,padding:'16px 20px',borderRadius:'var(--r)',
-          background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',
-          display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
-          <div style={{display:'flex',alignItems:'center',gap:10}}>
-            <span style={{fontSize:20}}>✏</span>
-            <div>
-              <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>Modification Requested from Order</div>
-              <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Edit the enquiry items, then submit to Sourcing for re-pricing. Quote and Sourcing sections are locked until you submit.</div>
+      {/* ── Modify Requested action bar — ENQ opened for editing by Sourcing section ── */}
+      {enq.status === 'modify_requested' && (() => {
+        const sentItems = (enq.items || []).filter(item => {
+          const src = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
+          return src?.sent_to_enquiry;
+        });
+        const allSent = sentItems.length === (enq.items || []).length;
+        // For whole-ENQ send: single note on enquiry. For specific items: per-item notes.
+        const wholeNote = allSent ? (enq.send_to_enq_note || null) : null;
+        const itemNotes = !allSent ? sentItems.map(item => {
+          const src = enq.sourcing?.find(s => s.enquiry_item_id === item.id);
+          return src?.sent_to_enquiry_note ? `${item.component}: ${src.sent_to_enquiry_note}` : null;
+        }).filter(Boolean) : [];
+        return (
+          <div style={{marginTop:20,padding:'16px 20px',borderRadius:'var(--r)',
+            background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+              <div style={{display:'flex',alignItems:'center',gap:10}}>
+                <span style={{fontSize:20}}>🔄</span>
+                <div>
+                  <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>
+                    {allSent ? 'Full Enquiry Sent to Enquiry Section' : `${sentItems.length} Item${sentItems.length>1?'s':''} Sent Back for Update`}
+                  </div>
+                  <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>
+                    {allSent
+                      ? 'Sourcing returned the full enquiry. Edit items below, then submit back to Sourcing.'
+                      : `Sourcing returned specific item${sentItems.length>1?'s':''} for update (highlighted in amber above). Edit and submit back to Sourcing.`}
+                  </div>
+                  {sentItems.length > 0 && <div style={{fontSize:11,marginTop:4,color:'var(--text2)'}}>Items: {sentItems.map(i=>i.component).join(', ')}</div>}
+                </div>
+              </div>
+              <div style={{display:'flex',gap:8}}>
+                <button className="btn"
+                  onClick={() => navigate('/enquiries/new', { state: { editEnquiry: enq } })}
+                  style={{fontWeight:600,fontSize:13}}>
+                  ✏ Edit Enquiry
+                </button>
+                <button className="btn btn-primary"
+                  disabled={submitting}
+                  onClick={() => setConfirmSubmit(true)}
+                  style={{fontWeight:700,fontSize:13,background:'var(--amber,#d97706)',
+                    borderColor:'var(--amber,#d97706)',color:'#fff'}}>
+                  {submitting ? 'Submitting…' : '📤 Submit to Sourcing'}
+                </button>
+              </div>
             </div>
+            {/* Whole-ENQ: single note */}
+            {wholeNote && (
+              <div style={{marginTop:10,padding:'8px 12px',background:'#fff',borderRadius:'var(--r-sm)',border:'1px solid #fcd34d',fontSize:12}}>
+                <div style={{fontWeight:700,color:'#92400e',marginBottom:4}}>📝 Reason from Sourcing:</div>
+                <div style={{color:'#92400e',fontStyle:'italic'}}>"{wholeNote}"</div>
+              </div>
+            )}
+            {/* Specific items: per-item notes */}
+            {itemNotes.length > 0 && (
+              <div style={{marginTop:10,padding:'8px 12px',background:'#fff',borderRadius:'var(--r-sm)',border:'1px solid #fcd34d',fontSize:12}}>
+                <div style={{fontWeight:700,color:'#92400e',marginBottom:4}}>📝 Reason from Sourcing:</div>
+                {itemNotes.map((n,i) => <div key={i} style={{color:'#92400e',fontStyle:'italic'}}>{n}</div>)}
+              </div>
+            )}
           </div>
-          <div style={{display:'flex',gap:8}}>
-            <button className="btn"
-              onClick={() => navigate('/enquiries/new', { state: { editEnquiry: enq } })}
-              style={{fontWeight:600,fontSize:13}}>
-              ✏ Edit Enquiry
-            </button>
-            <button className="btn btn-primary"
-              disabled={submitting}
-              onClick={submitToSourcing}
-              style={{fontWeight:700,fontSize:13,background:'var(--amber,#d97706)',
-                borderColor:'var(--amber,#d97706)',color:'#fff'}}>
-              {submitting ? 'Submitting…' : '📤 Submit to Sourcing'}
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* ── Draft action bar — only shown when ENQ is still a draft ── */}
       {enq.status === 'draft' && (
@@ -354,6 +398,31 @@ export default function EnquiryDetailPage() {
                 borderColor:'var(--amber,#d97706)',color:'#fff'}}>
               {submitting ? 'Submitting…' : '📤 Submit to Sourcing'}
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Submit to Sourcing confirm modal */}
+      {confirmSubmit && (
+        <div className="overlay" style={{zIndex:500}} onClick={() => setConfirmSubmit(false)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:400}}>
+            <div className="modal-header">
+              <h2 style={{fontSize:16}}>Submit to Sourcing</h2>
+              <button className="close-x" onClick={() => setConfirmSubmit(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:13, color:'var(--text2)', lineHeight:1.6}}>
+                Are you sure you want to submit this enquiry to the Sourcing team?
+              </div>
+            </div>
+            <div className="modal-footer" style={{justifyContent:'flex-end', gap:8}}>
+              <button className="btn" onClick={() => setConfirmSubmit(false)}>Cancel</button>
+              <button className="btn btn-primary" disabled={submitting}
+                onClick={submitToSourcing}
+                style={{background:'var(--amber,#d97706)', borderColor:'var(--amber,#d97706)', color:'#fff', fontWeight:700}}>
+                {submitting ? 'Submitting…' : '📤 Submit to Sourcing'}
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -206,7 +206,7 @@ export default function EnquiriesPage() {
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
   const FILTERS = ['all','draft','new','modify_requested','sourcing','quoted','ordered','closed'];
-  const FILTER_LABELS = { modify_requested: 'Modify Requested' };
+  const FILTER_LABELS = { modify_requested: 'Sent to Enquiry' };
   const filtered = enqs.filter(e => {
     if (filter!=='all' && e.status!==filter) return false;
     if (!search) return true;

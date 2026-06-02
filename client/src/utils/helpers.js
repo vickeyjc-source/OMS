@@ -47,6 +47,7 @@ export const LINE_STATUSES = [
 export const ENQ_STATUSES = [
   {v:'new',      l:'New'},
   {v:'sourcing', l:'Sourcing'},
+  {v:'modify_requested', l:'Sent to Enquiry'},
   {v:'quoted',   l:'Quoted'},
   {v:'ordered',  l:'Ordered'},
   {v:'closed',   l:'Closed'},
@@ -89,6 +90,7 @@ export const STATUS_BADGE = {
   sourcing:              ['badge-purple', 'Sourcing'],
   returned_to_sourcing:  ['badge-orange', 'Revision'],
   quoted:                ['badge-orange', 'Quoted'],
+  modify_requested:      ['badge-amber',  'Sent to Enquiry'],
   ordered:               ['badge-blue',   'Ordered'],
   order_created:         ['badge-blue',   'Order Created'],
   // Quote statuses

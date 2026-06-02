@@ -1026,15 +1026,19 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   // Persist existing_order_id when provided (set when order triggers enquiry revision)
   const newExistingOrderId = d.existing_order_id !== undefined ? (d.existing_order_id || null) : (e.existing_order_id || null);
   try { await runAsync('ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
+  try { await runAsync('ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL'); } catch(_) {}
   // If enquiry is being set to 'quoted' but a live order already exists for it, keep it as 'ordered'
   let resolvedStatus = d.status || e.status;
   if (resolvedStatus === 'quoted') {
     const liveOrder = await getAsync("SELECT id FROM orders WHERE enquiry_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
     if (liveOrder) resolvedStatus = 'ordered';
   }
-  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,updated_at=? WHERE id=?',
+  const newSendToEnqNote = d.send_to_enq_note !== undefined ? (d.send_to_enq_note || null) : (e.send_to_enq_note || null);
+  // Clear whole-ENQ note when submitted back to sourcing
+  const resolvedSendToEnqNote = resolvedStatus === 'sourcing' ? null : newSendToEnqNote;
+  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,send_to_enq_note=?,updated_at=? WHERE id=?',
     [resolvedStatus, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
-     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, now, req.params.id]);
+     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, resolvedSendToEnqNote, now, req.params.id]);
   if (d.items !== undefined) {
     await runAsync('DELETE FROM enquiry_items WHERE enquiry_id=?', [req.params.id]);
     for (let idx = 0; idx < d.items.length; idx++) {
@@ -1058,12 +1062,38 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
       }
     }
   }
+  // When enquiry moves to 'sourcing' from any sent-back state, clear all
+  // sent_to_enquiry flags so sourcing can edit all items freely again
+  if (resolvedStatus === 'sourcing') {
+    await runAsync(
+      "UPDATE enquiry_sourcing SET sent_to_enquiry=0, sent_to_enquiry_note=NULL WHERE enquiry_id=?",
+      [req.params.id]
+    );
+  }
   if (d.sourcing !== undefined) {
     for (const s of d.sourcing) {
       try {
-        // Always use UPSERT so quote_price is always written regardless of existing/new
-        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        // Flag-only rows (Send to ENQ) — only update the flag, never touch sourcing data
+        if (s._flagOnly || (s.supplier_id === undefined && s.sourced_price === undefined)) {
+          if (s.id) {
+            await runAsync(
+              'UPDATE enquiry_sourcing SET sent_to_enquiry=?, sent_to_enquiry_note=?, updated_at=? WHERE id=?',
+              [s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null, now, s.id]
+            );
+          } else if (s.enquiry_item_id) {
+            // No existing row yet — insert minimal row with flag
+            await runAsync(
+              `INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_currency,sent_to_enquiry,sent_to_enquiry_note,updated_by,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note, updated_at=EXCLUDED.updated_at`,
+              [uuid(), req.params.id, s.enquiry_item_id, '', 'INR', s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null, req.session.user.id, now]
+            );
+          }
+          continue;
+        }
+        // Full sourcing data UPSERT
+        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
@@ -1077,7 +1107,8 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
                bank_inr=EXCLUDED.bank_inr, clearance_inr=EXCLUDED.clearance_inr,
                margin_inr=EXCLUDED.margin_inr,
                availability=EXCLUDED.availability, lead_time=EXCLUDED.lead_time,
-               notes=EXCLUDED.notes, quote_price=EXCLUDED.quote_price,
+               notes=EXCLUDED.notes, sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note,
+               quote_price=EXCLUDED.quote_price,
                quote_currency=EXCLUDED.quote_currency, tax_rate=EXCLUDED.tax_rate,
                updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
@@ -1089,13 +1120,14 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            toNum(s.sourced_price), s.sourced_currency||'INR',
            toNum(s.src_price_foreign), toNum(s.exchange_rate),
            s.hsn_code||'',
-           toNum(s.freight_pct)    ?? 20,    toNum(s.insurance_pct)    ?? 1.125,
-           toNum(s.duty_pct)       ?? 7.5,   toNum(s.cess_pct)         ?? 10,
-           toNum(s.bank_fixed_usd) ?? 15,    toNum(s.clearance_fixed_inr) ?? 1800,
-           toNum(s.margin_pct)     ?? 15,
+           toNum(s.freight_pct),    toNum(s.insurance_pct),
+           toNum(s.duty_pct),       toNum(s.cess_pct),
+           toNum(s.bank_fixed_usd), toNum(s.clearance_fixed_inr),
+           toNum(s.margin_pct),
            toNum(s.freight_inr),   toNum(s.insurance_inr), toNum(s.duty_inr),   toNum(s.cess_inr),
            toNum(s.bank_inr),      toNum(s.clearance_inr), toNum(s.margin_inr),
            s.availability||'', s.lead_time||'', s.notes||'',
+           s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null,
            toNum(s.quote_price),
            s.quote_currency||'INR',
            toNum(s.tax_rate),
@@ -1731,7 +1763,7 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     linecards:     await g("SELECT COUNT(*) as c FROM linecards"),
     enquiries:     await g("SELECT COUNT(*) as c FROM enquiries"),
     enq_new:       await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('new','modify_requested')"),
-    enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('sourcing','returned_to_sourcing')"),
+    enq_sourcing:  await g("SELECT COUNT(*) as c FROM enquiries WHERE status IN ('sourcing','returned_to_sourcing','modify_requested')"),
     enq_quoted:    await g("SELECT COUNT(*) as c FROM enquiries WHERE status='quoted'"),
     sourcing:      await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
     procurement:      await g("SELECT COUNT(*) as c FROM orders WHERE status='procurement'"),

@@ -27,6 +27,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const [savedResponse,   setSavedResponse]    = useState(quote.customer_response || '');
   // Track whether details have been saved — Next → Customer Response only enabled after Save
   const [detailsSavedOnce, setDetailsSavedOnce] = useState(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
+  const [confirmRevision, setConfirmRevision] = useState(false);
 
   // Sync editable fields when parent passes updated quote data (after save+refresh)
   useEffect(() => {
@@ -534,10 +535,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 style={{background:'var(--amber,#d97706)',color:'#fff',
                   borderColor:'var(--amber,#d97706)',fontWeight:600}}
                 disabled={reviseMutation.isPending}
-                onClick={() => {
-                  if (!window.confirm('Send this quote back to Sourcing for re-pricing? The current quote will be superseded and a new revision created.')) return;
-                  reviseMutation.mutate();
-                }}>
+                onClick={() => setConfirmRevision(true)}>
                 {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
               </button>
             )}
@@ -596,6 +594,33 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
         </div>
       </div>
+
+      {/* Send to Revision confirm modal */}
+      {confirmRevision && (
+        <div className="overlay" style={{zIndex:600}} onClick={() => setConfirmRevision(false)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+            <div className="modal-header">
+              <h2 style={{fontSize:16}}>Send to Revision</h2>
+              <button className="close-x" onClick={() => setConfirmRevision(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:13, color:'var(--text2)', lineHeight:1.6}}>
+                Send this quote back to Sourcing for re-pricing? The current quote will be superseded and a new revision created.
+              </div>
+            </div>
+            <div className="modal-footer" style={{justifyContent:'flex-end', gap:8}}>
+              <button className="btn" onClick={() => setConfirmRevision(false)}>Cancel</button>
+              <button className="btn"
+                disabled={reviseMutation.isPending}
+                style={{background:'var(--amber,#d97706)', borderColor:'var(--amber,#d97706)', color:'#fff', fontWeight:700}}
+                onClick={() => { setConfirmRevision(false); reviseMutation.mutate(); }}>
+                {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

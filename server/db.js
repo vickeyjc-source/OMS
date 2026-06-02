@@ -293,6 +293,7 @@ async function createSchema() {
       enquiry_item_id TEXT NOT NULL, supplier_id TEXT NOT NULL,
       sourced_price NUMERIC, sourced_currency TEXT DEFAULT 'INR',
       availability TEXT, lead_time TEXT, notes TEXT,
+      sent_to_enquiry INTEGER DEFAULT 0, sent_to_enquiry_note TEXT DEFAULT NULL,
       quote_price NUMERIC, quote_currency TEXT DEFAULT 'INR',
       updated_by TEXT, updated_at TEXT NOT NULL
     );
@@ -546,6 +547,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN buying_type TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN charges TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN tax_rate NUMERIC DEFAULT NULL"); } catch(_) {}
   // ── Migrate quotes — add approval tracking + revision columns ───────────────
   try { await pool.query("ALTER TABLE quotes ADD COLUMN parent_quote_id TEXT DEFAULT NULL"); } catch(_) {}
@@ -732,6 +734,8 @@ async function initDb() {
   // ── Migrate grn_records — add credit_note_no for partial GRN shortfalls ──────
   try { await pool.query("ALTER TABLE grn_records ADD COLUMN credit_note_no TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate enquiry_sourcing — add src_dc and delivery_promise_date ──────────
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sent_to_enquiry INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sent_to_enquiry_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN src_dc TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN delivery_promise_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN preferred_delivery_date TEXT DEFAULT ''"); } catch(_) {}
