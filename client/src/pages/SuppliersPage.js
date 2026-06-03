@@ -219,7 +219,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
   });
   const deleteMutation = useMutation({
     mutationFn: () => api.delete('/suppliers/'+supplier.id),
-    onSuccess: () => { qc.invalidateQueries(['suppliers']); toast.success('Deleted'); onClose(); },
+    onSuccess: () => { qc.invalidateQueries(['suppliers']); qc.invalidateQueries(['deleted-suppliers']); toast.success('Moved to Recycle Bin'); onClose(); },
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
 

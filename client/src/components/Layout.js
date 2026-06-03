@@ -93,10 +93,6 @@ export default function Layout() {
             <Icon d="M2 8l4 4 8-8"/>
             Closed Bin
           </NavLink>}
-          {can('deleted-bin') && <NavLink to="/deleted-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
-            <Icon d="M3 4h10M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M4 4l.667 9.333A1 1 0 005.66 14h4.68a1 1 0 00.993-.667L12 4"/>
-            Deleted Bin
-          </NavLink>}
           {can('finance') && (
             <NavLink to="/finance" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
               <Icon d="M2 4h12v8H2zM2 8h12M6 12v2M10 12v2M5 14h6"/>
@@ -118,13 +114,19 @@ export default function Layout() {
             <Icon d="M1.5 2h13v12H1.5zM1.5 7h13M4.5 2v5"/>Line Cards
           </NavLink>}
 
-          {(can('users') || can('approvals')) && <>
+          {(can('users') || can('approvals') || user.role==='admin') && <>
             <div className="sb-section">Admin</div>
             {can('users') && <NavLink to="/users" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
               <Icon d="M6 2a2.5 2.5 0 100 5 2.5 2.5 0 000-5zM1 13c0-2.8 2.2-5 5-5s5 2.2 5 5M12 4a2 2 0 110 4M15 13c0-1.7-1.3-3-3-3"/>Users
             </NavLink>}
             {can('approvals') && <NavLink to="/approvals" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
               <Icon d="M2 8l4 4 8-8"/>Approvals
+            </NavLink>}
+            {user.role==='admin' && <NavLink to="/deleted-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+              <Icon d="M3 4h10M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1M6 7v5M10 7v5M4 4l.667 9.333A1 1 0 005.66 14h4.68a1 1 0 00.993-.667L12 4"/>Recycle Bin
+            </NavLink>}
+            {user.role==='admin' && <NavLink to="/danger-zone" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+              <Icon d="M8 1.5l6.5 11.5h-13zM8 6v3M8 11h.01"/>Danger Zone
             </NavLink>}
           </>}
 
@@ -174,7 +176,7 @@ export default function Layout() {
 }
 
 function PageTitle() {
-  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Deleted Bin','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance','/inventory':'Stock Inventory'};
+  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Recycle Bin','/danger-zone':'Danger Zone','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance','/inventory':'Stock Inventory'};
   return map[window.location.pathname] || 'Supply Chain Management System';
 }
 

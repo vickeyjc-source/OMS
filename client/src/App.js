@@ -26,6 +26,7 @@ import SourcingBinDrawerPage from './pages/SourcingBinDrawerPage';
 import ProcurementBinPage from './pages/ProcurementBinPage';
 import ClosedBinPage from './pages/ClosedBinPage';
 import DeletedBinPage from './pages/DeletedBinPage';
+import DangerZonePage from './pages/DangerZonePage';
 import FinancePage from './pages/FinancePage'; // Finance module
 import TaxSettingsPage from './pages/TaxSettingsPage'; // Tax Settings
 import InventoryPage from './pages/InventoryPage'; // Stock Inventory
@@ -49,10 +50,12 @@ function RequireAuth({ children, adminOnly }) {
   return children;
 }
 
-function RequireSection({ section, children, adminOnly }) {
+function RequireSection({ section, children, adminOnly, strictAdmin }) {
   const { user, loading } = useAuth();
   if (loading) return <Spinner />;
   if (!user) return <Navigate to="/login" replace />;
+  // strictAdmin = hard admin-only (Recycle Bin, Danger Zone) — managers excluded too.
+  if (strictAdmin && user.role !== 'admin') return <Navigate to="/" replace />;
   if (adminOnly && !['admin','manager'].includes(user.role)) return <Navigate to="/" replace />;
   if (!canAccessSection(user, section)) return <Navigate to="/" replace />;
   return children;
@@ -84,7 +87,8 @@ function AppRoutes() {
         <Route path="sourcing-bin" element={<RequireSection section="sourcing-bin"><SourcingBinDrawerPage /></RequireSection>} />
         <Route path="procurement-bin" element={<RequireSection section="procurement-bin"><ProcurementBinPage /></RequireSection>} />
         <Route path="closed-bin" element={<RequireSection section="closed-bin"><ClosedBinPage /></RequireSection>} />
-        <Route path="deleted-bin" element={<RequireSection section="deleted-bin"><DeletedBinPage /></RequireSection>} />
+        <Route path="deleted-bin" element={<RequireSection section="deleted-bin" strictAdmin><DeletedBinPage /></RequireSection>} />
+        <Route path="danger-zone" element={<RequireSection section="danger-zone" strictAdmin><DangerZonePage /></RequireSection>} />
         <Route path="finance" element={<RequireSection section="finance"><FinancePage /></RequireSection>} />
         <Route path="inventory" element={<RequireSection section="inventory"><InventoryPage /></RequireSection>} />
       </Route>

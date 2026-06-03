@@ -430,6 +430,34 @@ async function createSchema() {
       vat_label TEXT NOT NULL DEFAULT 'VAT',
       updated_at TEXT NOT NULL
     );
+    -- Soft-delete snapshot store. Each row is one "Delete All <section>" batch.
+    -- payload holds { tableName: [rows...] } so a Restore re-inserts everything.
+    CREATE TABLE IF NOT EXISTS deleted_bin (
+      id TEXT PRIMARY KEY,
+      module TEXT NOT NULL,
+      label TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      row_count INTEGER NOT NULL DEFAULT 0,
+      deleted_by TEXT DEFAULT '',
+      deleted_at TEXT NOT NULL
+    );
+    -- Permanent audit log of every delete / restore / purge. Survives restore & purge.
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,            -- delete | restore | purge | master_delete
+      area TEXT NOT NULL,              -- danger | recycle
+      module TEXT DEFAULT '',          -- orders / users / customers / master ...
+      label TEXT DEFAULT '',
+      entity_type TEXT DEFAULT '',     -- user | customer | supplier | section | master
+      entity_id TEXT DEFAULT '',
+      entity_name TEXT DEFAULT '',
+      entity_email TEXT DEFAULT '',
+      entity_username TEXT DEFAULT '',
+      row_count INTEGER DEFAULT 0,
+      performed_by TEXT DEFAULT '',
+      performed_by_name TEXT DEFAULT '',
+      performed_at TEXT NOT NULL       -- full timestamp incl. seconds
+    );
   `);
 }
 

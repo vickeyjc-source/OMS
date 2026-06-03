@@ -406,7 +406,7 @@ export function CustomerModal({ customer, onClose, onSaved }) {
   });
   const deleteMutation = useMutation({
     mutationFn: () => api.delete('/customers/'+customer.id),
-    onSuccess: () => { qc.invalidateQueries(['customers']); toast.success('Deleted'); onClose(); },
+    onSuccess: () => { qc.invalidateQueries(['customers']); qc.invalidateQueries(['deleted-customers']); toast.success('Moved to Recycle Bin'); onClose(); },
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
 

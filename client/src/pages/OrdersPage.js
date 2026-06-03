@@ -73,33 +73,12 @@ function ShipperSelect({ value, onChange, shippers }) {
 
 function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRefresh }) {
   const { user } = useAuth();
-  const [showModifyConfirm, setShowModifyConfirm] = useState(false);
-  const [modifyBusy, setModifyBusy] = useState(false);
-  const handleModifyRequest = async () => {
-    if (!order.enquiry_id) return;
-    setModifyBusy(true);
-    try {
-      await api.post('/enquiries/' + order.enquiry_id + '/modify-request');
-      toast.success('✅ Modify request sent — Enquiry section can now edit this enquiry');
-      setShowModifyConfirm(false);
-      onClose();
-    } catch(e) {
-      toast.error(e.response?.data?.error || 'Failed');
-    } finally { setModifyBusy(false); }
-  };
   const qc = useQueryClient();
   const perms = user.perms || {};
   const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
   const canSeeProcPrice = perms.canSeeProcurementPrice !== false;
   const [editSection, setEditSection] = useState(null);
 
-  // Linked enquiry — needed for "Modify Items via Enquiry" flow
-  const { data: linkedEnquiry } = useQuery({
-    queryKey: ['enquiry', order.enquiry_id],
-    queryFn: () => api.get('/enquiries/' + order.enquiry_id).then(r => r.data),
-    enabled: !!order.enquiry_id,
-    staleTime: 30000,
-  });
   const { data: orderFiles=[] } = useQuery({
     queryKey: ['files', 'order', order.id],
     queryFn: () => api.get('/files', { params: { entity_type:'order', entity_id:order.id } }).then(r => r.data),
@@ -333,26 +312,6 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           <div className="card card-sm">
             <div className="card-title">
               <span>📦 Line Items ({order.lineItems?.length||0})</span>
-              {canEdit && order.enquiry_id && linkedEnquiry && !['payment_approval','procurement','shipped','delivered_hub','delivered_customer','closed'].includes(order.status) && order.customer_payment_status !== 'paid' && !showModifyConfirm && (
-                <button className="btn btn-xs"
-                  onClick={() => setShowModifyConfirm(true)}
-                  style={{fontSize:11,fontWeight:600,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)'}}>
-                  ✏ Modify via Enquiry
-                </button>
-              )}
-              {showModifyConfirm && (
-                <div style={{display:'flex',alignItems:'center',gap:6,padding:'4px 10px',
-                  borderRadius:'var(--r-sm)',background:'var(--amber-lt,#fffbeb)',
-                  border:'1px solid var(--amber,#d97706)'}}>
-                  <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>Send modify request to Enquiry section?</span>
-                  <button className="btn btn-xs"
-                    style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
-                    disabled={modifyBusy} onClick={handleModifyRequest}>
-                    {modifyBusy ? '…' : 'Yes'}
-                  </button>
-                  <button className="btn btn-xs" onClick={() => setShowModifyConfirm(false)}>Cancel</button>
-                </div>
-              )}
             </div>
             <div style={{overflowX:'auto'}}>
               <table className="li-table">

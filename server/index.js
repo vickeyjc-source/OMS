@@ -206,7 +206,21 @@ function adminOnly(req, res, next) {
   next();
 }
 const nowStr   = () => new Date().toISOString().slice(0,16).replace('T',' ');
+const nowFull  = () => new Date().toISOString().slice(0,19).replace('T',' ');  // incl. seconds
 const todayStr = () => new Date().toISOString().slice(0,10);
+
+// Append one immutable row to the audit log. `by` is the session user.
+async function logActivity(entry, by) {
+  try {
+    await runAsync(
+      `INSERT INTO activity_log(id,action,area,module,label,entity_type,entity_id,entity_name,entity_email,entity_username,row_count,performed_by,performed_by_name,performed_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ['log'+uuid().slice(0,12), entry.action, entry.area, entry.module||'', entry.label||'',
+       entry.entity_type||'', entry.entity_id||'', entry.entity_name||'', entry.entity_email||'', entry.entity_username||'',
+       entry.row_count||0, by?.username||'', by?.name||'', nowFull()]
+    );
+  } catch(e) { console.warn('[activity_log] failed:', e.message); }
+}
 
 const FILE_UPLOAD_LIMIT_MB = Number(process.env.FILE_UPLOAD_LIMIT_MB || 25);
 const upload = multer({
@@ -275,7 +289,8 @@ const SECTION_DEFINITIONS = [
   { key: 'delivery-hub', label: 'Delivery Hub' },
   { key: 'inventory', label: 'Stock Inventory' },
   { key: 'closed-bin', label: 'Closed Bin' },
-  { key: 'deleted-bin', label: 'Deleted Bin' },
+  { key: 'deleted-bin', label: 'Recycle Bin', adminOnly: true, locked: true },
+  { key: 'danger-zone', label: 'Danger Zone', adminOnly: true, locked: true },
   { key: 'finance', label: 'Finance' },
   { key: 'customers', label: 'Customers' },
   { key: 'suppliers', label: 'Suppliers' },
@@ -517,7 +532,9 @@ app.delete('/api/files/:id', auth, asyncRoute(async (req, res) => {
 
 // ── USERS ────────────────────────────────────────────────────
 app.get('/api/users', auth, asyncRoute(async (req, res) => {
-  res.json(await allAsync('SELECT id,name,username,email,role,department,status,created,plain_password FROM users ORDER BY department,name'));
+  const includeDeleted = req.query.include_deleted === '1' || req.query.include_deleted === 'true';
+  const where = includeDeleted ? '' : "WHERE status != 'deleted'";
+  res.json(await allAsync(`SELECT id,name,username,email,role,department,status,created,plain_password FROM users ${where} ORDER BY department,name`));
 }));
 app.post('/api/users', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
   const d = req.body;
@@ -541,7 +558,21 @@ app.put('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req
   saveNow(); res.json({ ok: true });
 }));
 app.delete('/api/users/:id', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
-  await runAsync('DELETE FROM users WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
+  // Soft delete — move to Recycle Bin instead of removing from the database.
+  const u = await getAsync('SELECT id,name,email,username,status FROM users WHERE id=?', [req.params.id]);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (u.id === req.session.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+  await runAsync('UPDATE users SET status=? WHERE id=?', ['deleted', req.params.id]);
+  await logActivity({ action:'delete', area:'recycle', module:'users', label:'Users', entity_type:'user', entity_id:u.id, entity_name:u.name, entity_email:u.email, entity_username:u.username, row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
+}));
+app.post('/api/users/:id/restore', adminOnly, sectionGate('users'), asyncRoute(async (req, res) => {
+  const u = await getAsync('SELECT id,name,email,username,status FROM users WHERE id=?', [req.params.id]);
+  if (!u) return res.status(404).json({ error: 'Not found' });
+  if (u.status !== 'deleted') return res.status(400).json({ error: 'User is not in the Recycle Bin' });
+  await runAsync('UPDATE users SET status=? WHERE id=?', ['active', req.params.id]);
+  await logActivity({ action:'restore', area:'recycle', module:'users', label:'Users', entity_type:'user', entity_id:u.id, entity_name:u.name, entity_email:u.email, entity_username:u.username, row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
 }));
 
 // ── SECTION PERMISSIONS ──────────────────────────────────────
@@ -567,7 +598,8 @@ app.put('/api/section-permissions', adminOnly, sectionGate('users'), asyncRoute(
   const requested = new Map(sections.map(s => [s.key, Boolean(s.enabled)]));
   const now = nowStr();
   for (const section of SECTION_DEFINITIONS) {
-    const enabled = requested.has(section.key) ? requested.get(section.key) : false;
+    // Locked sections (Recycle Bin, Danger Zone) are hard admin-only — never grantable.
+    const enabled = section.locked ? false : (requested.has(section.key) ? requested.get(section.key) : false);
     await runAsync(
       `INSERT INTO section_permissions(role,department,section_key,enabled,updated_at,updated_by)
        VALUES(?,?,?,?,?,?)
@@ -602,7 +634,9 @@ app.use('/api/finance-queue', auth, sectionGate('finance'));
 app.get('/api/customers', auth, asyncRoute(async (req, res) => {
   const perms = getPerms(req.session.user);
   if (!perms.canSeeCustomer) return res.status(403).json({ error: 'Access denied' });
-  const rows = await allAsync('SELECT * FROM customers ORDER BY created DESC');
+  const includeDeleted = req.query.include_deleted === '1' || req.query.include_deleted === 'true';
+  const where = includeDeleted ? '' : "WHERE status != 'deleted'";
+  const rows = await allAsync(`SELECT * FROM customers ${where} ORDER BY created DESC`);
   const counts = await Promise.all(rows.map(c => getAsync('SELECT COUNT(*) as n FROM orders WHERE customer_id=?', [c.id])));
   res.json(rows.map((c, i) => ({ ...c, orders: (counts[i] || {n:0}).n })));
 }));
@@ -655,7 +689,20 @@ function buildCustomerExt(d) {
   return { sets, vals };
 }
 app.delete('/api/customers/:id', auth, asyncRoute(async (req, res) => {
-  await runAsync('DELETE FROM customers WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
+  // Soft delete — move to the Recycle Bin instead of removing from the database.
+  const c = await getAsync('SELECT id,name,email FROM customers WHERE id=?', [req.params.id]);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  await runAsync('UPDATE customers SET status=? WHERE id=?', ['deleted', req.params.id]);
+  await logActivity({ action:'delete', area:'recycle', module:'customers', label:'Customers', entity_type:'customer', entity_id:c.id, entity_name:c.name, entity_email:c.email||'', row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
+}));
+app.post('/api/customers/:id/restore', auth, asyncRoute(async (req, res) => {
+  const c = await getAsync('SELECT id,name,email,status FROM customers WHERE id=?', [req.params.id]);
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  if (c.status !== 'deleted') return res.status(400).json({ error: 'Customer is not in the Recycle Bin' });
+  await runAsync('UPDATE customers SET status=? WHERE id=?', ['active', req.params.id]);
+  await logActivity({ action:'restore', area:'recycle', module:'customers', label:'Customers', entity_type:'customer', entity_id:c.id, entity_name:c.name, entity_email:c.email||'', row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
 }));
 // Customer template download
 app.get('/api/customers/template', auth, (req, res) => {
@@ -768,7 +815,9 @@ app.delete('/api/tax-rates/:currency', auth, asyncRoute(async (req, res) => {
 // ── SUPPLIERS ────────────────────────────────────────────────
 app.get('/api/suppliers', auth, asyncRoute(async (req, res) => {
   // Single query for suppliers, single query for all linecards — no nesting
-  const sups = await allAsync('SELECT * FROM suppliers ORDER BY created DESC');
+  const includeDeleted = req.query.include_deleted === '1' || req.query.include_deleted === 'true';
+  const where = includeDeleted ? '' : "WHERE status != 'deleted'";
+  const sups = await allAsync(`SELECT * FROM suppliers ${where} ORDER BY created DESC`);
   const allLinecards = await allAsync('SELECT supplier_id, linecard_id FROM supplier_linecards');
   res.json(sups.map(s => ({
     ...s,
@@ -822,7 +871,20 @@ app.put('/api/suppliers/:id', auth, asyncRoute(async (req, res) => {
   saveNow(); res.json({ ok: true });
 }));
 app.delete('/api/suppliers/:id', auth, asyncRoute(async (req, res) => {
-  await runAsync('DELETE FROM suppliers WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
+  // Soft delete — move to the Recycle Bin instead of removing from the database.
+  const s = await getAsync('SELECT id,name,email FROM suppliers WHERE id=?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Not found' });
+  await runAsync('UPDATE suppliers SET status=? WHERE id=?', ['deleted', req.params.id]);
+  await logActivity({ action:'delete', area:'recycle', module:'suppliers', label:'Suppliers', entity_type:'supplier', entity_id:s.id, entity_name:s.name, entity_email:s.email||'', row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
+}));
+app.post('/api/suppliers/:id/restore', auth, asyncRoute(async (req, res) => {
+  const s = await getAsync('SELECT id,name,email,status FROM suppliers WHERE id=?', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Not found' });
+  if (s.status !== 'deleted') return res.status(400).json({ error: 'Supplier is not in the Recycle Bin' });
+  await runAsync('UPDATE suppliers SET status=? WHERE id=?', ['active', req.params.id]);
+  await logActivity({ action:'restore', area:'recycle', module:'suppliers', label:'Suppliers', entity_type:'supplier', entity_id:s.id, entity_name:s.name, entity_email:s.email||'', row_count:1 }, req.session.user);
+  saveNow(); res.json({ ok: true });
 }));
 // Supplier template download
 app.get('/api/suppliers/template', auth, (req, res) => {
@@ -1668,6 +1730,13 @@ const DELETABLE_MODULES = {
   inventory: { label:'All Inventory',     tables:['stock_inventory'] },
 };
 
+// Modules surfaced in the Recycle Bin grid. "users" is handled by per-record
+// soft delete (status='deleted'), not the snapshot store, so it's listed
+// separately on the client. The keys here mirror the Danger Zone cards.
+const DELETED_BIN_MODULES = Object.fromEntries(
+  Object.entries(DELETABLE_MODULES).map(([k,v]) => [k, v.label])
+);
+
 async function deleteBlobsForFiles(fileRows) {
   if (!fileRows || !fileRows.length) return;
   const container = getAzureContainerClient();
@@ -1690,14 +1759,96 @@ async function safeDeleteTables(tables, blobCleanup) {
   return deleted;
 }
 
+// Snapshot every row of the given tables into a trash batch, then delete them.
+// Returns { id, deleted } where id is the deleted_bin batch (null if nothing deleted).
+async function softDeleteTables(module, label, tables, deletedBy) {
+  const payload = {};
+  let total = 0;
+  for (const t of tables) {
+    try {
+      const rows = await allAsync('SELECT * FROM '+t);
+      if (rows && rows.length) { payload[t] = rows; total += rows.length; }
+    } catch(_) {}
+  }
+  if (total === 0) return { id: null, deleted: 0 };
+  // Delete live rows (tables already ordered children-first by the module def).
+  for (const t of tables) {
+    try { await runAsync('DELETE FROM '+t); } catch(_) {}
+  }
+  const id = 'bin' + uuid().slice(0,10);
+  await runAsync(
+    'INSERT INTO deleted_bin(id,module,label,payload,row_count,deleted_by,deleted_at) VALUES(?,?,?,?,?,?,?)',
+    [id, module, label, JSON.stringify(payload), total, deletedBy||'', nowStr()]
+  );
+  return { id, deleted: total };
+}
+
+// Re-insert every snapshotted row, parents first (reverse of delete order).
+async function restoreBatch(batch) {
+  const payload = typeof batch.payload === 'string' ? JSON.parse(batch.payload) : batch.payload;
+  const tables = Object.keys(payload).reverse();
+  let restored = 0;
+  for (const t of tables) {
+    const rows = payload[t] || [];
+    for (const row of rows) {
+      const cols = Object.keys(row);
+      const placeholders = cols.map(()=>'?').join(',');
+      const sql = `INSERT INTO ${t}(${cols.join(',')}) VALUES(${placeholders}) ON CONFLICT DO NOTHING`;
+      try { await runAsync(sql, cols.map(c=>row[c])); restored++; } catch(_) {}
+    }
+  }
+  return restored;
+}
+
 app.delete('/api/admin/delete/:module', adminOnly, asyncRoute(async (req, res) => {
   const mod = DELETABLE_MODULES[req.params.module];
   if (!mod) return res.status(400).json({ error:'Unknown module' });
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
-  const deleted = await safeDeleteTables(mod.tables, mod.tables.includes('app_files'));
+  const { deleted } = await softDeleteTables(req.params.module, mod.label, mod.tables, req.session.user.username);
+  await logActivity({ action:'delete', area:'danger', module:req.params.module, label:mod.label, entity_type:'section', row_count:deleted }, req.session.user);
   saveNow();
-  console.log('[ADMIN DELETE]', req.session.user.username, 'deleted module:', req.params.module, 'rows:', deleted);
+  console.log('[ADMIN SOFT-DELETE]', req.session.user.username, 'sent module to Recycle Bin:', req.params.module, 'rows:', deleted);
   res.json({ ok:true, module:req.params.module, label:mod.label, deleted });
+}));
+
+// List trash batches (newest first), grouped by module on the client.
+app.get('/api/admin/deleted-bin', adminOnly, asyncRoute(async (req, res) => {
+  const rows = await allAsync('SELECT id,module,label,row_count,deleted_by,deleted_at FROM deleted_bin ORDER BY deleted_at DESC');
+  res.json(rows);
+}));
+
+// Audit log. Optional ?area=danger|recycle filter.
+app.get('/api/admin/activity-log', adminOnly, asyncRoute(async (req, res) => {
+  if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
+  const { area } = req.query || {};
+  const where = (area === 'danger' || area === 'recycle') ? 'WHERE area=?' : '';
+  const params = where ? [area] : [];
+  const rows = await allAsync(`SELECT * FROM activity_log ${where} ORDER BY performed_at DESC LIMIT 500`, params);
+  res.json(rows);
+}));
+
+// Restore one batch back into the live tables, then remove it from the bin.
+app.post('/api/admin/deleted-bin/:id/restore', adminOnly, asyncRoute(async (req, res) => {
+  if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
+  const batch = await getAsync('SELECT * FROM deleted_bin WHERE id=?', [req.params.id]);
+  if (!batch) return res.status(404).json({ error:'Batch not found' });
+  const restored = await restoreBatch(batch);
+  await runAsync('DELETE FROM deleted_bin WHERE id=?', [req.params.id]);
+  await logActivity({ action:'restore', area:'recycle', module:batch.module, label:batch.label, entity_type: batch.module==='master'?'master':'section', row_count:restored }, req.session.user);
+  saveNow();
+  console.log('[ADMIN RESTORE]', req.session.user.username, 'restored batch:', batch.module, 'rows:', restored);
+  res.json({ ok:true, module:batch.module, label:batch.label, restored });
+}));
+
+// Permanently purge one batch (frees the data for real).
+app.delete('/api/admin/deleted-bin/:id', adminOnly, asyncRoute(async (req, res) => {
+  if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
+  const batch = await getAsync('SELECT * FROM deleted_bin WHERE id=?', [req.params.id]);
+  if (!batch) return res.status(404).json({ error:'Batch not found' });
+  await runAsync('DELETE FROM deleted_bin WHERE id=?', [req.params.id]);
+  await logActivity({ action:'purge', area:'recycle', module:batch.module, label:batch.label, entity_type:'section', row_count:batch.row_count }, req.session.user);
+  saveNow();
+  res.json({ ok:true });
 }));
 
 app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
@@ -1708,9 +1859,12 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
     'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
     'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
     'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files','stock_inventory'];
-  const deleted = await safeDeleteTables(tables, true);
+  // Soft master delete — snapshot everything into one restorable batch instead of
+  // hard-wiping. Blobs are kept so uploaded files survive a restore.
+  const { deleted } = await softDeleteTables('master', 'Master Delete', tables, req.session.user.username);
+  await logActivity({ action:'master_delete', area:'danger', module:'master', label:'Master Delete', entity_type:'master', row_count:deleted }, req.session.user);
   saveNow();
-  console.warn('[MASTER DELETE]', req.session.user.username, 'wiped ALL data. Rows:', deleted);
+  console.warn('[MASTER DELETE]', req.session.user.username, 'sent ALL data to Recycle Bin. Rows:', deleted);
   res.json({ ok:true, deleted });
 }));
 
@@ -1786,10 +1940,10 @@ app.get('/api/search', auth, asyncRoute(async (req, res) => {
     SELECT DISTINCT s.id, s.name, so.order_id
     FROM suppliers s
     JOIN supplier_orders so ON so.supplier_id = s.id
-    WHERE LOWER(s.name) LIKE ?
+    WHERE LOWER(s.name) LIKE ? AND s.status != 'deleted'
     LIMIT 5`, [like]);
 
-  const customers = await allAsync(`SELECT id, name FROM customers WHERE LOWER(name) LIKE ? LIMIT 5`, [like]);
+  const customers = await allAsync(`SELECT id, name FROM customers WHERE LOWER(name) LIKE ? AND status != 'deleted' LIMIT 5`, [like]);
 
   res.json({ orders: orderRows, items: itemRows, enquiries: enqRows, suppliers: supRows, customers });
 }));
@@ -1801,6 +1955,7 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
   const finCustAdvance = await g("SELECT COUNT(*) as c FROM orders WHERE status='payment_approval' AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid'))");
   const finCustNet     = await g("SELECT COUNT(*) as c FROM orders WHERE status NOT IN ('closed','cancelled','deleted','payment_approval') AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid')) AND payment_terms NOT LIKE 'Advance%' AND payment_terms LIKE 'Net%'");
   const finSupNet      = await g("SELECT COUNT(*) as c FROM supplier_orders WHERE payment_terms_type='net' AND status NOT IN ('paid','cancelled') AND (payment_blocked IS NULL OR payment_blocked=0)");
+  const finPORequests  = await g("SELECT COUNT(*) as c FROM po_requests WHERE status='pending'");
   res.json({
     total:         await g("SELECT COUNT(*) as c FROM orders"),
     open:          await g("SELECT COUNT(*) as c FROM orders WHERE status='open'"),
@@ -1825,7 +1980,8 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     finance_cust_advance: finCustAdvance,
     finance_cust_net:     finCustNet,
     finance_sup_net:      finSupNet,
-    finance_pending:      finSupAdvance + finCustAdvance + finCustNet + finSupNet,
+    finance_po_requests:  finPORequests,
+    finance_pending:      finSupAdvance + finCustAdvance + finCustNet + finSupNet + finPORequests,
     delivery_hub:    await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('delivery_hub','transit_hub','partial_hub')"),
     quote_bin:       await g("SELECT COUNT(*) as c FROM quotes WHERE status='active'"),
     orders_new:      await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('open','draft')"),

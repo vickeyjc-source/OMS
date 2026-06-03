@@ -175,7 +175,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
   return (
     <>
       <style>{DRAWER_CSS}</style>
-      <div className="id-overlay" onClick={onClose} />
+      <div className="id-overlay" />
       <div className="id-drawer">
 
         {/* Header */}
