@@ -32,7 +32,11 @@ export default function DeletedBinPage() {
   const isAdmin = user.role === 'admin';
   const [tab, setTab] = useState('global');
   const [confirm, setConfirm] = useState(null);
+  const [purgeText, setPurgeText] = useState('');
+  const [purgeStep, setPurgeStep] = useState(1);
   const [busy, setBusy] = useState(false);
+
+  const closeConfirm = () => { setConfirm(null); setPurgeText(''); setPurgeStep(1); };
 
   const { data: batches=[], isLoading: bLoad } = useQuery({
     queryKey:['deleted-bin'], queryFn:()=>api.get('/admin/deleted-bin').then(r=>r.data),
@@ -58,17 +62,17 @@ export default function DeletedBinPage() {
 
   const restore = useMutation({
     mutationFn: id => api.post('/admin/deleted-bin/'+id+'/restore'),
-    onSuccess: r => { refresh(); toast.success((r.data.label||'Data')+' restored — '+r.data.restored+' rows'); setConfirm(null); setBusy(false); },
+    onSuccess: r => { refresh(); toast.success((r.data.label||'Data')+' restored — '+r.data.restored+' rows'); closeConfirm(); setBusy(false); },
     onError: e => { toast.error(e.response?.data?.error||'Restore failed'); setBusy(false); },
   });
   const purge = useMutation({
     mutationFn: id => api.delete('/admin/deleted-bin/'+id),
-    onSuccess: () => { refresh(); toast.success('Permanently removed'); setConfirm(null); setBusy(false); },
+    onSuccess: () => { refresh(); toast.success('Permanently removed'); closeConfirm(); setBusy(false); },
     onError: e => { toast.error(e.response?.data?.error||'Failed'); setBusy(false); },
   });
   const restoreRecord = useMutation({
     mutationFn: ({type,id}) => api.post('/'+type+'/'+id+'/restore'),
-    onSuccess: () => { refresh(); toast.success('Restored'); setConfirm(null); setBusy(false); },
+    onSuccess: () => { refresh(); toast.success('Restored'); closeConfirm(); setBusy(false); },
     onError: e => { toast.error(e.response?.data?.error||'Failed'); setBusy(false); },
   });
 
@@ -91,10 +95,12 @@ export default function DeletedBinPage() {
         <div style={{fontSize:12,color:'var(--text2)',marginBottom:12,lineHeight:1.5}}>{mod.desc}</div>
         {!has ? <div style={{fontSize:12,color:'var(--text3)',textAlign:'center',padding:'4px 0'}}>Nothing deleted</div>
         : mBatches.map(b=>(
-          <div key={b.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-            <div style={{flex:1,fontSize:11,color:'var(--text3)'}}>{Number(b.row_count)} rows · {fmt(b.deleted_at)}{b.deleted_by?(' · by '+b.deleted_by):''}</div>
-            <button className="btn btn-xs btn-primary" disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod})}>↩ Restore</button>
-            <button className="btn btn-xs" disabled={busy} title="Permanently remove" onClick={()=>setConfirm({mode:'purge',batch:b,mod})}>🗑</button>
+          <div key={b.id} style={{marginBottom:10}}>
+            <div style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>{Number(b.row_count)} rows · {fmt(b.deleted_at)}{b.deleted_by?(' · by '+b.deleted_by):''}</div>
+            <div style={{display:'flex',gap:8}}>
+              <button className="btn btn-sm btn-primary" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod})}>↩ Restore</button>
+              <button className="btn btn-sm btn-danger" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'purge',batch:b,mod})}>🗑 Delete</button>
+            </div>
           </div>
         ))}
       </div>
@@ -177,10 +183,12 @@ export default function DeletedBinPage() {
                         <button className="btn btn-sm btn-primary" disabled>↩ Restore Everything</button>
                       </div>
                     ) : masterBatches.map(b=>(
-                      <div key={b.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-                        <div style={{flex:1,fontSize:12,color:'var(--text2)'}}>{Number(b.row_count)} rows · {fmt(b.deleted_at)}{b.deleted_by?(' · by '+b.deleted_by):''}</div>
-                        <button className="btn btn-sm btn-primary" disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod:{label:'Master Delete'}})}>↩ Restore Everything</button>
-                        <button className="btn btn-sm" disabled={busy} title="Permanently remove" onClick={()=>setConfirm({mode:'purge',batch:b,mod:{label:'Master Delete'}})}>🗑</button>
+                      <div key={b.id} style={{marginBottom:10}}>
+                        <div style={{fontSize:12,color:'var(--text2)',marginBottom:8}}>{Number(b.row_count)} rows · {fmt(b.deleted_at)}{b.deleted_by?(' · by '+b.deleted_by):''}</div>
+                        <div style={{display:'flex',gap:8}}>
+                          <button className="btn btn-sm btn-primary" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod:{label:'Master Delete'}})}>↩ Restore Everything</button>
+                          <button className="btn btn-sm btn-danger" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'purge',batch:b,mod:{label:'Master Delete'}})}>🗑 Delete Permanently</button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -200,39 +208,70 @@ export default function DeletedBinPage() {
       {confirm && (
         <div className="overlay">
           <div className="modal modal-sm">
-            <div className="modal-header" style={{background: confirm.mode==='purge'?'var(--red-lt)':'var(--accent-lt,#eef)'}}>
-              <h2 style={{color: confirm.mode==='purge'?'var(--red)':'var(--accent)'}}>{confirm.mode==='purge'?'⚠️ Permanently Remove':'↩ Confirm Restore'}</h2>
-              <button className="close-x" onClick={()=>!busy&&setConfirm(null)}>×</button>
+            <div className="modal-header" style={{background: confirm.mode==='purge'?'#1a0000':'var(--accent-lt,#eef)'}}>
+              <h2 style={{color: confirm.mode==='purge'?'#ff4444':'var(--accent)'}}>{confirm.mode==='purge'?'⚠️ Permanently Delete':'↩ Confirm Restore'}</h2>
+              <button className="close-x" style={confirm.mode==='purge'?{color:'#fff'}:undefined} onClick={()=>!busy&&closeConfirm()}>×</button>
             </div>
             <div className="modal-body">
               <div style={{textAlign:'center',padding:'8px 0'}}>
-                <div style={{fontSize:40,marginBottom:12}}>{confirm.mode==='purge'?'🗑️':'↩'}</div>
+                <div style={{fontSize:confirm.mode==='purge'?48:40,marginBottom:12}}>{confirm.mode==='purge'?'💣':'↩'}</div>
                 {confirm.record ? (
                   <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Restore “{confirm.record.name}”?</div>
                 ) : (
                   <>
-                    <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>{confirm.mode==='purge'?'Permanently remove ':'Restore '}{confirm.mod.label}?</div>
-                    <div style={{fontSize:13,color:'var(--text2)',marginBottom:12}}>{Number(confirm.batch.row_count)} rows · deleted {fmt(confirm.batch.deleted_at)}</div>
+                    <div style={{fontWeight:confirm.mode==='purge'?800:700,fontSize:16,color:confirm.mode==='purge'?'var(--red)':undefined,marginBottom:8}}>{confirm.mode==='purge'?'Permanently delete ':'Restore '}{confirm.mod.label}?</div>
+                    <div style={{fontSize:13,color:'var(--text2)',marginBottom:16}}>{Number(confirm.batch.row_count)} rows · deleted {fmt(confirm.batch.deleted_at)}</div>
                   </>
                 )}
                 {confirm.mode==='purge' && (
-                  <div style={{background:'var(--red-lt)',border:'1px solid var(--red)',borderRadius:'var(--r-sm)',padding:'10px 14px',fontSize:12,color:'var(--red)',fontWeight:600}}>
-                    ⚠️ This cannot be undone. The data will be gone for good.
-                  </div>
+                  <>
+                    <div style={{background:'var(--red-lt)',border:'1px solid var(--red)',borderRadius:'var(--r-sm)',padding:'10px 14px',fontSize:12,color:'var(--red)',fontWeight:600,marginBottom:16}}>
+                      ⚠️ This cannot be undone. The data will be gone for good.
+                    </div>
+                    {purgeStep===1 ? (
+                      <>
+                        <div style={{marginBottom:8,fontSize:12,fontWeight:600,color:'var(--text2)'}}>
+                          Type <code style={{background:'var(--surface2)',padding:'2px 6px',borderRadius:4,color:'var(--red)',fontWeight:800}}>DELETE</code> to confirm:
+                        </div>
+                        <input className="input" value={purgeText} onChange={e=>setPurgeText(e.target.value)}
+                          placeholder="DELETE" autoFocus
+                          style={{textAlign:'center',fontWeight:700,letterSpacing:1,
+                            borderColor: purgeText==='DELETE' ? 'var(--green)' : purgeText ? 'var(--red)' : undefined}} />
+                        {purgeText==='DELETE' && (
+                          <div style={{marginTop:8,fontSize:12,color:'var(--green)',fontWeight:600}}>✅ Confirmation matches — click Continue</div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{fontWeight:800,fontSize:15,color:'var(--red)'}}>Are you sure? This is your final confirmation.</div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
             <div className="modal-footer">
-              <button className="btn" disabled={busy} onClick={()=>setConfirm(null)}>Cancel</button>
-              <button className={'btn '+(confirm.mode==='purge'?'btn-danger':'btn-primary')} disabled={busy}
-                onClick={()=>{
-                  setBusy(true);
-                  if (confirm.mode==='restore') restore.mutate(confirm.batch.id);
-                  else if (confirm.mode==='purge') purge.mutate(confirm.batch.id);
-                  else restoreRecord.mutate({ type:confirm.type, id:confirm.record.id });
-                }}>
-                {busy ? 'Working…' : (confirm.mode==='purge' ? 'Yes, Remove' : 'Yes, Restore')}
+              <button className="btn" disabled={busy} onClick={purgeStep===2 ? ()=>setPurgeStep(1) : closeConfirm}>
+                {purgeStep===2 ? '← Back' : 'Cancel'}
               </button>
+              {confirm.mode==='purge' && purgeStep===1 ? (
+                <button className="btn btn-danger"
+                  disabled={busy || purgeText!=='DELETE'}
+                  style={{fontWeight:700,opacity:(busy||purgeText!=='DELETE')?0.4:1}}
+                  onClick={()=>setPurgeStep(2)}>
+                  Continue →
+                </button>
+              ) : (
+                <button className={'btn '+(confirm.mode==='purge'?'btn-danger':'btn-primary')}
+                  disabled={busy}
+                  style={confirm.mode==='purge'?{fontWeight:700}:undefined}
+                  onClick={()=>{
+                    setBusy(true);
+                    if (confirm.mode==='restore') restore.mutate(confirm.batch.id);
+                    else if (confirm.mode==='purge') purge.mutate(confirm.batch.id);
+                    else restoreRecord.mutate({ type:confirm.type, id:confirm.record.id });
+                  }}>
+                  {busy ? 'Working…' : (confirm.mode==='purge' ? '💣 Yes, Delete Permanently' : 'Yes, Restore')}
+                </button>
+              )}
             </div>
           </div>
         </div>

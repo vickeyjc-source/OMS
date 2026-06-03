@@ -19,10 +19,14 @@ const MODULES = [
 function GlobalTab() {
   const qc = useQueryClient();
   const [confirmMod, setConfirmMod] = useState(null);
+  const [modText, setModText] = useState('');
+  const [modStep, setModStep] = useState(1);
   const [confirmAll, setConfirmAll] = useState(false);
   const [masterText, setMasterText] = useState('');
   const [loading, setLoading] = useState(false);
   const [lastResult, setLastResult] = useState(null);
+
+  const closeMod = () => { setConfirmMod(null); setModText(''); setModStep(1); };
 
   const doModuleDelete = async (key) => {
     setLoading(true);
@@ -32,7 +36,7 @@ function GlobalTab() {
       qc.invalidateQueries();
       toast.success(res.data.label + ' moved to Recycle Bin — ' + res.data.deleted + ' rows (restorable)');
     } catch(e) { toast.error(e.response?.data?.error || 'Delete failed'); }
-    finally { setLoading(false); setConfirmMod(null); }
+    finally { setLoading(false); closeMod(); }
   };
 
   const doMasterDelete = async () => {
@@ -106,23 +110,49 @@ function GlobalTab() {
             <div className="modal modal-sm">
               <div className="modal-header" style={{background:'var(--red-lt)'}}>
                 <h2 style={{color:'var(--red)'}}>⚠️ Confirm Delete</h2>
-                <button className="close-x" onClick={()=>setConfirmMod(null)}>×</button>
+                <button className="close-x" onClick={closeMod}>×</button>
               </div>
               <div className="modal-body">
                 <div style={{textAlign:'center',padding:'8px 0'}}>
                   <div style={{fontSize:40,marginBottom:12}}>{mod.icon}</div>
                   <div style={{fontWeight:700,fontSize:16,marginBottom:8}}>Delete {mod.label}?</div>
                   <div style={{fontSize:13,color:'var(--text2)',marginBottom:16,lineHeight:1.6}}>{mod.desc}</div>
-                  <div style={{background:'var(--green-lt)',border:'1px solid var(--green)',borderRadius:'var(--r-sm)',padding:'10px 14px',fontSize:12,color:'var(--green)',fontWeight:600}}>
+                  <div style={{background:'var(--green-lt)',border:'1px solid var(--green)',borderRadius:'var(--r-sm)',padding:'10px 14px',fontSize:12,color:'var(--green)',fontWeight:600,marginBottom:16}}>
                     ↩ This is reversible — the section moves to the Recycle Bin and can be restored.
                   </div>
+                  {modStep===1 ? (
+                    <>
+                      <div style={{marginBottom:8,fontSize:12,fontWeight:600,color:'var(--text2)'}}>
+                        Type <code style={{background:'var(--surface2)',padding:'2px 6px',borderRadius:4,color:'var(--red)',fontWeight:800}}>DELETE</code> to confirm:
+                      </div>
+                      <input className="input" value={modText} onChange={e=>setModText(e.target.value)}
+                        placeholder="DELETE" autoFocus
+                        style={{textAlign:'center',fontWeight:700,letterSpacing:1,
+                          borderColor: modText==='DELETE' ? 'var(--green)' : modText ? 'var(--red)' : undefined}} />
+                      {modText==='DELETE' && (
+                        <div style={{marginTop:8,fontSize:12,color:'var(--green)',fontWeight:600}}>✅ Confirmation matches — click Continue</div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{fontWeight:800,fontSize:15,color:'var(--red)'}}>Are you sure? This is your final confirmation.</div>
+                  )}
                 </div>
               </div>
               <div className="modal-footer">
-                <button className="btn" onClick={()=>setConfirmMod(null)} disabled={loading}>Cancel</button>
-                <button className="btn btn-danger" disabled={loading} onClick={()=>doModuleDelete(confirmMod)}>
-                  {loading ? 'Deleting…' : '🗑 Yes, Delete ' + mod.label}
+                <button className="btn" disabled={loading} onClick={modStep===2 ? ()=>setModStep(1) : closeMod}>
+                  {modStep===2 ? '← Back' : 'Cancel'}
                 </button>
+                {modStep===1 ? (
+                  <button className="btn btn-danger" disabled={loading || modText!=='DELETE'}
+                    style={{fontWeight:700,opacity:(loading||modText!=='DELETE')?0.4:1}}
+                    onClick={()=>setModStep(2)}>
+                    Continue →
+                  </button>
+                ) : (
+                  <button className="btn btn-danger" disabled={loading} style={{fontWeight:700}} onClick={()=>doModuleDelete(confirmMod)}>
+                    {loading ? 'Deleting…' : '🗑 Yes, Delete ' + mod.label}
+                  </button>
+                )}
               </div>
             </div>
           </div>
