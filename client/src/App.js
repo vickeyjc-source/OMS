@@ -22,7 +22,6 @@ import SettingsPage from './pages/SettingsPage';
 import DeliveryHubPage from './pages/DeliveryHubPage';
 import ApprovalsPage from './pages/ApprovalsPage';
 import ReportsPage from './pages/ReportsPage';
-import SourcingBinPage from './pages/SourcingBinPage';
 import SourcingBinDrawerPage from './pages/SourcingBinDrawerPage';
 import ProcurementBinPage from './pages/ProcurementBinPage';
 import ClosedBinPage from './pages/ClosedBinPage';

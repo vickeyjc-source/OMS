@@ -1154,10 +1154,45 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
       }
     }
   }
+  // Atomically create the quote row when the enquiry is sent to the Quote Bin.
+  // Previously the client made a separate POST /quotes call after this PUT; if that
+  // second request failed in production the enquiry was left marked 'quoted' with no
+  // quote row, so nothing appeared in the Quote Bin. Doing it here keeps the two
+  // writes atomic and consistent with the status change.
+  let createdQuoteNo = null;
+  if (resolvedStatus === 'quoted' && d._action === 'Sent to Quote Bin') {
+    const existingActive = await getAsync(
+      "SELECT id FROM quotes WHERE enquiry_id=? AND status IN ('active','returned_to_sourcing')",
+      [req.params.id]
+    );
+    if (!existingActive) {
+      const fy = financialYear();
+      const prefix = `QT-${fy}-`;
+      const qrows = await allAsync("SELECT quote_no FROM quotes WHERE quote_no LIKE ?", [prefix + '%']);
+      const qnums = qrows.map(r => parseInt((r.quote_no||'').slice(prefix.length))).filter(n => !isNaN(n) && n > 0);
+      // Find next free number, skipping any collisions
+      let next = (qnums.length ? Math.max(...qnums) : 0) + 1;
+      let quoteNo = prefix + String(next).padStart(4, '0');
+      while (await getAsync('SELECT id FROM quotes WHERE quote_no=?', [quoteNo])) {
+        next += 1; quoteNo = prefix + String(next).padStart(4, '0');
+      }
+      try { await runAsync('ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
+      const quoteId = uuid();
+      await runAsync('INSERT INTO quotes(id,enquiry_id,customer_id,quote_no,zoho_quote_no,file_ref,status,valid_until,created_by,created_at,notes,existing_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+        [quoteId, req.params.id, e.customer_id, quoteNo, '', '', 'active', '', req.session.user.id, now, d.quote_notes || '', newExistingOrderId]);
+      try {
+        await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+          [uuid(), req.params.id, `Quote ${quoteNo} created`, req.session.user.name, now]);
+      } catch(_) {}
+      createdQuoteNo = quoteNo;
+    }
+  }
   await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)', [uuid(),req.params.id, d._action||'Enquiry updated', req.session.user.name, now]);
   saveNow();
   const updated = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
-  res.json(await assembleEnquiry(updated));
+  const out = await assembleEnquiry(updated);
+  if (createdQuoteNo) out._created_quote_no = createdQuoteNo;
+  res.json(out);
 }));
 
 // ── QUOTES ───────────────────────────────────────────────────

@@ -728,21 +728,20 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
       });
       const newStatus = (mode === 'quote' || mode === 'return_revision') ? 'quoted' : 'sourcing';
       const action    = mode === 'quote' ? 'Sent to Quote Bin' : mode === 'draft' ? 'Saved as draft in Sourcing' : 'Sourcing saved';
-      await api.put(`/enquiries/${enq.id}`, { sourcing: rowsToSave, charges, status: newStatus, assigned_to: assignTo || null, _action: action });
-      if (mode === 'quote' || mode === 'return_revision') {
-        const srcSummary = rowsToSave.map((r, idx) => { const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx]; if (!item) return null; const srcDisplay = (r.src_price_foreign && r.exchange_rate) ? `${r.sourced_currency} ${r.src_price_foreign} (=₹${r.sourced_price || '—'} @ rate ${r.exchange_rate})` : `₹ ${r.sourced_price || '—'}`; return `${item.component}: Quote ${r.quote_currency} ${r.quote_price || '—'} | Src ${srcDisplay} | Qty ${item.quantity}${srcRevNotes[r.enquiry_item_id] ? ' | Note: ' + srcRevNotes[r.enquiry_item_id] : ''}`; }).filter(Boolean).join('\n');
-        const addlTotal = ['customs','handling','freight','bank','insurance','duty','cess','clearance'].reduce((s, k) => s + (Number(charges[k]) || 0), 0);
-        const fullNotes = srcSummary + (addlTotal > 0 ? `\nAdditional charges: ${JSON.stringify(charges)}` : '');
-        if (mode === 'return_revision' && pendingRevision) {
-          try { await api.put('/quotes/' + pendingRevision.id, { quote_no: pendingRevision.quote_no, zoho_quote_no: pendingRevision.zoho_quote_no || '', file_ref: pendingRevision.file_ref || '', valid_until: pendingRevision.valid_until || '', status: 'active', notes: fullNotes }); toast.success('✅ Prices updated — ' + pendingRevision.quote_no + ' returned to Quote Bin!'); }
-          catch (e) { toast.error('Failed to update revision quote: ' + (e.response?.data?.error || e.message)); }
-        } else {
-          let quoteNo = '';
-          try { const res = await api.get('/next-quote-no'); quoteNo = res.data.quote_no; }
-          catch (_) { const y = new Date().getFullYear(), m = new Date().getMonth() + 1, s = m >= 4 ? y : y - 1; quoteNo = `QT-${String(s).slice(2)}${String(s+1).slice(2)}-${String((quotes||[]).length+1).padStart(4,'0')}`; }
-          try { await api.post('/quotes', { enquiry_id: enq.id, customer_id: enq.customer_id, quote_no: quoteNo, zoho_quote_no: '', file_ref: '', valid_until: '', status: 'active', notes: fullNotes, existing_order_id: enq.existing_order_id || null }); toast.success('✅ Sent to Quote Bin! Quote ' + quoteNo + ' created.'); }
-          catch (qErr) { console.warn('Quote auto-create skipped:', qErr.response?.data?.error); toast.success('Sourcing saved — check Quote Bin'); }
-        }
+      const srcSummary = rowsToSave.map((r, idx) => { const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx]; if (!item) return null; const srcDisplay = (r.src_price_foreign && r.exchange_rate) ? `${r.sourced_currency} ${r.src_price_foreign} (=₹${r.sourced_price || '—'} @ rate ${r.exchange_rate})` : `₹ ${r.sourced_price || '—'}`; return `${item.component}: Quote ${r.quote_currency} ${r.quote_price || '—'} | Src ${srcDisplay} | Qty ${item.quantity}${srcRevNotes[r.enquiry_item_id] ? ' | Note: ' + srcRevNotes[r.enquiry_item_id] : ''}`; }).filter(Boolean).join('\n');
+      const addlTotal = ['customs','handling','freight','bank','insurance','duty','cess','clearance'].reduce((s, k) => s + (Number(charges[k]) || 0), 0);
+      const fullNotes = srcSummary + (addlTotal > 0 ? `\nAdditional charges: ${JSON.stringify(charges)}` : '');
+      // For a first-time quote the server creates the quote row atomically as part of
+      // this PUT (when _action === 'Sent to Quote Bin'), so we no longer make a separate
+      // POST /quotes call — that two-step flow could leave the enquiry marked 'quoted'
+      // with no quote row if the second request failed (production Quote Bin showing empty).
+      const putRes = await api.put(`/enquiries/${enq.id}`, { sourcing: rowsToSave, charges, status: newStatus, assigned_to: assignTo || null, _action: action, quote_notes: (mode === 'quote' ? fullNotes : undefined) });
+      if (mode === 'return_revision' && pendingRevision) {
+        try { await api.put('/quotes/' + pendingRevision.id, { quote_no: pendingRevision.quote_no, zoho_quote_no: pendingRevision.zoho_quote_no || '', file_ref: pendingRevision.file_ref || '', valid_until: pendingRevision.valid_until || '', status: 'active', notes: fullNotes }); toast.success('✅ Prices updated — ' + pendingRevision.quote_no + ' returned to Quote Bin!'); }
+        catch (e) { toast.error('Failed to update revision quote: ' + (e.response?.data?.error || e.message)); }
+      } else if (mode === 'quote') {
+        const qNo = putRes?.data?._created_quote_no;
+        toast.success(qNo ? '✅ Sent to Quote Bin! Quote ' + qNo + ' created.' : '✅ Sent to Quote Bin!');
       } else if (mode === 'draft') { toast.success('Saved as draft'); }
       else { toast.success('Sourcing saved'); }
       if (mode === 'quote' || mode === 'return_revision' || mode === 'draft') { onSaved(); }
