@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import api from '../utils/api';
-import { StatusBadge } from '../utils/helpers';
+import { StatusBadge, fmtDateTime } from '../utils/helpers';
 import { printDoc, generateEnquiryPDF } from '../utils/pdfUtils';
 import toast from 'react-hot-toast';
 
@@ -84,7 +84,7 @@ export default function EnquiryDetailPage() {
             </h1>
             <div style={{fontSize:13,color:'var(--text3)',marginTop:3}}>
               <strong style={{color:'var(--text)'}}>{custName(enq.customer_id)}</strong>
-              {' · '}Created {enq.created_at}
+              {' · '}Created {fmtDateTime(enq.created_at)}
               {' · '}Priority: <strong>{enq.priority}</strong>
               {enq.buying_type && <> · Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></>}
             </div>

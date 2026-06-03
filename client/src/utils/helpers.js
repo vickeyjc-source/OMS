@@ -8,11 +8,29 @@ export const maskName = n => {
 export const fmt = n => new Intl.NumberFormat('en-IN').format(n||0);
 export const fmtCur = (n, c='INR') => c==='USD'?`$${fmt(n)}`:c==='EUR'?`€${fmt(n)}`:c==='GBP'?`£${fmt(n)}`:`₹${fmt(n)}`;
 export const today = () => new Date().toISOString().slice(0,10);
+// Server stores timestamps as UTC in "YYYY-MM-DD HH:MM[:SS]" form (no Z).
+// Parse those as UTC, then always render in IST (Asia/Kolkata).
+const parseUtc = (s) => {
+  if (s instanceof Date) return s;
+  const str = String(s);
+  // Bare "YYYY-MM-DD HH:MM..." (no timezone) → treat as UTC by appending Z.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(str) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(str)) {
+    return new Date(str.replace(' ', 'T') + 'Z');
+  }
+  return new Date(str);
+};
 export const fmtDateTime = (s) => {
   if (!s) return '—';
-  const d = new Date(s);
+  const d = parseUtc(s);
   if (isNaN(d)) return s;
-  return d.toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+  return d.toLocaleString('en-IN', { timeZone:'Asia/Kolkata', day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:false });
+};
+// Date-only render in IST (for timestamp fields shown without time).
+export const fmtDate = (s) => {
+  if (!s) return '—';
+  const d = parseUtc(s);
+  if (isNaN(d)) return s;
+  return d.toLocaleDateString('en-IN', { timeZone:'Asia/Kolkata', day:'2-digit', month:'short', year:'numeric' });
 };
 export const orderTotal = o => (o.lineItems||[]).reduce((s,i)=>s+(i.qty*i.unit_price),0);
 export const isDelayed = o => {
@@ -126,7 +144,7 @@ export const RoleBadge = ({ role }) => {
 // using updated_at (falls back to created_at if not available)
 export const daysInStage = (updatedAt) => {
   if (!updatedAt) return null;
-  const d = new Date(updatedAt.replace(' ', 'T'));
+  const d = parseUtc(updatedAt);
   if (isNaN(d)) return null;
   return Math.floor((Date.now() - d.getTime()) / 86400000);
 };

@@ -186,7 +186,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
             {perms.canSeeCustomer!==false && (
               <div style={{marginTop:4,display:'flex',alignItems:'baseline',gap:8}}>
                 <span style={{fontSize:18,fontWeight:800,color:'var(--text)'}}>{custName(order.customer_id)}</span>
-                <span style={{fontSize:11,color:'var(--text3)'}}>· Created {order.created_at}</span>
+                <span style={{fontSize:11,color:'var(--text3)'}}>· Created {fmtDateTime(order.created_at)}</span>
               </div>
             )}
           </div>
@@ -486,7 +486,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                   {l:'Quote',      v:order.quote_no,      mono:true},
                   {l:'Delivery',   v:order.tentative_date,color:isDelayed(order)?'var(--red)':undefined, suffix:isDelayed(order)?' ⚠':''},
                   {l:'Status',     v:null, badge:true},
-                  {l:'Created',    v:order.created_at},
+                  {l:'Created',    v:fmtDateTime(order.created_at)},
                 ].map(f=>(
                   <div key={f.l}>
                     <div style={{fontSize:10,color:'var(--text3)',fontWeight:700,marginBottom:2}}>{f.l.toUpperCase()}</div>

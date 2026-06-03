@@ -27,7 +27,7 @@ function EnquiryDetailModal({ enq, onClose, customers, suppliers, linecards, use
           <div>
             <h2>{enq.id} — {custName(enq.customer_id)}</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              Created {enq.created_at} · Priority: <strong>{enq.priority}</strong>
+              Created {fmtDateTime(enq.created_at)} · Priority: <strong>{enq.priority}</strong>
               {enq.buying_type && <> · Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></>}
               {enq.sourcing_no && <> · Sourcing: <span className="mono" style={{color:'var(--accent)'}}>{enq.sourcing_no}</span></>}
             </div>

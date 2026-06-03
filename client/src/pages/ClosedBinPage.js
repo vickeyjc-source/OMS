@@ -3,8 +3,8 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import { fmtDate as fmt } from '../utils/helpers';
 
-const fmt    = d => d ? new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—';
 const fmtNum = n => new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(n||0);
 
 export default function ClosedBinPage() {

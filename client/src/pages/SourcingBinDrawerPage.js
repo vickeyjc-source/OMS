@@ -194,7 +194,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
               {item.preferred_delivery_date && (
                 <span style={{ fontSize: 11, color: 'var(--text2)', display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
                   <span>📅</span>
-                  {new Date(item.preferred_delivery_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                  {new Date(item.preferred_delivery_date).toLocaleDateString('en-IN', { timeZone:'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric' })}
                 </span>
               )}
               {Number(item.target_price) > 0 && (
@@ -1279,7 +1279,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         {item.preferred_delivery_date && <>
                           <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap' }}>PROMISE DATE</span>
                           <div style={{ height:28, fontSize:11, padding:'2px 10px', background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'var(--r-sm)', fontWeight:700, color:'#1d4ed8', display:'flex', alignItems:'center', whiteSpace:'nowrap' }}>
-                            📅 {new Date(item.preferred_delivery_date).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' })}
+                            📅 {new Date(item.preferred_delivery_date).toLocaleDateString('en-IN', { timeZone:'Asia/Kolkata', day:'2-digit', month:'short', year:'numeric' })}
                           </div>
                         </>}
 

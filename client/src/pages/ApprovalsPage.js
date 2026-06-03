@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { DEPARTMENTS, DEPT_LABEL } from '../utils/helpers';
+import { DEPARTMENTS, DEPT_LABEL, fmtDateTime } from '../utils/helpers';
 
 function WorkflowModal({ wf, onClose }) {
   const qc = useQueryClient();
@@ -101,7 +101,7 @@ export default function ApprovalsPage() {
           {requests.filter(r=>r.status==='pending').map(r=>(
             <div key={r.id} className="sup-block" style={{marginBottom:8}}>
               <div className="flex-between" style={{marginBottom:5}}>
-                <div><span className="bold" style={{fontSize:12}}>{r.entity_type}: {r.entity_id}</span><div style={{fontSize:11,color:'var(--text3)'}}>Requested {r.requested_at}</div></div>
+                <div><span className="bold" style={{fontSize:12}}>{r.entity_type}: {r.entity_id}</span><div style={{fontSize:11,color:'var(--text3)'}}>Requested {fmtDateTime(r.requested_at)}</div></div>
                 <span className="badge badge-amber">Step {r.current_step + 1}</span>
               </div>
             </div>

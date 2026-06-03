@@ -5,14 +5,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { StatusBadge } from '../utils/helpers';
+import { StatusBadge, fmtDate } from '../utils/helpers';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtM = (n, c='INR') => {
   const sym = {INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'};
   return (sym[c]||c+' ')+(parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
 };
-const fmtDate = d => d ? new Date(d).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—';
 const today   = () => new Date().toISOString().slice(0,10);
 const daysDiff = d => d ? Math.floor((new Date(d)-new Date())/(1000*86400)) : null;
 

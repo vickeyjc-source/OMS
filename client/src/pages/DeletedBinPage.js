@@ -6,7 +6,7 @@ import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import ActivityLog from '../components/ActivityLog';
 
-const fmt = d => d ? new Date(String(d).replace(' ','T')+'Z').toLocaleString('en-IN',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+const fmt = d => d ? new Date(String(d).replace(' ','T')+'Z').toLocaleString('en-IN',{timeZone:'Asia/Kolkata',day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
 
 // Section cards (Global tab) — mirror the Danger Zone, restore wording.
 const MODULES = [
