@@ -14,6 +14,8 @@ export default function EnquiryDetailPage() {
   const [historyOpen, setHistoryOpen]       = useState(false);
   const [submitting, setSubmitting]         = useState(false);
   const [confirmSubmit, setConfirmSubmit]   = useState(false);
+  const [editPriority, setEditPriority]     = useState(null);
+  const [savingPriority, setSavingPriority] = useState(false);
 
   const submitToSourcing = async () => {
     setConfirmSubmit(false);
@@ -28,6 +30,22 @@ export default function EnquiryDetailPage() {
       toast.error(e.response?.data?.error || 'Submit failed');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const savePriority = async () => {
+    if (!editPriority || editPriority === enq?.priority) { setEditPriority(null); return; }
+    setSavingPriority(true);
+    try {
+      const updated = await api.put('/enquiries/' + id, { priority: editPriority, _action: `Priority changed to ${editPriority}` }).then(r => r.data);
+      qc.setQueryData(['enquiry', id], updated);
+      qc.invalidateQueries(['enquiries']);
+      toast.success('Priority updated!');
+      setEditPriority(null);
+    } catch(err) {
+      toast.error(err.response?.data?.error || 'Failed to update priority');
+    } finally {
+      setSavingPriority(false);
     }
   };
 
@@ -58,6 +76,8 @@ export default function EnquiryDetailPage() {
   const charges     = enq.charges || {};
   const hasCharges  = (Number(charges.customs)||0)+(Number(charges.handling)||0)+(Number(charges.freight)||0)+(Number(charges.bank)||0) > 0;
   const customer    = customers.find(c => c.id === enq.customer_id);
+  const currentPriority = editPriority !== null ? editPriority : enq.priority;
+  const priorityChanged = editPriority !== null && editPriority !== enq.priority;
 
   return (
     <div style={{maxWidth:1400}}>
@@ -82,11 +102,47 @@ export default function EnquiryDetailPage() {
                 </span>
               )}
             </h1>
-            <div style={{fontSize:13,color:'var(--text3)',marginTop:3}}>
+            <div style={{fontSize:13,color:'var(--text3)',marginTop:3,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
               <strong style={{color:'var(--text)'}}>{custName(enq.customer_id)}</strong>
-              {' · '}Created {fmtDateTime(enq.created_at)}
-              {' · '}Priority: <strong>{enq.priority}</strong>
-              {enq.buying_type && <> · Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></>}
+              <span>·</span>
+              <span>Created {fmtDateTime(enq.created_at)}</span>
+              <span>·</span>
+              <span style={{display:'flex',alignItems:'center',gap:5}}>
+                <span>Priority:</span>
+                <select
+                  className="input"
+                  style={{
+                    padding:'2px 8px',fontSize:12,height:26,minWidth:90,
+                    fontWeight:700,
+                    color: currentPriority==='urgent' ? 'var(--red)' : currentPriority==='high' ? '#d97706' : 'var(--text2)',
+                    borderColor: priorityChanged ? 'var(--accent)' : undefined,
+                    background: priorityChanged ? 'var(--accent-lt)' : undefined,
+                  }}
+                  value={currentPriority}
+                  onChange={e => setEditPriority(e.target.value)}
+                >
+                  <option value="normal">Normal</option>
+                  <option value="high">High</option>
+                  <option value="urgent">Urgent</option>
+                </select>
+                {priorityChanged && (
+                  <>
+                    <button className="btn btn-sm btn-primary"
+                      disabled={savingPriority}
+                      onClick={savePriority}
+                      style={{fontSize:11,padding:'2px 10px',height:26,fontWeight:700}}>
+                      {savingPriority ? 'Saving…' : '✓ Update'}
+                    </button>
+                    <button className="btn btn-sm"
+                      disabled={savingPriority}
+                      onClick={() => setEditPriority(null)}
+                      style={{fontSize:11,padding:'2px 8px',height:26}}>
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </span>
+              {enq.buying_type && <><span>·</span> <span>Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></span></>}
             </div>
           </div>
         </div>
