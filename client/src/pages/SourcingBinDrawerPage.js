@@ -940,7 +940,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
             {/* Single unified grid — heading always visible, same columns always */}
             {/* Columns: # | MPN | Manufacturer | Supplier | Qty | HSN | Lead Time | Src Price | Margin | Quote/Unit | Quote Total | GST | Quote+GST | action */}
-            <div style={{ display:'grid', gridTemplateColumns:'24px 1fr 0.5fr 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
+            <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
               {[
                 {l:'#',          align:'center'},
                 {l:'MPN',        align:'center'},
@@ -1057,19 +1057,19 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 <div key={item.id} style={{ borderTop:'1px solid var(--border)', background: rowLocked ? '#f8fafc' : mrow.aboveTarget ? '#fff5f5' : '#fff' }}>
 
                   {/* ── Main row grid ── */}
-                  <div style={{ display:'grid', gridTemplateColumns:'24px 1fr 0.5fr 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', alignItems:'center' }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', alignItems:'start' }}>
 
                     {/* # */}
-                    <div style={{ fontSize:13, fontWeight:700, color:'var(--text3)', textAlign:'center' }}>{idx+1}</div>
+                    <div style={{ fontSize:13, fontWeight:700, color:'var(--text3)', textAlign:'center', paddingTop:8 }}>{idx+1}</div>
 
                     {/* MPN */}
-                    <div style={{ textAlign:'center' }}>
-                      <div style={{ fontWeight:800, fontSize:13, color:'var(--accent)', letterSpacing:'-.01em' }}>{item.component}</div>
-                      {item.ipn && <div style={{ fontSize:9, fontFamily:'monospace', color:'#9ca3af' }}>IPN: {item.ipn}</div>}
+                    <div style={{ textAlign:'center', paddingTop:6 }}>
+                      <div style={{ fontWeight:800, fontSize:13, color:'var(--accent)', letterSpacing:'-.01em', wordBreak:'break-all', whiteSpace:'normal', lineHeight:1.3 }}>{item.component}</div>
+                      {item.ipn && <div style={{ fontSize:9, fontFamily:'monospace', color:'#9ca3af', wordBreak:'break-all' }}>IPN: {item.ipn}</div>}
                     </div>
 
                     {/* Manufacturer */}
-                    <div style={{ fontSize:13, color:'var(--text2)', textAlign:'center' }}>{item.manufacturer||'—'}</div>
+                    <div style={{ fontSize:13, color:'var(--text2)', textAlign:'center', wordBreak:'break-word', whiteSpace:'normal', lineHeight:1.3, paddingTop:6 }}>{item.manufacturer||'—'}</div>
 
                     {/* Supplier dropdown — always */}
                     <select {...inp} value={row.supplier_id||''} disabled={isReadOnly || rowLocked}
