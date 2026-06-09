@@ -8,10 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { StatusBadge, fmtDate } from '../utils/helpers';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const fmtM = (n, c='INR') => {
-  const sym = {INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'};
-  return (sym[c]||c+' ')+(parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
-};
+const fmtM = (n) => '₹' + (parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const today   = () => new Date().toISOString().slice(0,10);
 const daysDiff = d => d ? Math.floor((new Date(d)-new Date())/(1000*86400)) : null;
 

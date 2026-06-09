@@ -91,16 +91,15 @@ function POProgressTracker({ status, paymentTermsType }) {
   );
 }
 
-function fmtM(n,c='INR'){
-  const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£',AED:'AED '};
+function fmtM(n){
   const v=parseFloat(n);
-  if (!Number.isFinite(v)) return (s[c]||c+' ') + '0';
+  if (!Number.isFinite(v)) return '₹0';
 
   // Keep precision up to 4 decimals but strip trailing zeros (e.g. 90.0000 -> 90)
   const normalized = v.toFixed(4).replace(/\.0+$/,'').replace(/(\.\d*?)0+$/,'$1');
   const [ip, dp] = normalized.split('.');
   const intFmt = Number(ip).toLocaleString('en-IN');
-  return (s[c]||c+' ') + (dp ? `${intFmt}.${dp}` : intFmt);
+  return '₹' + (dp ? `${intFmt}.${dp}` : intFmt);
 }
 
 function getSourcedSupplierId(lineItem, enquiry) {
@@ -469,7 +468,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                       </td>
                       <td style={{textAlign:'right',fontWeight:600}}>{li.qty}</td>
                       <td className="mono" style={{textAlign:'right'}}>
-  {fmtCur(li.unit_price,li.currency)}
+  {fmtM(li.unit_price)}
 </td>
                       {/* Target price */}
                       <td style={{fontSize:11}}>
@@ -486,7 +485,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                       </td>
                       <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace'}}>
                         {Number(li.tax_rate)>0
-                          ? fmtCur((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100), li.currency)
+                          ? fmtM((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100))
                           : <span style={{color:'var(--text3)'}}>—</span>}
                       </td>
                       {/* Sourcing context */}
@@ -1053,7 +1052,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               {poItems.map(li=>(
                 <div key={li.id} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',borderBottom:'0.5px solid var(--border)'}}>
                   <span style={{fontWeight:600}}>{li.component}</span>
-                  <span style={{color:'var(--text2)'}}>Qty: {li.qty} · {fmtCur(li.unit_price,li.currency)}</span>
+                  <span style={{color:'var(--text2)'}}>Qty: {li.qty} · {fmtM(li.unit_price)}</span>
                 </div>
               ))}
               {cost>0&&custTotal>0&&(
@@ -1545,7 +1544,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td>{fmt(li.qty)}</td>
                       {/* Customer price */}
-                      <td className="mono" style={{fontWeight:600}}>{fmtCur(li.unit_price,li.currency)}</td>
+                      <td className="mono" style={{fontWeight:600}}>{fmtM(li.unit_price)}</td>
                       {/* Target price from enquiry item */}
                       <td style={{fontSize:11,color:'var(--text2)'}}>
                         {(() => {
@@ -1565,7 +1564,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>
                         {Number(li.tax_rate)>0
-                          ? fmtCur((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100), li.currency)
+                          ? fmtM((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100))
                           : <span style={{color:'var(--text3)'}}>—</span>}
                       </td>
                       {/* Sourced from */}
