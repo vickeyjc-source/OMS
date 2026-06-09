@@ -1600,11 +1600,10 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       <td>{(()=>{
                         const srcPrice   = Number(srcRow?.sourced_price) || 0;
                         const quotePrice = Number(srcRow?.quote_price)   || 0;
-                        const marginPct  = Number(srcRow?.margin_pct)    || 0;
                         if (!srcPrice || !quotePrice) return <span style={{color:'var(--text3)'}}>—</span>;
                         const grossUnit  = quotePrice - srcPrice;
                         const grossTotal = grossUnit * (li.qty||0);
-                        const grossPct   = srcPrice > 0 ? (marginPct / srcPrice * 100) : 0;
+                        const grossPct   = quotePrice > 0 ? (grossUnit / quotePrice * 100) : 0;
                         const col = grossPct < 0  ? '#dc2626'
                                   : grossPct <= 10 ? '#d97706'
                                   : grossPct <= 15 ? '#16a34a'
