@@ -631,22 +631,33 @@ app.get('/api/sections', adminOnly, sectionGate('users'), (req, res) => {
   res.json(SECTION_DEFINITIONS);
 });
 
-app.use('/api/customers', auth, sectionGate('customers'));
-app.use('/api/linecards', auth, sectionGate('linecards'));
-app.use('/api/suppliers', auth, sectionGate('suppliers'));
-app.use('/api/enquiries', auth, sectionGate('enquiries'));
-app.use('/api/quotes', auth, sectionGate('quotes'));
-app.use('/api/orders', auth, sectionGateAny(['orders', 'procurement-bin']));
-app.use('/api/approvals', auth, sectionGate('approvals'));
-app.use('/api/inventory', auth, sectionGate('inventory'));
-app.use('/api/settings', auth, sectionGate('settings'));
-app.use('/api/finance', auth, sectionGate('finance'));
-app.use('/api/finance-queue', auth, sectionGate('finance'));
+const SECTION_API_ACCESS = {
+  customers: ['customers', 'dashboard', 'enquiries', 'new-enquiry', 'quotes', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'reports'],
+  linecards: ['linecards', 'enquiries', 'new-enquiry', 'suppliers', 'inventory'],
+  suppliers: ['suppliers', 'enquiries', 'new-enquiry', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'reports'],
+  enquiries: ['enquiries', 'new-enquiry', 'quotes', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'reports'],
+  quotes: ['quotes', 'orders', 'new-order', 'sourcing-bin', 'reports'],
+  orders: ['orders', 'new-order', 'quotes', 'procurement-bin', 'delivery-hub', 'finance', 'closed-bin', 'reports', 'dashboard'],
+  approvals: ['approvals'],
+  inventory: ['inventory', 'sourcing-bin', 'procurement-bin', 'finance'],
+  settings: ['settings', 'procurement-bin', 'finance'],
+  finance: ['finance', 'reports'],
+};
+
+app.use('/api/customers', auth, sectionGateAny(SECTION_API_ACCESS.customers));
+app.use('/api/linecards', auth, sectionGateAny(SECTION_API_ACCESS.linecards));
+app.use('/api/suppliers', auth, sectionGateAny(SECTION_API_ACCESS.suppliers));
+app.use('/api/enquiries', auth, sectionGateAny(SECTION_API_ACCESS.enquiries));
+app.use('/api/quotes', auth, sectionGateAny(SECTION_API_ACCESS.quotes));
+app.use('/api/orders', auth, sectionGateAny(SECTION_API_ACCESS.orders));
+app.use('/api/approvals', auth, sectionGateAny(SECTION_API_ACCESS.approvals));
+app.use('/api/inventory', auth, sectionGateAny(SECTION_API_ACCESS.inventory));
+app.use('/api/settings', auth, sectionGateAny(SECTION_API_ACCESS.settings));
+app.use('/api/finance', auth, sectionGateAny(SECTION_API_ACCESS.finance));
+app.use('/api/finance-queue', auth, sectionGateAny(SECTION_API_ACCESS.finance));
 
 // ── CUSTOMERS ────────────────────────────────────────────────
 app.get('/api/customers', auth, asyncRoute(async (req, res) => {
-  const perms = getPerms(req.session.user);
-  if (!perms.canSeeCustomer) return res.status(403).json({ error: 'Access denied' });
   const includeDeleted = req.query.include_deleted === '1' || req.query.include_deleted === 'true';
   const where = includeDeleted ? '' : "WHERE status != 'deleted'";
   const rows = await allAsync(`SELECT * FROM customers ${where} ORDER BY created DESC`);
