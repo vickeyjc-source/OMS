@@ -7,6 +7,7 @@ import { fmt, fmtCur, orderTotal, isDelayed, StatusBadge, DaysBadge, fmtDateTime
 import { printDoc, generateOrderPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
+import { canAccessSection } from '../utils/sections';
 
 const LINE_STATUS_BADGE = { negotiating:'badge-purple', confirmed:'badge-purple', procurement:'badge-blue', payment:'badge-amber', shipped:'badge-teal', partial_shipped:'badge-teal', delivered_hub:'badge-teal', ready_to_ship:'badge-green', grn_partial:'badge-amber', grn_rejected:'badge-red', delivered:'badge-green', delivered_customer:'badge-green' };
 
@@ -75,7 +76,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const { user } = useAuth();
   const qc = useQueryClient();
   const perms = user.perms || {};
-  const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
+  const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || canAccessSection(user, 'procurement-bin');
   const canSeeProcPrice = perms.canSeeProcurementPrice !== false;
   const [editSection, setEditSection] = useState(null);
 
@@ -798,7 +799,7 @@ function EditSupplierOrders({ order, shippers, onSave, onCancel }) {
 function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh, viewOnly = false }) {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || user.department === 'procurement';
+  const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || canAccessSection(user, 'procurement-bin');
   const canSeeProcPrice = (user.perms?.canSeeProcurementPrice) !== false;
   const custName = id => customers.find(c=>c.id===id)?.name || id;
 

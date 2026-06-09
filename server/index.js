@@ -349,6 +349,19 @@ function sectionGate(sectionKey) {
   };
 }
 
+function sectionGateAny(sectionKeys) {
+  return async (req, res, next) => {
+    try {
+      for (const sectionKey of sectionKeys) {
+        if (await canAccessSection(req.session.user, sectionKey)) return next();
+      }
+      return res.status(403).json({ error: 'Section access denied' });
+    } catch (e) {
+      next(e);
+    }
+  };
+}
+
 // Dept permissions
 const DEPT_PERMS = {
   management:  { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
@@ -623,7 +636,7 @@ app.use('/api/linecards', auth, sectionGate('linecards'));
 app.use('/api/suppliers', auth, sectionGate('suppliers'));
 app.use('/api/enquiries', auth, sectionGate('enquiries'));
 app.use('/api/quotes', auth, sectionGate('quotes'));
-app.use('/api/orders', auth, sectionGate('orders'));
+app.use('/api/orders', auth, sectionGateAny(['orders', 'procurement-bin']));
 app.use('/api/approvals', auth, sectionGate('approvals'));
 app.use('/api/inventory', auth, sectionGate('inventory'));
 app.use('/api/settings', auth, sectionGate('settings'));
@@ -1488,7 +1501,8 @@ app.get('/api/orders/next-id', auth, asyncRoute(async (req, res) => {
 app.get('/api/orders', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
-  const orders = perms.canSeeAll
+  const canUseProcurementBin = await canAccessSection(u, 'procurement-bin');
+  const orders = (perms.canSeeAll || canUseProcurementBin)
     ? await allAsync('SELECT * FROM orders ORDER BY created_at DESC')
     : await allAsync('SELECT * FROM orders WHERE created_by=? ORDER BY created_at DESC', [u.id]);
   res.json(await Promise.all(orders.map(o => assembleOrder(o).then(a => stripSensitive(a, u)))));
@@ -1565,8 +1579,8 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
   // Only creator, admin, or procurement can edit
-  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || u.department === 'procurement';
-  if (!canEdit) return res.status(403).json({ error: 'Only the order creator or procurement team can edit orders' });
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || await canAccessSection(u, 'procurement-bin');
+  if (!canEdit) return res.status(403).json({ error: 'Only the order creator or procurement bin users can edit orders' });
 
   const d = req.body;
 
