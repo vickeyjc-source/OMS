@@ -373,9 +373,18 @@ const DEPT_PERMS = {
   approvers:   { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
 };
 function getPerms(user) { return DEPT_PERMS[user.department] || DEPT_PERMS.sales; }
+const ORDER_FULL_ACCESS_SECTIONS = ['dashboard','orders','new-order','quotes','procurement-bin','delivery-hub','finance','closed-bin','reports'];
+const ENQUIRY_FULL_ACCESS_SECTIONS = ['enquiries','new-enquiry','quotes','orders','new-order','sourcing-bin','procurement-bin','reports'];
+function hasAllowedSection(user, allowedSections, sectionKeys) {
+  if (!user) return false;
+  if (user.role === 'admin') return true;
+  if (!Array.isArray(allowedSections)) return false;
+  return sectionKeys.some(key => allowedSections.includes(key));
+}
 
 // Strip procurement prices for sales/logistics
-function stripSensitive(order, user) {
+function stripSensitive(order, user, allowedSections = []) {
+  if (hasAllowedSection(user, allowedSections, ORDER_FULL_ACCESS_SECTIONS)) return order;
   const perms = getPerms(user);
   if (!perms.canSeeProcurementPrice) {
     return {
@@ -999,8 +1008,9 @@ app.put('/api/shippers/:id', auth, asyncRoute(async (req, res) => {
 app.get('/api/enquiries', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
+  const allowedSections = await getAllowedSections(u);
   let enqs;
-  if (perms.canSeeAll || ['sourcing','procurement'].includes(u.department)) {
+  if (perms.canSeeAll || hasAllowedSection(u, allowedSections, ENQUIRY_FULL_ACCESS_SECTIONS)) {
     enqs = await allAsync('SELECT * FROM enquiries ORDER BY created_at DESC');
   } else {
     enqs = await allAsync('SELECT * FROM enquiries WHERE created_by=? OR assigned_to=? ORDER BY created_at DESC', [u.id, u.id]);
@@ -1512,16 +1522,17 @@ app.get('/api/orders/next-id', auth, asyncRoute(async (req, res) => {
 app.get('/api/orders', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
-  const canUseProcurementBin = await canAccessSection(u, 'procurement-bin');
-  const orders = (perms.canSeeAll || canUseProcurementBin)
+  const allowedSections = await getAllowedSections(u);
+  const orders = (perms.canSeeAll || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS))
     ? await allAsync('SELECT * FROM orders ORDER BY created_at DESC')
     : await allAsync('SELECT * FROM orders WHERE created_by=? ORDER BY created_at DESC', [u.id]);
-  res.json(await Promise.all(orders.map(o => assembleOrder(o).then(a => stripSensitive(a, u)))));
+  res.json(await Promise.all(orders.map(o => assembleOrder(o).then(a => stripSensitive(a, u, allowedSections)))));
 }));
 app.get('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   const o = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!o) return res.status(404).json({ error: 'Not found' });
-  res.json(stripSensitive(await assembleOrder(o), req.session.user));
+  const allowedSections = await getAllowedSections(req.session.user);
+  res.json(stripSensitive(await assembleOrder(o), req.session.user, allowedSections));
 }));
 app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const d = req.body;
@@ -1589,9 +1600,10 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   if (!o) return res.status(404).json({ error: 'Not found' });
   const u = req.session.user;
   const perms = getPerms(u);
+  const allowedSections = await getAllowedSections(u);
   // Only creator, admin, or procurement can edit
-  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || await canAccessSection(u, 'procurement-bin');
-  if (!canEdit) return res.status(403).json({ error: 'Only the order creator or procurement bin users can edit orders' });
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS);
+  if (!canEdit) return res.status(403).json({ error: 'Only the order creator or assigned order-section users can edit orders' });
 
   const d = req.body;
 
@@ -1696,7 +1708,7 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   }
   saveNow();
   const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
-  res.json(stripSensitive(await assembleOrder(updatedOrder), u));
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
 }));
 app.delete('/api/orders/:id', adminOnly, asyncRoute(async (req, res) => {
   await runAsync('DELETE FROM orders WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
