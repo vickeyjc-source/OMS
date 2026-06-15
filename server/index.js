@@ -3064,6 +3064,7 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
   const { records = [], credit_note_no: cnNoInput } = req.body;
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!Array.isArray(records)) return res.status(400).json({ error: 'Invalid GRN records' });
   const now = nowStr();
 
   let grnNo;
@@ -3074,40 +3075,79 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     grnNo = 'GRN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0');
   } catch(_) { grnSeq = 1; grnNo = 'GRN-' + req.params.id + '-01'; }
 
-  let allFull = true;
-  let anyReceived = false;
+  const acceptedRecords = [];
+  const seenItemIds = new Set();
   let anyShort = false;
+
+  // Validate the complete request before inserting anything. A balance GRN may
+  // only receive the quantity still outstanding for an order line.
   for (const r of records) {
-    const li = await getAsync('SELECT * FROM order_items WHERE id=?', [r.order_item_id]);
-    if (!li) continue;
+    if (!r?.order_item_id || seenItemIds.has(r.order_item_id)) {
+      return res.status(400).json({ error: 'Each GRN line item must be unique' });
+    }
+    seenItemIds.add(r.order_item_id);
+    const li = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [r.order_item_id, req.params.id]);
+    if (!li) return res.status(400).json({ error: 'Invalid GRN line item' });
     const qty = parseInt(r.qty_received) || 0;
-    if (qty > 0) anyReceived = true;
+    if (qty <= 0) continue;
     const totalRecSoFar = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id]);
     const prevRcvd = parseInt(totalRecSoFar?.t || 0);
-    if (prevRcvd + qty < li.qty) anyShort = true;
-    try {
-      await runAsync(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at,credit_note_no)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), req.params.id, r.order_item_id, r.supplier_id||'', r.coo||'',
-         r.date_code||'', r.lot_number||'', r.weight_kg||null, qty,
-         r.condition||'good', r.arrived_date||now.slice(0,10), r.notes||'',
-         req.session.user.id, now, cnNoInput||'']);
-    } catch(_) {}
-    if (qty > 0) {
-      const totalRecRow = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id]);
-      const totalRec = parseInt(totalRecRow?.t || 0);
-      if (totalRec < li.qty) allFull = false;
-      const lineStatus = totalRec >= li.qty ? 'ready_to_ship' : 'grn_partial';
-      await runAsync('UPDATE order_items SET line_status=? WHERE id=?', [lineStatus, r.order_item_id]);
-    } else {
-      allFull = false;
+    const remaining = Math.max(0, li.qty - prevRcvd);
+    if (remaining === 0) return res.status(400).json({ error: `${li.component || 'Item'} is already fully received` });
+    if (qty > remaining) return res.status(400).json({ error: `${li.component || 'Item'} can receive at most ${remaining}` });
+    const condition = String(r.condition || 'good').trim().toLowerCase();
+    if (!['good','partial','damaged','rejected'].includes(condition)) {
+      return res.status(400).json({ error: `Invalid condition for ${li.component || 'item'}` });
     }
+    if (prevRcvd + qty < li.qty) anyShort = true;
+    const weight = r.weight_kg === '' || r.weight_kg == null ? null : Number(r.weight_kg);
+    if (weight != null && (!Number.isFinite(weight) || weight < 0)) {
+      return res.status(400).json({ error: `Invalid weight for ${li.component || 'item'}` });
+    }
+    acceptedRecords.push({
+      ...r,
+      qty_received: qty,
+      supplier_id: String(r.supplier_id || '').trim(),
+      coo: String(r.coo || '').trim().toUpperCase().slice(0, 3),
+      date_code: String(r.date_code || '').trim().slice(0, 30),
+      lot_number: String(r.lot_number || '').trim().slice(0, 100),
+      notes: String(r.notes || '').trim().slice(0, 500),
+      condition,
+      weight_kg: weight,
+      arrived_date: /^\d{4}-\d{2}-\d{2}$/.test(String(r.arrived_date || ''))
+        ? String(r.arrived_date)
+        : now.slice(0,10),
+      lineItem: li,
+    });
+  }
+  if (!acceptedRecords.length) return res.status(400).json({ error: 'Enter a received quantity for at least one pending item' });
+
+  for (const r of acceptedRecords) {
+    const li = r.lineItem;
+    const qty = r.qty_received;
+    await runAsync(`INSERT INTO grn_records(id,order_id,order_item_id,supplier_id,coo,date_code,lot_number,weight_kg,qty_received,condition,arrived_date,notes,recorded_by,recorded_at,credit_note_no)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [uuid(), req.params.id, r.order_item_id, r.supplier_id, r.coo,
+       r.date_code, r.lot_number, r.weight_kg, qty,
+       r.condition, r.arrived_date, r.notes,
+       req.session.user.id, now, String(cnNoInput||'').trim()]);
+    const totalRecRow = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [r.order_item_id]);
+    const totalRec = parseInt(totalRecRow?.t || 0);
+    const lineStatus = totalRec >= li.qty ? 'ready_to_ship' : 'grn_partial';
+    await runAsync('UPDATE order_items SET line_status=? WHERE id=?', [lineStatus, r.order_item_id]);
   }
 
+  const orderItems = await allAsync('SELECT id, qty FROM order_items WHERE order_id=?', [req.params.id]);
+  let allFull = orderItems.length > 0;
+  for (const li of orderItems) {
+    const totalRecRow = await getAsync('SELECT COALESCE(SUM(qty_received),0) as t FROM grn_records WHERE order_item_id=?', [li.id]);
+    if ((parseInt(totalRecRow?.t || 0)) < li.qty) allFull = false;
+  }
+  const anyReceived = acceptedRecords.length > 0;
   const newOrderStatus = allFull && anyReceived ? 'delivery_hub' : anyReceived ? 'partial_hub' : order.status;
   await runAsync("UPDATE orders SET status=? WHERE id=?", [newOrderStatus, req.params.id]);
 
-  const affectedItemIds = records.map(r => r.order_item_id).filter(Boolean);
+  const affectedItemIds = acceptedRecords.map(r => r.order_item_id);
   let affectedSOIds = [];
   if (affectedItemIds.length) {
     const soRows = await allAsync(`SELECT DISTINCT supplier_order_id FROM supplier_order_items WHERE item_id IN (${affectedItemIds.map(()=>'?').join(',')})`, affectedItemIds);
@@ -3139,7 +3179,7 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
   try {
     const enquiryRow = await getAsync('SELECT enquiry_id FROM orders WHERE id=?', [req.params.id]);
     if (enquiryRow?.enquiry_id) {
-      for (const r of records) {
+      for (const r of acceptedRecords) {
         const qty = parseInt(r.qty_received) || 0;
         if (!qty) continue;
         // Find sourcing row for this order item's component

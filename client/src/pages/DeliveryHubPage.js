@@ -75,25 +75,36 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
     m[r.order_item_id]=(m[r.order_item_id]||0)+(parseInt(r.qty_received)||0);
     return m;
   },{});
+  const latestGrnByItem = (order.grnRecords||[]).reduce((m,r)=>{
+    if ((parseInt(r.qty_received)||0) > 0) m[r.order_item_id] = r;
+    return m;
+  },{});
 
   // ── Summary calculations ──────────────────────────────────────────────────
   const summary = items.reduce((acc, li) => {
     const qty = parseInt(grn[li.id]?.qty_received) || 0;
+    const prevRcvd = prevRcvdMap[li.id] || 0;
     acc.totalOrdered += li.qty;
-    acc.totalReceived += qty;
-    if (qty >= li.qty && li.qty > 0) acc.full++;
-    else if (qty > 0) acc.partial++;
+    acc.totalReceived += prevRcvd + qty;
+    if (prevRcvd + qty >= li.qty && li.qty > 0) acc.full++;
+    else if (prevRcvd + qty > 0) acc.partial++;
     else acc.pending++;
     return acc;
   }, { full:0, partial:0, pending:0, totalOrdered:0, totalReceived:0 });
   const overallPct = summary.totalOrdered > 0
     ? Math.round((summary.totalReceived / summary.totalOrdered) * 100) : 0;
   const allFull     = summary.full === items.length && items.length > 0;
-  const anyFilled   = summary.full + summary.partial > 0;
-  const hasShortage = items.some(li => (parseInt(grn[li.id]?.qty_received)||0) < li.qty);
+  const anyFilled   = items.some(li => (parseInt(grn[li.id]?.qty_received)||0) > 0);
+  const hasShortage = items.some(li => {
+    const pending = Math.max(0, li.qty - (prevRcvdMap[li.id]||0));
+    return pending > 0 && (parseInt(grn[li.id]?.qty_received)||0) < pending;
+  });
   const hasDamaged  = Object.values(grn).some(r=>r.condition==='damaged'||r.condition==='rejected');
 
-  const buildRecords = () => items.map(li => {
+  const buildRecords = () => items.filter(li => {
+    const pending = Math.max(0, li.qty - (prevRcvdMap[li.id]||0));
+    return pending > 0 && (parseInt(grn[li.id]?.qty_received)||0) > 0;
+  }).map(li => {
     const row = grn[li.id]||{};
     return {
       order_item_id: li.id,
@@ -110,6 +121,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
   });
 
   const handleGRN = async (partialSave=false) => {
+    if (!anyFilled) return toast.error('Enter a received quantity for at least one pending item');
     setSaving(true);
     try {
       const records = buildRecords();
@@ -185,6 +197,8 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                 const qty      = parseInt(row.qty_received)||0;
                 const prevRcvd = prevRcvdMap[li.id]||0;
                 const pending  = Math.max(0, li.qty - prevRcvd);
+                const isComplete = pending === 0;
+                const savedGrn = latestGrnByItem[li.id]||{};
                 const isFull   = (prevRcvd + qty) >= li.qty && li.qty > 0;
                 const isPartial= qty > 0 && !isFull;
                 const shortage  = qty < pending;
@@ -220,12 +234,19 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                     </td>
                     {/* Receiving now (input) */}
                     <td style={{textAlign:'center'}}>
-                      <input className="input" type="number" min="0" max={pending*2||li.qty*2}
-                        value={row.qty_received}
-                        onChange={e=>setG(li.id,'qty_received',e.target.value)}
-                        style={{width:72,textAlign:'center',fontWeight:800,fontSize:14,
-                          borderColor: inputBorderColor,
-                          background: qty>0?'#f0fdf4':undefined}}/>
+                      {isComplete ? (
+                        <span style={{fontSize:11,fontWeight:700,color:'var(--green)',whiteSpace:'nowrap'}}>Completed</span>
+                      ) : (
+                        <input className="input" type="number" min="0" max={pending}
+                          value={row.qty_received}
+                          onChange={e=>{
+                            const value = e.target.value;
+                            setG(li.id,'qty_received',value === '' ? '' : String(Math.min(pending, Math.max(0, parseInt(value)||0))));
+                          }}
+                          style={{width:72,textAlign:'center',fontWeight:800,fontSize:14,
+                            borderColor: inputBorderColor,
+                            background: qty>0?'#f0fdf4':undefined}}/>
+                      )}
                       {qty>0&&qty<pending&&(
                         <div style={{fontSize:10,color:'#BA7517',fontWeight:600,marginTop:2}}>
                           ⚠ {pending-qty} short
@@ -239,7 +260,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                     </td>
                     {/* Condition */}
                     <td>
-                      <select className="input" value={row.condition}
+                      {isComplete ? <span style={{fontSize:11,fontWeight:600,color:'var(--green)',textTransform:'capitalize'}}>{savedGrn.condition||'good'}</span> : <select className="input" value={row.condition}
                         onChange={e=>setG(li.id,'condition',e.target.value)}
                         style={{fontSize:11,
                           borderColor:row.condition==='damaged'||row.condition==='rejected'?'var(--red)':
@@ -248,11 +269,11 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                         <option value="partial">⚠ Partial damage</option>
                         <option value="damaged">❌ Damaged</option>
                         <option value="rejected">🚫 Rejected</option>
-                      </select>
+                      </select>}
                     </td>
                     {/* COO */}
                     <td>
-                      <div
+                      {isComplete ? <span style={{fontSize:11,fontWeight:600}}>{savedGrn.coo||'—'}</span> : <div
                         ref={el => { cooWrapRefs.current[li.id] = el; }}
                         style={{position:'relative',width:220}}
                       >
@@ -271,6 +292,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                             setCooOpenFor(li.id);
                           }}
                           placeholder="IND"
+                          maxLength={3}
                           title={row.coo && cooNameByCode[row.coo] ? `${row.coo} - ${cooNameByCode[row.coo]}` : ''}
                           style={{fontSize:11,width:'100%',textTransform:'uppercase'}}
                         />
@@ -326,21 +348,22 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                               ))}
                           </div>
                         )}
-                      </div>
+                      </div>}
                     </td>
                     {/* Date Code */}
-                    <td><input className="input" value={row.date_code||''}
+                    <td>{isComplete ? <span style={{fontSize:11,fontWeight:600}}>{savedGrn.date_code||'—'}</span> : <input className="input" value={row.date_code||''}
                       onChange={e=>setG(li.id,'date_code',e.target.value)}
-                      placeholder="2345" style={{fontSize:11,width:60}}/></td>
+                      maxLength={30} placeholder="2345" style={{fontSize:11,width:60}}/>}</td>
                     {/* LOT */}
-                    <td><input className="input" value={row.lot_number||''}
+                    <td>{isComplete ? <span style={{fontSize:11,fontWeight:600}}>{savedGrn.lot_number||'—'}</span> : <input className="input" value={row.lot_number||''}
                       onChange={e=>setG(li.id,'lot_number',e.target.value)}
-                      placeholder="Batch/LOT" style={{fontSize:11,width:80}}/></td>
+                      maxLength={100} placeholder="Batch/LOT" style={{fontSize:11,width:80}}/>}</td>
                     {/* Notes */}
-                    <td><input className="input" value={row.notes}
+                    <td>{isComplete ? <span style={{fontSize:11,color:'var(--text2)'}} title={savedGrn.notes||'Already received'}>{savedGrn.notes||'Already received'}</span> : <input className="input" value={row.notes}
                       onChange={e=>setG(li.id,'notes',e.target.value)}
+                      maxLength={500}
                       placeholder="Optional remarks"
-                      style={{fontSize:11}}/></td>
+                      style={{fontSize:11}}/>}</td>
                   </tr>
                 );
               })}
