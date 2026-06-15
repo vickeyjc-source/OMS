@@ -147,7 +147,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
     : {label:'Pending GRN', bg:'var(--surface2)', color:'var(--text3)'};
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-xl">
         <div className="modal-header">
           <div>
@@ -574,7 +574,7 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
   };
   const STEPS = ['Select Items','Shipping','Documents','Confirm'];
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-xl">
         <div className="modal-header">
           <div><h2>📦 Create Shipment — {order.id}</h2>
@@ -772,7 +772,7 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
   ).filter(Boolean);
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-md">
         <div className="modal-header">
           <div>
@@ -1259,7 +1259,7 @@ export default function DeliveryHubPage() {
 
       {/* P3: Escalation modal */}
       {escalating && (
-        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setEscalating(null)}>
+        <div className="overlay">
           <div className="modal modal-sm">
             <div className="modal-header">
               <h2>⚠ Escalate Overdue Delivery</h2>
