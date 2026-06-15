@@ -860,6 +860,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const cost=parseFloat(form.confirmed_price)||0;
   const margin=custTotal-cost;
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
+  const canEditPaymentTerms = !readOnly && po.finance_returned === true && po.status === 'draft' && !isBlocked;
   const carrierOptions = (shippers && shippers.length)
     ? shippers
     : [
@@ -1167,18 +1168,25 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                   </div>
                 ) : null;
               })()}
-              <select className="input" value={form.payment_terms_type} disabled onChange={e=>set('payment_terms_type',e.target.value)} style={{background:'var(--surface2)',color:'var(--text2)'}}>
+              {canEditPaymentTerms && (
+                <div style={{fontSize:10,color:'var(--amber,#d97706)',fontWeight:700,marginBottom:4}}>
+                  Returned by Finance: update terms and save. Advance/split terms will be sent back to Finance automatically.
+                </div>
+              )}
+              <select className="input" value={form.payment_terms_type} disabled={!canEditPaymentTerms}
+                onChange={e=>set('payment_terms_type',e.target.value)}
+                style={{background:canEditPaymentTerms?'var(--surface)':'var(--surface2)',color:'var(--text2)'}}>
                 {PAYMENT_TERM_OPTIONS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
               </select>
               {form.payment_terms_type==='net'&&(
-                <select className="input" style={{marginTop:4,background:'var(--surface2)',color:'var(--text2)'}} value={form.payment_net_days} disabled
+                <select className="input" style={{marginTop:4,background:canEditPaymentTerms?'var(--surface)':'var(--surface2)',color:'var(--text2)'}} value={form.payment_net_days} disabled={!canEditPaymentTerms}
                   onChange={e=>set('payment_net_days',parseInt(e.target.value))}>
                   {NET_DAYS_OPTIONS.map(d=><option key={d} value={d}>Net {d} days</option>)}
                 </select>
               )}
               {form.payment_terms_type==='split'&&(
                 <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
-                  <input className="input" type="number" min="0" max="100" value={form.payment_advance_pct} disabled
+                  <input className="input" type="number" min="0" max="100" value={form.payment_advance_pct} disabled={!canEditPaymentTerms}
                     onChange={e=>set('payment_advance_pct',parseInt(e.target.value))} style={{width:70}}/>
                   <span style={{fontSize:12,color:'var(--text2)'}}>% advance, rest on delivery</span>
                 </div>

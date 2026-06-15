@@ -984,6 +984,8 @@ export default function FinancePage() {
   const [bankModal, setBankModal] = useState(null); // { supplier }
   const [customerBankModal, setCustomerBankModal] = useState(null); // customer object
   const [releaseConfirm, setReleaseConfirm] = useState(null); // order to release
+  const [returnConfirm, setReturnConfirm] = useState(null); // { type, item }
+  const [returningId, setReturningId] = useState(null);
   const [search, setSearch]   = useState('');
   const [historyDetail, setHistoryDetail] = useState(null);
   const [historyFilter, setHistoryFilter] = useState({ query:'', method:'all', from:'', to:'' });
@@ -999,6 +1001,49 @@ export default function FinancePage() {
     },
     onError: e => toast.error(e.response?.data?.error || 'Release failed'),
   });
+
+  const returnCustomerToOrder = async (order) => {
+    setReturningId(order.id);
+    try {
+      await api.post('/finance/customer-return/' + order.id);
+      qc.setQueryData(['finance-customer'], old =>
+        Array.isArray(old) ? old.filter(row => row.id !== order.id) : old
+      );
+      await Promise.all([
+        qc.invalidateQueries(['finance-customer']),
+        qc.invalidateQueries(['orders']),
+        qc.invalidateQueries(['summary']),
+      ]);
+      toast.success('Sent back to Order for payment-term correction');
+      setReturnConfirm(null);
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to send back to Order');
+    } finally {
+      setReturningId(null);
+    }
+  };
+
+  const returnSupplierToProcurement = async (queueItem) => {
+    setReturningId(queueItem.id);
+    try {
+      await api.post('/finance/supplier-return/' + queueItem.id);
+      qc.setQueryData(['finance-supplier'], old => old && typeof old === 'object' ? {
+        ...old,
+        advance: Array.isArray(old.advance) ? old.advance.filter(row => row.id !== queueItem.id) : [],
+      } : old);
+      await Promise.all([
+        qc.invalidateQueries(['finance-supplier']),
+        qc.invalidateQueries(['orders']),
+        qc.invalidateQueries(['summary']),
+      ]);
+      toast.success('Sent back to Procurement for payment-term correction');
+      setReturnConfirm(null);
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to send back to Procurement');
+    } finally {
+      setReturningId(null);
+    }
+  };
 
   const { data: custQueueRaw=[], isLoading: custLoading }   = useQuery({ queryKey:['finance-customer'], queryFn:()=>api.get('/finance/customer-queue').then(r=>r.data).catch(()=>[]), refetchInterval:30000 });
   const { data: supQueueRaw={advance:[],net:[]}, isLoading: supLoading } = useQuery({ queryKey:['finance-supplier'], queryFn:()=>api.get('/finance/supplier-queue').then(r=>r.data).catch(()=>({advance:[],net:[]})), refetchInterval:30000 });
@@ -1037,9 +1082,8 @@ export default function FinancePage() {
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
   const custAdvance = custQueue.filter(o =>
-    o.status === 'payment_approval' ||
-    isAdvanceTerms(o.payment_terms) ||
-    isPartialAdvance(o.payment_terms)
+    (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded') &&
+    (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms))
   );
   const custNet     = custQueue.filter(o =>
     o.status !== 'payment_approval' &&
@@ -1218,6 +1262,14 @@ export default function FinancePage() {
                     <td><StatusBadge s={o.status}/></td>
                     <td style={{textAlign:'right'}}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                        {o.total_paid <= 0 && o.customer_payment_status !== 'payment_recorded' && (
+                          <button className="btn btn-xs"
+                            onClick={()=>setReturnConfirm({type:'customer',item:o})}
+                            disabled={returningId===o.id}
+                            style={{fontSize:11,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
+                            {returningId===o.id ? 'Sending…' : '↩ Send to Order'}
+                          </button>
+                        )}
                         <button className="btn btn-xs" onClick={()=>handleGeneratePI(o)}
                           style={{fontSize:11}}>📄 {o.pi_no?'Re-print PI':'Generate PI'}</button>
                         {o.customer_payment_status === 'payment_recorded' ? (
@@ -1357,6 +1409,12 @@ export default function FinancePage() {
                     </td>
                     <td style={{textAlign:'right'}}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                        <button className="btn btn-xs"
+                          onClick={()=>setReturnConfirm({type:'supplier',item:r})}
+                          disabled={returningId===r.id}
+                          style={{fontSize:11,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
+                          {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
+                        </button>
                         {!hasBank && (
                           <button className="btn btn-xs"
                             onClick={()=>{
@@ -1588,6 +1646,38 @@ export default function FinancePage() {
           onSaved={()=>{ qc.invalidateQueries(['finance-customer']); setViewPayModal(null); }}
         />
       )}
+      {/* In-app confirmation for returning unpaid cases */}
+      {returnConfirm && (() => {
+        const isCustomer = returnConfirm.type === 'customer';
+        const item = returnConfirm.item;
+        const recordNo = isCustomer ? item.id : (item.internal_po_no || item.supplier_order_id);
+        const destination = isCustomer ? 'Order' : 'Procurement';
+        const busyId = item.id;
+        return (
+          <div className="overlay">
+            <div className="modal modal-sm">
+              <div className="modal-header">
+                <h2>↩ Send Back</h2>
+                <button className="close-x" disabled={returningId===busyId} onClick={()=>setReturnConfirm(null)}>×</button>
+              </div>
+              <div className="modal-body">
+                <div style={{fontSize:14,lineHeight:1.5}}>
+                  Send <strong className="mono" style={{color:'var(--accent)'}}>{recordNo}</strong> back to {destination} to change payment terms?
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button className="btn" disabled={returningId===busyId} onClick={()=>setReturnConfirm(null)}>Cancel</button>
+                <button className="btn btn-primary"
+                  disabled={returningId===busyId}
+                  style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontWeight:700}}
+                  onClick={()=>isCustomer ? returnCustomerToOrder(item) : returnSupplierToProcurement(item)}>
+                  {returningId===busyId ? 'Sending…' : 'Confirm'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {/* Release Payment Confirmation */}
       {releaseConfirm && (
         <div className="overlay" onClick={e=>e.target===e.currentTarget&&setReleaseConfirm(null)}>

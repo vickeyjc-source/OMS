@@ -1634,6 +1634,12 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   if (d.payment_terms !== undefined) {
     try { await runAsync('ALTER TABLE orders ADD COLUMN payment_terms TEXT DEFAULT \'\''); } catch(_) {}
     await runAsync('UPDATE orders SET payment_terms=? WHERE id=?', [d.payment_terms||'', oid]);
+    if (o.status === 'cust_payment_update' && d.status === undefined) {
+      await runAsync("UPDATE orders SET status='open',customer_payment_status='pending' WHERE id=?", [oid]);
+    }
+  }
+  if (d.customer_payment_status !== undefined) {
+    await runAsync('UPDATE orders SET customer_payment_status=? WHERE id=?', [d.customer_payment_status||'pending', oid]);
   }
 
   if (d.status === 'closed') {
@@ -2349,8 +2355,28 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
   const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [req.params.id]);
   if (!so) return res.status(404).json({ error: 'PO not found' });
   const now = nowStr();
+  const returnedFinanceItem = await getAsync(
+    "SELECT * FROM finance_queue WHERE supplier_order_id=? AND status='returned_to_procurement' ORDER BY created_at DESC LIMIT 1",
+    [req.params.id]
+  );
 
   const newStatus       = d.status ?? so.status;
+  const nextTermsType   = d.payment_terms_type ?? so.payment_terms_type ?? 'net';
+  const nextNetDays     = parseInt(d.payment_net_days ?? so.payment_net_days ?? 30) || 30;
+  const nextAdvancePct  = parseInt(d.payment_advance_pct ?? so.payment_advance_pct ?? 0) || 0;
+  let nextDueDate       = d.payment_due_date ?? so.payment_due_date ?? '';
+  let nextPaymentBlocked = so.payment_blocked ? 1 : 0;
+  if (returnedFinanceItem) {
+    if (nextTermsType === 'advance' || nextTermsType === 'split') {
+      nextDueDate = '';
+      nextPaymentBlocked = 1;
+    } else {
+      const due = new Date();
+      due.setDate(due.getDate() + nextNetDays);
+      nextDueDate = due.toISOString().slice(0,10);
+      nextPaymentBlocked = 0;
+    }
+  }
   const confirmedAt     = newStatus === 'confirmed' && so.status !== 'confirmed' ? now : (so.confirmed_at||null);
   const receivedAt      = newStatus === 'received'  && so.status !== 'received'  ? now : (so.received_at||null);
 
@@ -2360,7 +2386,7 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
        shipper_id=?, tracking_no=?, notes=?,
        zoho_po_number=?, payment_terms_type=?, payment_net_days=?,
        payment_advance_pct=?, payment_due_date=?,
-       confirmed_at=?, received_at=?
+       payment_blocked=?, confirmed_at=?, received_at=?
        WHERE id=?`,
     [d.po_no ?? so.po_no ?? '',
      newStatus,
@@ -2373,12 +2399,32 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
      d.tracking_no        ?? so.tracking_no        ?? '',
      d.notes              ?? so.notes              ?? '',
      d.zoho_po_number     ?? so.zoho_po_number     ?? '',
-     d.payment_terms_type ?? so.payment_terms_type ?? 'net',
-     d.payment_net_days   ?? so.payment_net_days   ?? 30,
-     d.payment_advance_pct?? so.payment_advance_pct?? 0,
-     d.payment_due_date   ?? so.payment_due_date   ?? '',
-     confirmedAt, receivedAt,
+     nextTermsType, nextNetDays, nextAdvancePct, nextDueDate,
+     nextPaymentBlocked, confirmedAt, receivedAt,
      req.params.id]);
+
+  if (returnedFinanceItem) {
+    if (nextPaymentBlocked) {
+      const advancePct = nextTermsType === 'advance' ? 100 : nextAdvancePct;
+      await runAsync(`UPDATE finance_queue SET status='pending',amount=?,currency=?,payment_terms=?,due_date='' WHERE id=?`,
+        [d.confirmed_price ?? so.confirmed_price ?? 0, d.confirmed_currency ?? so.confirmed_currency ?? 'INR',
+         advancePct+'% Advance required', returnedFinanceItem.id]);
+      await runAsync("UPDATE orders SET status='sup_payment_update' WHERE id=?", [so.order_id]);
+    } else {
+      await runAsync("UPDATE finance_queue SET status='cancelled',notes=? WHERE id=?",
+        [`Payment terms changed to Net ${nextNetDays} in Procurement`, returnedFinanceItem.id]);
+      const otherPending = await getAsync("SELECT 1 FROM finance_queue WHERE order_id=? AND status='pending' LIMIT 1", [so.order_id]);
+      if (!otherPending) await runAsync("UPDATE orders SET status='procurement' WHERE id=?", [so.order_id]);
+    }
+    try {
+      await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+        [uuid(), so.order_id,
+         nextPaymentBlocked
+           ? `Supplier payment terms updated and resubmitted to Finance: ${nextTermsType}`
+           : `Supplier payment terms updated in Procurement: Net ${nextNetDays}`,
+         req.session.user.name, '', now]);
+    } catch(_) {}
+  }
 
   // Log status change
   if (d.status && d.status !== so.status) {
@@ -2638,8 +2684,11 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   customers.forEach(c => { custMap[c.id] = c; });
   const filtered = orders.filter(o => {
     if (o.customer_payment_status === 'paid') return false;
-    const SUPPLIER_ONLY_STATUSES = ['procurement', 'sup_payment_update', 'sourcing', 'enquiry', 'quote'];
+    const SUPPLIER_ONLY_STATUSES = ['sup_payment_update', 'sourcing', 'enquiry', 'quote'];
     if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
+    // Customer Net/Other settlements remain trackable after the order enters
+    // Procurement. Advance orders only appear when explicitly sent to Finance.
+    if (o.status === 'procurement' && (isAdvanceTerms(o.payment_terms) || isPartialAdvanceTerms(o.payment_terms))) return false;
     if (o.status === 'payment_approval' || o.status === 'waiting_for_payment' || o.status === 'cust_payment_update') return true;
     return (o.payment_terms || '').length > 0;
   });
@@ -2816,6 +2865,30 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   res.json({ ok: true });
 }));
 
+// POST /api/finance/customer-return/:order_id — return unpaid case to Order
+app.post('/api/finance/customer-return/:order_id', auth, asyncRoute(async (req, res) => {
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const paid = await getAsync(
+    "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
+    [req.params.order_id]
+  );
+  if ((parseFloat(paid?.total)||0) > 0 || ['payment_recorded','paid'].includes(order.customer_payment_status)) {
+    return res.status(400).json({ error: 'Payment is already recorded. Reverse or correct the payment before sending this order back.' });
+  }
+  if (!['payment_approval','waiting_for_payment','cust_payment_update'].includes(order.status)) {
+    return res.status(400).json({ error: 'This order is not waiting for Finance approval' });
+  }
+  const now = nowStr();
+  await runAsync("UPDATE orders SET status='cust_payment_update',customer_payment_status='pending' WHERE id=?", [req.params.order_id]);
+  try {
+    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), req.params.order_id, 'Finance returned order for customer payment-term correction', req.session.user.name, '', now]);
+  } catch(_) {}
+  saveNow();
+  res.json({ ok: true, status: 'cust_payment_update' });
+}));
+
 // ── PO REQUESTS (Procurement → Finance workflow for Supplier PI + Zoho PO) ───
 
 // GET /api/po-requests
@@ -2935,6 +3008,34 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
     advance: advRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
     net:     netRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
   });
+}));
+
+// POST /api/finance/supplier-return/:fq_id — return unpaid supplier PO to Procurement
+app.post('/api/finance/supplier-return/:fq_id', auth, asyncRoute(async (req, res) => {
+  const fq = await getAsync('SELECT * FROM finance_queue WHERE id=?', [req.params.fq_id]);
+  if (!fq) return res.status(404).json({ error: 'Finance queue item not found' });
+  if (fq.status !== 'pending' || fq.payment_ref || fq.paid_at) {
+    return res.status(400).json({ error: 'Supplier payment is already processed and cannot be returned' });
+  }
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier PO not found' });
+  const now = nowStr();
+  await runAsync("UPDATE finance_queue SET status='returned_to_procurement',notes=? WHERE id=?",
+    ['Returned by Finance for payment-term correction', fq.id]);
+  await runAsync("UPDATE supplier_orders SET status='draft',payment_blocked=0 WHERE id=?", [so.id]);
+  const otherPending = await getAsync(
+    "SELECT 1 FROM finance_queue WHERE order_id=? AND status='pending' AND id<>? LIMIT 1",
+    [fq.order_id, fq.id]
+  );
+  if (!otherPending) await runAsync("UPDATE orders SET status='procurement' WHERE id=?", [fq.order_id]);
+  try {
+    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), fq.order_id,
+       `Finance returned supplier PO ${so.internal_po_no||so.id} for payment-term correction`,
+       req.session.user.name, '', now]);
+  } catch(_) {}
+  saveNow();
+  res.json({ ok: true, status: 'returned_to_procurement' });
 }));
 
 // PUT /api/finance/supplier-pay/:fq_id

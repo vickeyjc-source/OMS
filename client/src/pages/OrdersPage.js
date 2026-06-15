@@ -104,7 +104,9 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const [showHistory, setShowHistory] = useState(false);
 
   const [cancelReason, setCancelReason] = useState('');
-  const [paymentSaved, setPaymentSaved] = useState(false);
+  const [paymentSaved, setPaymentSaved] = useState(
+    order.status !== 'cust_payment_update' && !!order.payment_terms
+  );
   const setP = (k,v) => setPayment(p=>({...p,[k]:v}));
 
   // Customer info
@@ -112,13 +114,22 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const custTerms = custObj?.payment_terms || '';
   // Effective terms for this order: stored override or customer default
   const [orderTerms, setOrderTerms]         = useState(order.payment_terms || '');
+  const [savedOrderTerms, setSavedOrderTerms] = useState(order.payment_terms || '');
   const [orderTermsComment, setOrderTermsComment] = useState('');
   const effectiveTerms = orderTerms || custTerms;
+  const savedEffectiveTerms = savedOrderTerms || custTerms;
+  const paymentTermsDirty = orderTerms !== savedOrderTerms;
   const termsChanged   = orderTerms && orderTerms !== custTerms;
 
   const mutation = useMutation({
     mutationFn: d => api.put(`/orders/${order.id}`, d).then(r=>r.data),
-    onSuccess: () => { qc.invalidateQueries(['orders']); setEditSection(null); toast.success('Saved'); onRefresh(); },
+    onSuccess: () => {
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-customer']);
+      setEditSection(null);
+      toast.success('Saved');
+      onRefresh();
+    },
     onError: e => toast.error(e.response?.data?.error || 'Save failed'),
   });
 
@@ -231,9 +242,9 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
           {/* ── Payment Terms for this Order ── */}
           {canEdit && (
             <div className="card card-sm" style={{marginBottom:14}}>
-              <div className="card-title" style={{cursor:'pointer'}} onClick={()=>setPaymentSaved(v=>!v)}>
-                <span>💳 Payment Terms{paymentSaved&&effectiveTerms?<span style={{marginLeft:8,fontSize:11,color:'var(--green)',fontWeight:600}}>✅ Saved — {effectiveTerms}</span>:''}</span>
-                <span style={{fontSize:13,color:'var(--text3)'}}>{paymentSaved?'▸ Click to edit':'▾'}</span>
+              <div className="card-title">
+                <span>💳 Payment Terms{paymentSaved&&savedEffectiveTerms?<span style={{marginLeft:8,fontSize:11,color:'var(--green)',fontWeight:600}}>✅ Saved — {savedEffectiveTerms}</span>:''}</span>
+                <span style={{fontSize:13,color:'var(--text3)'}}>{paymentSaved?'🔒 Locked':'▾'}</span>
               </div>
               {paymentSaved && effectiveTerms ? null : <>
               <div style={{display:'grid',gridTemplateColumns:'2fr 2fr',gap:12,marginBottom:effectiveTerms?12:0}}>
@@ -249,10 +260,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       </optgroup>
                     ))}
                   </select>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>
+                    Applies only to this order. Customer default remains unchanged.
+                  </div>
                 </div>
                 {termsChanged&&(
                   <div className="form-group" style={{marginBottom:0}}>
-                    <label className="label" style={{color:'var(--amber,#d97706)',fontWeight:700}}>⚠ Reason for override <span className="req">*</span></label>
+                    <label className="label" style={{color:'var(--amber,#d97706)',fontWeight:700}}>Override note (optional)</label>
                     <input className="input" value={orderTermsComment} onChange={e=>setOrderTermsComment(e.target.value)}
                       placeholder="e.g. Customer requested extended terms…"
                       style={{borderColor:'var(--amber,#d97706)'}}/>
@@ -260,9 +274,32 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                 )}
               </div>
 
+              <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
+                <button className="btn btn-sm btn-primary"
+                  disabled={mutation.isPending || !paymentTermsDirty}
+                  onClick={async()=>{
+                    const previousSavedTerms = savedOrderTerms;
+                    setSavedOrderTerms(orderTerms);
+                    setPaymentSaved(true);
+                    try {
+                      await mutation.mutateAsync({
+                        payment_terms: orderTerms,
+                        _action: 'Customer payment terms updated',
+                        _comment: orderTermsComment.trim(),
+                      });
+                    } catch(_) {
+                      setSavedOrderTerms(previousSavedTerms);
+                      setPaymentSaved(false);
+                    }
+                  }}>
+                  {mutation.isPending ? 'Saving…' : paymentTermsDirty ? '💾 Save Payment Terms' : '✅ Terms Saved'}
+                </button>
+              </div>
+            </>}
+
               {/* OPTION A: Advance/Partial payment panels moved to Finance page */}
               {/* Original full + partial advance panels preserved below as comments — DO NOT DELETE */}
-              {(isFullAdvance(effectiveTerms)||isPartialAdvance(effectiveTerms)) && (
+              {(isFullAdvance(savedEffectiveTerms)||isPartialAdvance(savedEffectiveTerms)) && (
                 <div style={{marginTop:8,padding:'12px 16px',borderRadius:'var(--r)',
                   background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',
                   display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
@@ -271,7 +308,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                       💰 Advance Payment Required
                     </div>
                     <div style={{fontSize:12,color:'var(--text2)',marginTop:3}}>
-                      {isFullAdvance(effectiveTerms) ? 'Full advance payment' : 'Partial advance payment'} must
+                      {isFullAdvance(savedEffectiveTerms) ? 'Full advance payment' : 'Partial advance payment'} must
                       be collected before this order goes to Procurement.
                       Go to the Finance page to raise a PI and record payment.
                     </div>
@@ -282,18 +319,18 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     )}
                   </div>
                   <button className="btn btn-sm"
-                    disabled={order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
+                    disabled={paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
                     style={{background:'var(--amber,#d97706)',color:'#fff',
                       borderColor:'var(--amber,#d97706)',fontWeight:700,whiteSpace:'nowrap',
-                      opacity:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
-                      cursor:(order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
-                    title={order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
+                      opacity:(paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
+                      cursor:(paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
+                    title={paymentTermsDirty ? 'Save payment terms first' : order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
                     onClick={async()=>{
-                      if (order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
+                      if (paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
                       try {
                         await mutation.mutateAsync({
                           status:                  'payment_approval',
-                          payment_terms:           effectiveTerms || custTerms || '',
+                          payment_terms:           savedEffectiveTerms || '',
                           customer_payment_status: 'pending',
                           _action: 'Sent to Finance for advance payment collection',
                           _comment: '',
@@ -304,8 +341,6 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                   </button>
                 </div>
               )}
-            </>
-            }
             </div>
           )}
 
@@ -675,8 +710,9 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
 
               {/* Send to Procurement — gated: hidden until advance paid (if applicable) */}
               {['open','draft','payment_pending'].includes(order.status) &&
+               !paymentTermsDirty &&
                !showProcurement &&
-               (!(isFullAdvance(effectiveTerms) || isPartialAdvance(effectiveTerms)) ||
+               (!(isFullAdvance(savedEffectiveTerms) || isPartialAdvance(savedEffectiveTerms)) ||
                 order.customer_payment_status === 'paid') && (
                 <button className="btn"
                   style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,padding:'8px 18px'}}

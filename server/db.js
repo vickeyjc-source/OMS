@@ -129,8 +129,13 @@ async function assembleOrder(order) {
   const soItems = soIds.length
     ? await allAsync('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
     : [];
+  const returnedFinance = soIds.length
+    ? await allAsync("SELECT supplier_order_id FROM finance_queue WHERE status='returned_to_procurement' AND supplier_order_id IN (" + soIds.map(()=>'?').join(',') + ')', soIds)
+    : [];
+  const returnedPoIds = new Set(returnedFinance.map(r => r.supplier_order_id));
   o.supplierOrders = sos.map(so => ({
     ...so,
+    finance_returned: returnedPoIds.has(so.id),
     items: soItems.filter(i => i.supplier_order_id === so.id).map(i => i.item_id)
   }));
   o.customerShipping = (await getAsync('SELECT * FROM customer_shipping WHERE order_id=?', [o.id]))
