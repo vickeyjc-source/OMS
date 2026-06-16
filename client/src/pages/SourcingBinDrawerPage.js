@@ -67,7 +67,7 @@ function calcRow(src, item) {
 // ── landed cost calc — modes is a per-field object, each key is 'pct'|'amt' ───
 // fields: freight, insurance, transport, packaging, bcd, sws, cess, clearing, bank, margin, buffer
 const DEFAULT_MODES = { freight:'amt', insurance:'amt', transport:'amt', packaging:'amt', bcd:'amt', sws:'amt', cess:'amt', clearing:'amt', bank:'amt', margin:'amt', buffer:'amt' };
-const INTL_DEFAULT_MODES = { ...DEFAULT_MODES, freight:'pct', insurance:'pct', bcd:'pct', sws:'pct', cess:'pct' };
+const INTL_DEFAULT_MODES = { ...DEFAULT_MODES, insurance:'pct', bcd:'pct', sws:'pct', cess:'pct' };
 
 function calcLanded(src, item, modes = {}) {
   const m = { ...DEFAULT_MODES, ...modes };
@@ -134,7 +134,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
   const supType = isInvStock ? (invIsIntl ? 'international' : 'domestic') : (suppliers.find(s => s.id === row.supplier_id)?.type || 'domestic');
   const isIntl  = supType === 'international';
 
-  // per-field modes — international duty/logistics fields are percentage by default
+  // per-field modes — international duty fields are percentage by default
   const [modes, setModes] = useState(() => ({ ...(isIntl ? INTL_DEFAULT_MODES : DEFAULT_MODES), ...(srcRow._fieldModes || {}) }));
 
   const cur = row.sourced_currency || (isIntl ? 'USD' : 'INR');
