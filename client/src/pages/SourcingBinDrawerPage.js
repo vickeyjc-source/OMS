@@ -16,6 +16,17 @@ const getTaxRates = (currency) => {
 
 const fmt = n => new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(n || 0);
 const money = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const closeEnough = (a, b) => Math.abs(Number(a) - Number(b)) <= 0.05;
+const inferMarginMode = (src, qrow) => {
+  const source = Number(src?.sourced_price) || 0;
+  const margin = Number(src?.margin_pct) || 0;
+  const quote = Number(qrow?.quote_price) || 0;
+  if (source <= 0 || margin <= 0 || quote <= 0) return 'amt';
+  const pctQuote = source * (1 + margin / 100);
+  const amtQuote = source + margin;
+  if (closeEnough(quote, pctQuote) && !closeEnough(quote, amtQuote)) return 'pct';
+  return 'amt';
+};
 
 // ── per-item cost calc ────────────────────────────────────────────────────────
 function calcRow(src, item) {
@@ -46,6 +57,7 @@ function calcRow(src, item) {
 // ── landed cost calc — modes is a per-field object, each key is 'pct'|'amt' ───
 // fields: freight, insurance, transport, packaging, bcd, sws, cess, clearing, bank, margin, buffer
 const DEFAULT_MODES = { freight:'amt', insurance:'amt', transport:'amt', packaging:'amt', bcd:'amt', sws:'amt', cess:'amt', clearing:'amt', bank:'amt', margin:'amt', buffer:'amt' };
+const INTL_DEFAULT_MODES = { ...DEFAULT_MODES, freight:'pct', insurance:'pct', bcd:'pct', sws:'pct', cess:'pct' };
 
 function calcLanded(src, item, modes = {}) {
   const m = { ...DEFAULT_MODES, ...modes };
@@ -112,8 +124,8 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
   const supType = isInvStock ? (invIsIntl ? 'international' : 'domestic') : (suppliers.find(s => s.id === row.supplier_id)?.type || 'domestic');
   const isIntl  = supType === 'international';
 
-  // per-field modes — default 'amt'
-  const [modes, setModes] = useState(() => ({ ...DEFAULT_MODES, ...(srcRow._fieldModes || {}) }));
+  // per-field modes — international duty/logistics fields are percentage by default
+  const [modes, setModes] = useState(() => ({ ...(isIntl ? INTL_DEFAULT_MODES : DEFAULT_MODES), ...(srcRow._fieldModes || {}) }));
 
   const cur = row.sourced_currency || (isIntl ? 'USD' : 'INR');
   const lc  = calcLanded({ ...row, _supType: supType }, item, modes);
@@ -607,7 +619,12 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   const [srcRevNotes, setSrcRevNotes] = useState({});
   const [drawerItemIdx, setDrawerItemIdx] = useState(null);
   const [drawerMode, setDrawerMode] = useState('edit');
-  const [domesticMarginMode, setDomesticMarginMode] = useState({});
+  const [domesticMarginMode, setDomesticMarginMode] = useState(() =>
+    srcRows.reduce((modes, row, idx) => ({
+      ...modes,
+      [idx]: inferMarginMode(row, quoteRows[idx]),
+    }), {})
+  );
   const [notePopover, setNotePopover] = useState(null);
   const [notePopoverPos, setNotePopoverPos] = useState({ top: 0, left: 0 });
   // Send-to-ENQ reason modal
