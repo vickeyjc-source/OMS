@@ -27,6 +27,16 @@ const inferMarginMode = (src, qrow) => {
   if (closeEnough(quote, pctQuote) && !closeEnough(quote, amtQuote)) return 'pct';
   return 'amt';
 };
+const parseFieldModes = value => {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+};
 
 // ── per-item cost calc ────────────────────────────────────────────────────────
 function calcRow(src, item) {
@@ -593,6 +603,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           preferred_delivery_date: ex.preferred_delivery_date || item.preferred_delivery_date || '',
           _transport: ex._transport || '', _packaging: ex._packaging || '',
           _buffer: ex._buffer || '', _gst_pct: ex._gst_pct || '',
+          _fieldModes: parseFieldModes(ex.field_modes),
           src_dc: ex.src_dc || '', delivery_promise_date: ex.delivery_promise_date || '',
         };
       }
@@ -742,7 +753,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         const normalized = supType === 'international' ? resolved : { ...resolved, insurance_pct: '0', duty_pct: '0', cess_pct: '0', bank_fixed_foreign: '0', bank_fixed_inr: '0', clearance_fixed_inr: '0' };
         const calc = calcRow({ ...normalized, _supType: supType }, item || { quantity: 1 });
         const bankFixedUsd = supType === 'international' ? ((normalized.bank_fixed_foreign !== '' && normalized.bank_fixed_foreign != null) ? normalized.bank_fixed_foreign : (normalized.bank_fixed_usd ?? null)) : '0';
-        return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
+        const fieldModes = normalized._fieldModes ? JSON.stringify(normalized._fieldModes) : null;
+        return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, field_modes: fieldModes, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
       });
       const newStatus = (mode === 'quote' || mode === 'return_revision') ? 'quoted' : 'sourcing';
       const action    = mode === 'quote' ? 'Sent to Quote Bin' : mode === 'draft' ? 'Saved as draft in Sourcing' : 'Sourcing saved';

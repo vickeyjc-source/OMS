@@ -1198,8 +1198,9 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
           continue;
         }
         // Full sourcing data UPSERT
-        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        const fieldModes = s.field_modes || (s._fieldModes ? JSON.stringify(s._fieldModes) : null);
+        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
@@ -1216,6 +1217,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
                notes=EXCLUDED.notes, sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note,
                quote_price=EXCLUDED.quote_price,
                quote_currency=EXCLUDED.quote_currency, tax_rate=EXCLUDED.tax_rate,
+               field_modes=EXCLUDED.field_modes,
                updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
@@ -1237,6 +1239,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            toNum(s.quote_price),
            s.quote_currency||'INR',
            toNum(s.tax_rate),
+           fieldModes,
            req.session.user.id, now,
            s.sourcing_revision_notes||null, s.sales_comment||null,
            s.src_dc||'', s.delivery_promise_date||'']);

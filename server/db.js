@@ -613,6 +613,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN bank_inr NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN clearance_inr NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN margin_inr NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN field_modes TEXT DEFAULT NULL"); } catch(_) {}
   // ── Migrate users — add plain_password for admin visibility ─────────────────
   try { await pool.query("ALTER TABLE users ADD COLUMN plain_password TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate supplier_orders — add PO workflow columns ─────────────────────
