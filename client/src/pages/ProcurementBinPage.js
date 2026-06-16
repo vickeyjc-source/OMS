@@ -360,6 +360,42 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
     return g;
   }, [alloc]);
 
+  const sendFinanceRequest = async (itemId, data) => {
+    const supplierItemIds = Object.entries(alloc)
+      .filter(([, row])=>row.supplier_id===data.supplier_id)
+      .map(([id])=>id);
+    setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sending'}), r));
+    try {
+      const poNotes = data.payment_terms_change_reason
+        ? `[Payment terms changed: ${data.payment_terms_change_reason}]${data.notes ? '\n' + data.notes : ''}`
+        : data.notes || '';
+      const po = await api.post('/orders/'+order.id+'/po', {
+        ...data,
+        item_ids: supplierItemIds,
+        supplier_name: supName(data.supplier_id),
+        notes: poNotes,
+      });
+      await api.post('/po-requests', {
+        order_id: order.id,
+        supplier_id: data.supplier_id,
+        supplier_order_id: po.data?.id || data._existing_po_id || '',
+        supplier_name: supName(data.supplier_id),
+        order_ref: order.po_number || order.id,
+        payment_terms_type: data.payment_terms_type||'net',
+      });
+      setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sent'}), r));
+      qc.invalidateQueries(['orders']);
+      toast.success(
+        data.payment_terms_type==='advance'||data.payment_terms_type==='split'
+          ? 'PO Request and Supplier Advance sent to Finance.'
+          : 'PO Request sent to Finance.'
+      );
+    } catch(e) {
+      setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'idle'}), r));
+      toast.error(e.response?.data?.error||'Failed to send request');
+    }
+  };
+
   const handleSave = async () => {
     if (readOnly) {
       onClose();
@@ -545,45 +581,19 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                         <div>
                           {(a.payment_terms_type==='advance'||a.payment_terms_type==='split') ? (
                             <>
-                              <input className="input" value={a.supplier_ref||''}
-                                readOnly
+                              <input className="input" value={a.supplier_ref||''} readOnly
                                 placeholder="Supplier PI No. *"
                                 style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':'var(--green)',background:'var(--surface2)',cursor:'not-allowed'}}/>
                               {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
                               {a.supplier_id && !a.supplier_ref && (
-                                poRequests[li.id]==='sent' ? (
-                                  <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
-                                    padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
-                                    border:'1px solid var(--accent)33'}}>
-                                    ⏳ Waiting for Finance…
-                                  </div>
-                                ) : (
-                                  <button
-                                    className="btn btn-xs"
-                                    style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                    disabled={poRequests[li.id]==='sending'}
-                                    onClick={async()=>{
-                                      setPoRequests(r=>({...r,[li.id]:'sending'}));
-                                      try {
-                                        const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
-                                        await api.post('/po-requests', {
-                                          order_id: order.id,
-                                          supplier_id: a.supplier_id,
-                                          supplier_order_id: existingPO?.id || a._existing_po_id || '',
-                                          supplier_name: supName(a.supplier_id),
-                                          order_ref: order.po_number || order.id,
-                                          payment_terms_type: a.payment_terms_type||'advance',
-                                        });
-                                        setPoRequests(r=>({...r,[li.id]:'sent'}));
-                                        toast.success('📋 Request sent to Finance team!');
-                                      } catch(e) {
-                                        setPoRequests(r=>({...r,[li.id]:'idle'}));
-                                        toast.error('Failed to send request');
-                                      }
-                                    }}>
-                                    {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request PI from Finance'}
-                                  </button>
-                                )
+                                poRequests[li.id]==='sent'
+                                  ? <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600}}>⏳ Waiting for Finance…</div>
+                                  : <button className="btn btn-xs"
+                                      style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                      disabled={poRequests[li.id]==='sending'}
+                                      onClick={()=>sendFinanceRequest(li.id, a)}>
+                                      {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Send PO Request'}
+                                    </button>
                               )}
                             </>
                           ) : (
@@ -592,39 +602,14 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                                 ? <span className="mono" style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✓ {a.zoho_po_number}</span>
                                 : <span style={{fontSize:10,color:'var(--text3)'}}>Zoho PO via Finance</span>}
                               {a.supplier_id && !a.zoho_po_number && (
-                                poRequests[li.id]==='sent' ? (
-                                  <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600,
-                                    padding:'4px 8px',borderRadius:4,background:'var(--accent-lt)',
-                                    border:'1px solid var(--accent)33'}}>
-                                    ⏳ Waiting for Finance…
-                                  </div>
-                                ) : (
-                                  <button
-                                    className="btn btn-xs"
-                                    style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                    disabled={poRequests[li.id]==='sending'}
-                                    onClick={async()=>{
-                                      setPoRequests(r=>({...r,[li.id]:'sending'}));
-                                      try {
-                                        const existingPO = (order.supplierOrders||[]).find(so=>so.supplier_id===a.supplier_id);
-                                        await api.post('/po-requests', {
-                                          order_id: order.id,
-                                          supplier_id: a.supplier_id,
-                                          supplier_order_id: existingPO?.id || a._existing_po_id || '',
-                                          supplier_name: supName(a.supplier_id),
-                                          order_ref: order.po_number || order.id,
-                                          payment_terms_type: a.payment_terms_type||'net',
-                                        });
-                                        setPoRequests(r=>({...r,[li.id]:'sent'}));
-                                        toast.success('📋 Request sent to Finance team!');
-                                      } catch(e) {
-                                        setPoRequests(r=>({...r,[li.id]:'idle'}));
-                                        toast.error('Failed to send request');
-                                      }
-                                    }}>
-                                    {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Request Zoho PO from Finance'}
-                                  </button>
-                                )
+                                poRequests[li.id]==='sent'
+                                  ? <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600}}>⏳ Waiting for Finance…</div>
+                                  : <button className="btn btn-xs"
+                                      style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                      disabled={poRequests[li.id]==='sending'}
+                                      onClick={()=>sendFinanceRequest(li.id, a)}>
+                                      {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Send PO Request'}
+                                    </button>
                               )}
                             </>
                           )}
@@ -689,7 +674,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               return (
                 <button className="btn btn-primary"
                   disabled={saving || Object.keys(grouped).length === 0 || missingPI}
-                  title={missingPI ? 'Supplier PI required for all assigned rows — request from Finance' : undefined}
+                  title={missingPI ? 'Supplier PI required for all assigned rows — send PO request to Finance' : undefined}
                   onClick={handleSave}>
                   {saving ? 'Saving POs…' : `📤 ${Object.keys(grouped).length > 0 ? 'Save' : 'Generate'} PO Allocation`}
                 </button>

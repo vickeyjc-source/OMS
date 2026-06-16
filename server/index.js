@@ -2304,7 +2304,7 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
     const due = new Date();
     due.setDate(due.getDate() + netDays);
     paymentDueDate = due.toISOString().slice(0,10);
-  } else if (d.payment_terms_type === 'advance') {
+  } else if (d.payment_terms_type === 'advance' || d.payment_terms_type === 'split') {
     paymentBlocked = 1;
   }
 
@@ -2908,7 +2908,11 @@ app.post('/api/po-requests', auth, asyncRoute(async (req, res) => {
   try {
     const existing = await getAsync("SELECT id FROM po_requests WHERE order_id=? AND supplier_id=? AND status='pending'",
       [d.order_id, d.supplier_id]);
-    if (existing) return res.json({ ok: true, id: existing.id, already_exists: true });
+    if (existing) {
+      await runAsync(`UPDATE po_requests SET supplier_order_id=?,supplier_name=?,order_ref=?,payment_terms_type=? WHERE id=?`,
+        [d.supplier_order_id||'', d.supplier_name||'', d.order_ref||'', d.payment_terms_type||'net', existing.id]);
+      return res.json({ ok: true, id: existing.id, already_exists: true });
+    }
   } catch(_) {}
   // ensure payment_terms_type column exists
   try { await runAsync("ALTER TABLE po_requests ADD COLUMN payment_terms_type TEXT DEFAULT 'net'"); } catch(_) {}
@@ -3441,6 +3445,53 @@ app.post('/api/orders/:id/escalate', auth, asyncRoute(async (req, res) => {
      req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true });
+}));
+
+// PUT /api/finance/history/:id/amount — admin can correct amount on any finance history record
+app.put('/api/finance/history/:id/amount', auth, asyncRoute(async (req, res) => {
+  if (req.session.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { amount, notes } = req.body;
+  if (amount == null || isNaN(Number(amount))) return res.status(400).json({ error: 'Valid amount required' });
+  const now = nowStr();
+  // Try finance_queue (advance payments) first
+  const fq = await getAsync('SELECT * FROM finance_queue WHERE id=?', [req.params.id]);
+  if (fq) {
+    const oldAmount = fq.amount;
+    const note = `[Admin corrected amount: ${oldAmount} → ${amount} on ${now}${notes ? ' — ' + notes : ''}]`;
+    await runAsync(
+      'UPDATE finance_queue SET amount=?, notes=? WHERE id=?',
+      [Number(amount), (fq.notes ? fq.notes + ' ' : '') + note, req.params.id]
+    );
+    // Also update supplier_orders confirmed_price
+    if (fq.supplier_order_id) {
+      await runAsync('UPDATE supplier_orders SET confirmed_price=? WHERE id=?', [Number(amount), fq.supplier_order_id]);
+    }
+    try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), fq.order_id, `Finance: admin corrected payment amount ${oldAmount} → ${amount}`, req.session.user.name, notes||'', now]); } catch(_) {}
+    saveNow();
+    return res.json({ ok: true });
+  }
+  // Try supplier_net_payment_logs (net term payments)
+  const nl = await getAsync('SELECT * FROM supplier_net_payment_logs WHERE id=?', [req.params.id]);
+  if (nl) {
+    const oldAmount = nl.amount;
+    await runAsync('UPDATE supplier_net_payment_logs SET amount=? WHERE id=?', [Number(amount), req.params.id]);
+    try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), nl.order_id, `Finance: admin corrected net payment amount ${oldAmount} → ${amount}`, req.session.user.name, notes||'', now]); } catch(_) {}
+    saveNow();
+    return res.json({ ok: true });
+  }
+  // Try customer_payments
+  const cp = await getAsync('SELECT * FROM customer_payments WHERE id=?', [req.params.id]);
+  if (cp) {
+    const oldAmount = cp.amount;
+    await runAsync('UPDATE customer_payments SET amount=? WHERE id=?', [Number(amount), req.params.id]);
+    try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), cp.order_id, `Finance: admin corrected customer payment amount ${oldAmount} → ${amount}`, req.session.user.name, notes||'', now]); } catch(_) {}
+    saveNow();
+    return res.json({ ok: true });
+  }
+  res.status(404).json({ error: 'Record not found' });
 }));
 
 // DELETE /api/finance/history — clear all paid history (manager only)

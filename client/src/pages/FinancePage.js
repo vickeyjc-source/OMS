@@ -10,7 +10,18 @@ import { StatusBadge, fmtDate } from '../utils/helpers';
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtM = (n) => '₹' + (parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
 const today   = () => new Date().toISOString().slice(0,10);
-const daysDiff = d => d ? Math.floor((new Date(d)-new Date())/(1000*86400)) : null;
+const daysDiff = d => {
+  if (!d) return null;
+  const match = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const due = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(d);
+  if (Number.isNaN(due.getTime())) return null;
+  const current = new Date();
+  due.setHours(0, 0, 0, 0);
+  current.setHours(0, 0, 0, 0);
+  return Math.round((due - current) / (1000 * 86400));
+};
 
 const isAdvanceTerms = t => {
   if (!t) return false;
@@ -224,8 +235,40 @@ function generatePIHtml(order, customer, settings) {
 
 function HistoryDetailModal({ detail, onClose }) {
   if (!detail) return null;
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const qc = useQueryClient();
   const item = detail.item || {};
   const type = detail.type;
+
+  const [editingAmount, setEditingAmount] = useState(false);
+  const [newAmount, setNewAmount] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const currentAmount = parseFloat(item.paid_amount || item.amount) || 0;
+
+  const saveAmount = async () => {
+    const val = parseFloat(newAmount);
+    if (isNaN(val) || val < 0) { toast.error('Invalid amount'); return; }
+    setSaving(true);
+    try {
+      await api.put(`/finance/history/${item.id}/amount`, { amount: val });
+      toast.success('Amount updated');
+      await Promise.all([
+        qc.invalidateQueries(['finance-history']),
+        qc.invalidateQueries(['finance-supplier']),
+        qc.invalidateQueries(['finance-customer']),
+        qc.invalidateQueries(['orders']),
+        qc.invalidateQueries(['summary']),
+      ]);
+      setEditingAmount(false);
+      onClose();
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to update');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const rows = type === 'customer'
     ? [
@@ -266,7 +309,39 @@ function HistoryDetailModal({ detail, onClose }) {
           {rows.map(([k, v]) => (
             <div key={k} style={{display:'flex',justifyContent:'space-between',gap:12,padding:'7px 0',borderBottom:'1px solid var(--border)'}}>
               <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{k}</span>
-              <span style={{fontSize:12,fontWeight:600,textAlign:'right'}}>{v}</span>
+              {k === 'Amount' && isAdmin ? (
+                editingAmount ? (
+                  <span style={{display:'flex',alignItems:'center',gap:6}}>
+                    <input
+                      type="number" min="0" step="0.01"
+                      className="input"
+                      style={{width:120,padding:'2px 8px',fontSize:12,height:26}}
+                      value={newAmount}
+                      autoFocus
+                      onChange={e=>setNewAmount(e.target.value)}
+                      onKeyDown={e=>{if(e.key==='Enter')saveAmount();if(e.key==='Escape')setEditingAmount(false);}}
+                    />
+                    <button className="btn btn-sm btn-primary" disabled={saving}
+                      onClick={saveAmount}
+                      style={{fontSize:11,padding:'2px 8px',height:26,fontWeight:700}}>
+                      {saving ? '…' : '✓ Save'}
+                    </button>
+                    <button className="btn btn-sm" onClick={()=>setEditingAmount(false)}
+                      style={{fontSize:11,padding:'2px 6px',height:26}}>✕</button>
+                  </span>
+                ) : (
+                  <span style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:12,fontWeight:600}}>{v}</span>
+                    <button className="btn btn-xs"
+                      onClick={()=>{setNewAmount(String(currentAmount));setEditingAmount(true);}}
+                      style={{fontSize:10,padding:'1px 8px',color:'var(--accent)',border:'1px solid var(--accent)',borderRadius:4}}>
+                      ✎ Edit
+                    </button>
+                  </span>
+                )
+              ) : (
+                <span style={{fontSize:12,fontWeight:600,textAlign:'right'}}>{v}</span>
+              )}
             </div>
           ))}
         </div>
@@ -797,7 +872,7 @@ function SupplierBankDetailsModal({ supplier, onClose, onSaved }) {
 function DueBadge({ daysLeft }) {
   if (daysLeft === null) return null;
   if (daysLeft < 0)  return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'var(--red-lt,#fef2f2)',color:'var(--red)'}}>⚠ {Math.abs(daysLeft)}d overdue</span>;
-  if (daysLeft <= 7) return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)'}}>Due in {daysLeft}d</span>;
+  if (daysLeft < 10) return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)'}}>Due in {daysLeft}d</span>;
   return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:600,background:'var(--surface2)',color:'var(--text2)'}}>Due in {daysLeft}d</span>;
 }
 
@@ -1110,12 +1185,12 @@ export default function FinancePage() {
   ];
 
   const TABS = [
-    { k:'cust-advance', l:`🧾 Customer Advance (${custAdvance.length})` },
-    { k:'cust-net',     l:`📅 Customer Net/Other (${custNet.length + custOther.length})` },
-    { k:'sup-advance',  l:`💸 Supplier Advance (${supAdvance.length})` },
-    { k:'sup-net',      l:`📅 Supplier Net (${supNet.filter(r=>r.status!=='paid').length})` },
-    { k:'po-requests',  l:`📋 PO Requests (${pendingPORequests.length})` },
-    { k:'history',      l:'✅ History' },
+    { k:'cust-advance', icon:'🧾', label:'Customer Advance', count:custAdvance.length },
+    { k:'cust-net',     icon:'📅', label:'Customer Net/Other', count:custNet.length + custOther.length },
+    { k:'sup-advance',  icon:'💸', label:'Supplier Advance', count:supAdvance.length },
+    { k:'sup-net',      icon:'📅', label:'Supplier Net', count:supNet.filter(r=>r.status!=='paid').length },
+    { k:'po-requests',  icon:'📋', label:'PO Requests', count:pendingPORequests.length },
+    { k:'history',      icon:'✅', label:'History' },
   ];
 
   const handleGeneratePI = async (order) => {
@@ -1211,7 +1286,9 @@ export default function FinancePage() {
             padding:'9px 16px',fontSize:12,fontWeight:600,cursor:'pointer',
             borderBottom:tab===t.k?'2px solid var(--accent)':'2px solid transparent',
             color:tab===t.k?'var(--accent)':'var(--text3)'}}>
-            {t.l}
+            {t.icon} {t.label}{t.count !== undefined && (
+              <strong style={{color:'var(--green)',fontWeight:900}}> ({t.count})</strong>
+            )}
           </div>
         ))}
       </div>
@@ -1323,7 +1400,7 @@ export default function FinancePage() {
                 {filterCust([...custNet,...custOther]).map(o=>{
                   const daysLeft = o.computed_due_date ? daysDiff(o.computed_due_date) : null;
                   return (
-                    <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent'}}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
                       <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
                       <td style={{fontSize:11}}>
@@ -1474,7 +1551,7 @@ export default function FinancePage() {
                   const paid    = parseFloat(r.net_total_paid)||0;
                   const balance = Math.max(0, total - paid);
                   return (
-                    <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<=7?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent'}}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.id}</span></td>
                       <td style={{fontWeight:500}}>
                         {displayName}
