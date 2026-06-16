@@ -527,7 +527,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
 
         {/* Footer */}
         <div className="id-footer">
-          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={onClose}>{isReadOnly ? 'Close' : 'Cancel'}</button>
           {!isReadOnly && (
             <button className="btn btn-primary" onClick={() => { onApply({ row: { ...row, _fieldModes: modes }, qrow }); onClose(); }}
               style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -606,6 +606,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   const [saveMode, setSaveMode]   = useState('');
   const [srcRevNotes, setSrcRevNotes] = useState({});
   const [drawerItemIdx, setDrawerItemIdx] = useState(null);
+  const [drawerMode, setDrawerMode] = useState('edit');
   const [domesticMarginMode, setDomesticMarginMode] = useState({});
   const [notePopover, setNotePopover] = useState(null);
   const [notePopoverPos, setNotePopoverPos] = useState({ top: 0, left: 0 });
@@ -940,7 +941,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
             {/* Single unified grid — heading always visible, same columns always */}
             {/* Columns: # | MPN | Manufacturer | Supplier | Qty | HSN | Lead Time | Src Price | Margin | Quote/Unit | Quote Total | GST | Quote+GST | action */}
-            <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
+            <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
               {[
                 {l:'#',          align:'center'},
                 {l:'MPN',        align:'center'},
@@ -979,6 +980,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const srcUnit       = Number(row.sourced_price) || 0;
               const marginMode    = domesticMarginMode[idx] || 'amt';
               const aboveTarget   = Number(item.target_price) > 0 && srcUnit > 0 && srcUnit > Number(item.target_price);
+              const hasIntlDetails = isIntlItem && (
+                srcUnit > 0 || quoteUnit > 0 || row.src_price_foreign || row.exchange_rate
+              );
 
               const calcDomesticQuote = (sp, mv, mm) => {
                 const s = Number(sp)||0, m = Number(mv)||0;
@@ -1057,7 +1061,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 <div key={item.id} style={{ borderTop:'1px solid var(--border)', background: rowLocked ? '#f8fafc' : mrow.aboveTarget ? '#fff5f5' : '#fff' }}>
 
                   {/* ── Main row grid ── */}
-                  <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 56px', gap:'0 6px', padding:'6px 14px', alignItems:'start' }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', alignItems:'start' }}>
 
                     {/* # */}
                     <div style={{ fontSize:13, fontWeight:700, color:'var(--text3)', textAlign:'center', paddingTop:8 }}>{idx+1}</div>
@@ -1164,9 +1168,21 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Action col: Calculate button for intl only + send-to-enquiry action */}
                     <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:3, justifyContent:'center', minWidth:0 }}>
-                      {isIntlItem && !rowLocked && !isReadOnly && <button className="btn btn-xs btn-primary" onClick={()=>setDrawerItemIdx(idx)} style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
+                      {isIntlItem && !rowLocked && !isReadOnly && <button
+                        type="button"
+                        className="btn btn-xs btn-primary"
+                        onClick={() => { setDrawerMode('edit'); setDrawerItemIdx(idx); }}
+                        style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
                         <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.41 1.41M11.54 11.54l1.41 1.41M3.05 12.95l1.41-1.41M11.54 4.46l1.41-1.41"/></svg>
                         Calculate
+                      </button>}
+                      {hasIntlDetails && isReadOnly && <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => { setDrawerMode('view'); setDrawerItemIdx(idx); }}
+                        style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
+                        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4-6.5-4-6.5-4z"/><circle cx="8" cy="8" r="2"/></svg>
+                        View
                       </button>}
                       {!isReadOnly && !hasEverBeenQuoted && (!rowLocked ? (
                         <button className="btn btn-xs btn-secondary" onClick={() => handleSendToEnquiry(idx)} style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
@@ -1475,7 +1491,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           qRow={quoteRows[drawerItemIdx] || {}}
           suppliers={suppliers}
           inventoryItems={inventoryItems}
-          isReadOnly={isReadOnly}
+          isReadOnly={isReadOnly || drawerMode === 'view'}
           onClose={() => setDrawerItemIdx(null)}
           onApply={(data) => handleDrawerApply(drawerItemIdx, data)}
         />
