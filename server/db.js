@@ -298,6 +298,7 @@ async function createSchema() {
       enquiry_item_id TEXT NOT NULL, supplier_id TEXT NOT NULL,
       sourced_price NUMERIC, sourced_currency TEXT DEFAULT 'INR',
       availability TEXT, lead_time TEXT, notes TEXT,
+      item_status TEXT DEFAULT 'ready',
       sent_to_enquiry INTEGER DEFAULT 0, sent_to_enquiry_note TEXT DEFAULT NULL,
       quote_price NUMERIC, quote_currency TEXT DEFAULT 'INR',
       updated_by TEXT, updated_at TEXT NOT NULL
@@ -349,6 +350,9 @@ async function createSchema() {
       supplier_ref TEXT,
       shipping_status TEXT DEFAULT 'pending',
       shipper_id TEXT, tracking_no TEXT,
+      credit_note_no TEXT DEFAULT '',
+      credit_note_amount NUMERIC DEFAULT NULL,
+      credit_note_date TEXT DEFAULT '',
       notes TEXT,
       created_at TEXT,
       confirmed_at TEXT,
@@ -583,6 +587,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN modify_reason TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN tax_rate NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN item_status TEXT DEFAULT 'ready'"); } catch(_) {}
   // ── Migrate quotes — add approval tracking + revision columns ───────────────
   try { await pool.query("ALTER TABLE quotes ADD COLUMN parent_quote_id TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE quotes ADD COLUMN revision INTEGER DEFAULT 1"); } catch(_) {}
@@ -635,6 +640,10 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN payment_blocked INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN buying_price_per_unit NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN ship_load_date TEXT"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN actual_delivery_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN credit_note_no TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN credit_note_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN credit_note_date TEXT DEFAULT ''"); } catch(_) {}
   // ── Migrate orders — add delivery_address ────────────────────────────────────
   try { await pool.query("ALTER TABLE orders ADD COLUMN delivery_address TEXT DEFAULT ''"); } catch(_) {}
   // ── Ensure delivery_hub is a valid order status (no enum constraint in SQLite/PG, just docs) ──
@@ -774,6 +783,7 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN src_dc TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN delivery_promise_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN preferred_delivery_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN item_status TEXT DEFAULT 'ready'"); } catch(_) {}
   // ── Migrate tax_rates table ────────────────────────────────────────────────
   try { await pool.query("ALTER TABLE tax_rates ADD COLUMN vat_label TEXT NOT NULL DEFAULT 'VAT'"); } catch(_) {}
   // ── Seed tax_rates from built-in defaults if table is empty ───────────────

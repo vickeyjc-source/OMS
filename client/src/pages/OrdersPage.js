@@ -34,6 +34,21 @@ const BALANCE_TIMINGS = ['On Delivery','Before Delivery','Post Delivery','After 
 const LINE_STATUS_LABEL = { negotiating:'Confirmed', confirmed:'Confirmed', procurement:'Procurement', payment:'Payment', shipped:'Shipped', partial_shipped:'Partial Shipped', delivered_hub:'At Hub', ready_to_ship:'Ready to Ship', grn_partial:'GRN Partial', grn_rejected:'GRN Rejected', delivered:'Delivered', delivered_customer:'Delivered' };
 const LineStatusBadge = ({ s }) => <span className={`badge ${LINE_STATUS_BADGE[s]||'badge-gray'}`}>{LINE_STATUS_LABEL[s]||s}</span>;
 
+const quoteItemKeys = q => {
+  const keys = new Set();
+  (q?.notes || '').split('\n').forEach(line => {
+    const m = line.match(/^([^:]+):\s*Quote\s+/i);
+    if (m) keys.add(m[1].trim().toLowerCase());
+  });
+  return keys;
+};
+
+const setsOverlap = (a, b) => {
+  if (!a.size || !b.size) return false;
+  for (const key of a) if (b.has(key)) return true;
+  return false;
+};
+
 function ShipperSelect({ value, onChange, shippers }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
@@ -72,7 +87,7 @@ function ShipperSelect({ value, onChange, shippers }) {
   );
 }
 
-function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRefresh }) {
+function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enquiries, onRefresh }) {
   const { user } = useAuth();
   const qc = useQueryClient();
   const perms = user.perms || {};
@@ -141,22 +156,40 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
   const cust = customers.find(c=>c.id===order.customer_id);
   const totalInr = (order.lineItems||[]).filter(i=>i.currency==='INR').reduce((s,i)=>s+(i.qty*i.unit_price),0);
   const needsEway = cust?.country==='India' && totalInr > 50000;
+  const enquiry = enquiries.find(e => e.id === order.enquiry_id) || null;
+  const enquiryItems = enquiry?.items || [];
+  const sourcingRows = enquiry?.sourcing || [];
 
   // Compute base value and total value per currency across all line items
   const fmtAmt = (n, cur) => {
     const sym = {INR:'₹',USD:'$',EUR:'€',GBP:'£',SGD:'S$',AED:'د.إ'};
     return (sym[cur]||cur+' ') + (Math.round(n*100)/100).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
   };
+  const getSourceContext = (li) => {
+    const so = (order.supplierOrders||[]).find(s => (s.items||[]).includes(li.id));
+    const enqItem = enquiryItems.find(ei => ei.id === li.id || ei.component === li.component);
+    const srcRow = sourcingRows.find(s => s.enquiry_item_id === li.id)
+      || (enqItem ? sourcingRows.find(s => s.enquiry_item_id === enqItem.id) : null);
+    const unitSource = Number(srcRow?.sourced_price) || Number(li.procurement_price) || Number(so?.buying_price_per_unit) || 0;
+    return { so, srcRow, unitSource };
+  };
+  const liSourceByCur = {};
   const liBaseByCur = {};
+  const liTaxByCur = {};
   const liTotalByCur = {};
   (order.lineItems||[]).forEach(li => {
+    const { unitSource } = getSourceContext(li);
     const qty  = Number(li.qty)||0;
     const up   = Number(li.unit_price)||0;
     const tax  = Number(li.tax_rate)||0;
     const base = qty * up;
+    const taxAmt = base * tax / 100;
     const tot  = base + (base * tax / 100);
     const c    = li.currency || 'INR';
+    const srcTotal = qty * unitSource;
+    liSourceByCur.INR = (liSourceByCur.INR || 0) + srcTotal;
     liBaseByCur[c]  = (liBaseByCur[c] ||0) + base;
+    liTaxByCur[c]   = (liTaxByCur[c]  ||0) + taxAmt;
     liTotalByCur[c] = (liTotalByCur[c]||0) + tot;
   });
   const hasTax = Object.keys(liTotalByCur).some(c => Math.abs(liTotalByCur[c]-liBaseByCur[c]) > 0.001);
@@ -282,8 +315,9 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                     setSavedOrderTerms(orderTerms);
                     setPaymentSaved(true);
                     try {
+                      const effectiveOrderTerms = orderTerms || custTerms || '';
                       await mutation.mutateAsync({
-                        payment_terms: orderTerms,
+                        payment_terms: effectiveOrderTerms,
                         _action: 'Customer payment terms updated',
                         _comment: orderTermsComment.trim(),
                       });
@@ -354,35 +388,37 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                 <thead>
                   <tr>
                     <th>#</th><th>Component</th><th>IPN</th><th>Manufacturer</th>
-                    <th>Qty</th><th>Unit Price</th>
-                    {canSeeProcPrice&&<th>Proc. Price</th>}
-                    <th style={{textAlign:'right'}}>Base Value</th>
-                    {/* ADDED: Tax columns — value sourced from order_items.tax_rate (set in sourcing) */}
+                    <th>Qty</th>
+                    {canSeeProcPrice&&<th>Source Price</th>}
+                    {canSeeProcPrice&&<th style={{textAlign:'right'}}>Base Value</th>}
+                    <th>Customer Price</th>
                     <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax %</th>
                     <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax Amt</th>
-                    {/* CHANGED: renamed to clarify = Quoted Price × Qty + Tax */}
-                    <th style={{textAlign:'right'}}>Line Total (incl. Tax)</th>
+                    <th style={{textAlign:'right'}}>Customer Total</th>
                     <th>Delivery Date</th><th>Status</th>
-                    {/* DISABLED: Update column moved — line status updated via Finance/Procurement flow */}
-                    {/* {canEdit&&<th>Update</th>} */}
                   </tr>
                 </thead>
                 <tbody>
                   {order.lineItems?.map((li,i)=>(
                     <tr key={li.id}>
+                      {(() => {
+                        const { unitSource } = getSourceContext(li);
+                        const sourceTotal = (Number(li.qty)||0) * unitSource;
+                        return <>
                       <td>{i+1}</td>
                       <td className="bold">{li.component}</td>
                       <td className="mono">{li.ipn||'—'}</td>
                       <td>{li.manufacturer||'—'}</td>
                       <td>{fmt(li.qty)}</td>
+                      {canSeeProcPrice&&<td className="mono">{unitSource ? fmtAmt(unitSource, 'INR') : '—'}</td>}
+                      {canSeeProcPrice&&(
+                        <td style={{textAlign:'right'}}>
+                          {sourceTotal
+                            ? <span style={{fontWeight:600,fontSize:12}}>{fmtAmt(sourceTotal, 'INR')}</span>
+                            : <span style={{color:'var(--text3)'}}>—</span>}
+                        </td>
+                      )}
                       <td className="mono">{fmtCur(li.unit_price,li.currency)}</td>
-                      {canSeeProcPrice&&<td className="mono">{li.procurement_price?fmtCur(li.procurement_price,li.currency):'—'}</td>}
-                      <td style={{textAlign:'right'}}>
-                        {(li.qty&&li.unit_price)
-                          ? <span style={{fontWeight:600,fontSize:12}}>{fmtAmt(li.qty*li.unit_price,li.currency)}</span>
-                          : <span style={{color:'var(--text3)'}}>—</span>}
-                      </td>
-                      {/* ADDED: Tax % and Tax Amt — reads li.tax_rate set in sourcing */}
                       <td style={{textAlign:'right',fontSize:12}}>
                         {Number(li.tax_rate)||0}%
                       </td>
@@ -402,32 +438,31 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, onRe
                               borderRadius:'var(--r-sm)',fontWeight:700,fontSize:12,
                               color:tax>0?'var(--green)':'var(--text)'}}>
                               {fmtAmt(tot,li.currency)}
-                              {tax>0&&<span style={{fontSize:9,marginLeft:4,fontWeight:600}}>+{tax}%</span>}
                             </div>
                           );
                         })()}
                       </td>
                       <td>{li.delivery_date||'—'}</td>
                       <td><LineStatusBadge s={li.line_status}/></td>
-                      {/* DISABLED: Update td — line status updated via Finance/Procurement flow */}
-                      {/* {canEdit&&(
-                        <td>
-                          <select className="input" style={{fontSize:11,padding:'2px 6px',minWidth:100}} value={li.line_status}
-                            onChange={e=>mutation.mutate({lineItemStatus:{item_id:li.id,line_status:e.target.value},_action:`Line item ${li.component} → ${e.target.value}`,_comment:''})}>
-                            {[{v:'negotiating',l:'Negotiating'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}
-                          </select>
-                        </td>
-                      )} */}
+                        </>;
+                      })()}
                     </tr>
                   ))}
                   <tr style={{background:'var(--surface2)',fontWeight:700}}>
-                    <td colSpan={canSeeProcPrice?7:6} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
+                    <td colSpan={canSeeProcPrice?6:5} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
+                    {canSeeProcPrice&&(
+                      <td style={{textAlign:'right'}}>
+                        {Object.entries(liSourceByCur).map(([c,v])=>(
+                          <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--accent)'}}>{fmtAmt(v,c)}</div>
+                        ))}
+                      </td>
+                    )}
+                    <td colSpan={2}/>
                     <td style={{textAlign:'right'}}>
-                      {Object.entries(liBaseByCur).map(([c,v])=>(
-                        <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--accent)'}}>{fmtAmt(v,c)}</div>
+                      {Object.entries(liTaxByCur).map(([c,v])=>(
+                        <div key={c} style={{fontSize:13,fontWeight:700,color:'var(--teal,#0d9488)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
-                    <td colSpan={2}/>
                     <td style={{textAlign:'right'}}>
                       {Object.entries(liTotalByCur).map(([c,v])=>(
                         <div key={c} style={{fontSize:14,fontWeight:800,
@@ -1256,21 +1291,32 @@ export default function OrdersPage() {
                     {/* Status + pickup date */}
                     <td>
                       <StatusBadge s={o.status}/>
-                      {/* Show revision sub-stage badge based on linked enquiry state */}
+                      {/* Show revision sub-stage only when this order's own quote is being revised.
+                          Split enquiries can leave other items in sourcing; that should not mark
+                          already-created orders from separate split quotes as re-sourcing. */}
                       {o.enquiry_id && (() => {
                         const enq = enquiries.find(e => e.id === o.enquiry_id);
                         if (!enq) return null;
+                        const orderQuote = allQuotes.find(q => q.id === o.quote_id || q.quote_no === o.quote_no) || null;
+                        const orderQuoteKeys = quoteItemKeys(orderQuote);
+                        const matchesOrderQuote = q => {
+                          if (!orderQuote) return false;
+                          if (q.id === orderQuote.id || q.parent_quote_id === orderQuote.id) return true;
+                          return setsOverlap(orderQuoteKeys, quoteItemKeys(q));
+                        };
+                        const matchingReturned = allQuotes.some(q =>
+                          q.enquiry_id === o.enquiry_id && q.status === 'returned_to_sourcing' && matchesOrderQuote(q)
+                        );
+                        const matchingActiveRevision = allQuotes.some(q =>
+                          q.enquiry_id === o.enquiry_id && q.status === 'active' && (q.revision||1) > 1 && matchesOrderQuote(q)
+                        );
                         let badge = null;
-                        if (enq.status === 'returned_to_sourcing') {
+                        if (enq.status === 'returned_to_sourcing' && matchingReturned) {
                           badge = { label: '🔄 Revising · Source Bin', color: 'var(--amber,#d97706)', bg: 'var(--amber-lt,#fffbeb)' };
-                        } else if (enq.status === 'sourcing') {
+                        } else if (enq.status === 'sourcing' && matchingActiveRevision) {
                           badge = { label: '🔄 Re-Sourcing', color: 'var(--amber,#d97706)', bg: 'var(--amber-lt,#fffbeb)' };
-                        } else if (enq.status === 'quoted') {
-                          // check if there's a V2+ active quote (revision in quote review stage)
-                          const hasRevQ = allQuotes.some(q =>
-                            q.enquiry_id === o.enquiry_id && q.status === 'active' && (q.revision||1) > 1
-                          );
-                          if (hasRevQ) badge = { label: '🔄 Revising · In Quote', color: 'var(--purple,#7c3aed)', bg: '#f5f3ff' };
+                        } else if (enq.status === 'quoted' && matchingActiveRevision) {
+                          badge = { label: '🔄 Revising · In Quote', color: 'var(--purple,#7c3aed)', bg: '#f5f3ff' };
                         }
                         if (!badge) return null;
                         return (
@@ -1347,7 +1393,7 @@ export default function OrdersPage() {
           </tbody>
         </table>
       </div>
-      {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers}
+      {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers} enquiries={enquiries}
         onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===selected.id);if(up)setSelected(up);}); }} />}
       {managing&&<ManageOrderModal order={managing} viewOnly={true} onClose={()=>setManaging(null)} suppliers={suppliers} customers={customers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===managing.id);if(up)setManaging(up);});}} />}
     </div>

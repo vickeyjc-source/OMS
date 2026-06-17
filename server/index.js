@@ -1071,6 +1071,14 @@ function parsePaymentTerms(termsText) {
   return { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 };
 }
 
+function addDaysIso(baseText, days) {
+  const dt = baseText ? new Date(baseText) : new Date();
+  if (Number.isNaN(dt.getTime())) return '';
+  dt.setHours(0, 0, 0, 0);
+  dt.setDate(dt.getDate() + (parseInt(days, 10) || 0));
+  return dt.toISOString().slice(0, 10);
+}
+
 // Financial year string: Apr–Mar cycle → e.g. May 2025 → "2526", Feb 2025 → "2425"
 function financialYear() {
   const now = new Date();
@@ -2386,10 +2394,10 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
   await runAsync(`UPDATE supplier_orders SET
        po_no=?, status=?, confirmed_price=?, confirmed_currency=?,
        promised_delivery_date=?, supplier_ref=?, shipping_status=?,
-       shipper_id=?, tracking_no=?, notes=?,
+       shipper_id=?, tracking_no=?, notes=?, ship_load_date=?,
        zoho_po_number=?, payment_terms_type=?, payment_net_days=?,
        payment_advance_pct=?, payment_due_date=?,
-       payment_blocked=?, confirmed_at=?, received_at=?
+       payment_blocked=?, confirmed_at=?, received_at=?, actual_delivery_date=?
        WHERE id=?`,
     [d.po_no ?? so.po_no ?? '',
      newStatus,
@@ -2401,9 +2409,11 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
      d.shipper_id         ?? so.shipper_id         ?? null,
      d.tracking_no        ?? so.tracking_no        ?? '',
      d.notes              ?? so.notes              ?? '',
+     d.ship_load_date     ?? so.ship_load_date     ?? '',
      d.zoho_po_number     ?? so.zoho_po_number     ?? '',
      nextTermsType, nextNetDays, nextAdvancePct, nextDueDate,
      nextPaymentBlocked, confirmedAt, receivedAt,
+     d.actual_delivery_date !== undefined ? (d.actual_delivery_date || '') : (so.actual_delivery_date || ''),
      req.params.id]);
 
   if (returnedFinanceItem) {
@@ -2687,10 +2697,11 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   customers.forEach(c => { custMap[c.id] = c; });
   const filtered = orders.filter(o => {
     if (o.customer_payment_status === 'paid') return false;
-    const SUPPLIER_ONLY_STATUSES = ['sup_payment_update', 'sourcing', 'enquiry', 'quote'];
+    const SUPPLIER_ONLY_STATUSES = ['sourcing', 'enquiry', 'quote'];
     if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
     // Customer Net/Other settlements remain trackable after the order enters
-    // Procurement. Advance orders only appear when explicitly sent to Finance.
+    // Procurement. Supplier payment holds should not hide customer receivables.
+    // Advance orders only appear when explicitly sent to Finance.
     if (o.status === 'procurement' && (isAdvanceTerms(o.payment_terms) || isPartialAdvanceTerms(o.payment_terms))) return false;
     if (o.status === 'payment_approval' || o.status === 'waiting_for_payment' || o.status === 'cust_payment_update') return true;
     return (o.payment_terms || '').length > 0;
@@ -2705,6 +2716,10 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   allItems.forEach(li => { (itemsByOrder[li.order_id] = itemsByOrder[li.order_id] || []).push(li); });
   const enriched = filtered.map(o => {
     const items = itemsByOrder[o.id] || [];
+    const effectivePaymentTerms = o.payment_terms || custMap[o.customer_id]?.payment_terms || '';
+    const parsedTerms = parsePaymentTerms(effectivePaymentTerms);
+    const computedDueDate = o.payment_due_date
+      || (parsedTerms.payment_terms_type === 'net' ? addDaysIso(o.created_at, parsedTerms.payment_net_days) : '');
     const total = items.reduce((s, li) => {
       const base = (li.qty||0)*(li.unit_price||0);
       return s + base + base*((li.tax_rate||0)/100);
@@ -2714,12 +2729,14 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     return {
       ...o,
       customer: custMap[o.customer_id] || null,
+      payment_terms: effectivePaymentTerms,
+      computed_due_date: computedDueDate,
       order_total: parseFloat(total.toFixed(2)),
       total_paid:  parseFloat(paid.toFixed(2)),
       balance_due: parseFloat(Math.max(0, total - paid).toFixed(2)),
-      payment_type: isAdvanceTerms(o.payment_terms) ? 'full_advance'
-        : isPartialAdvanceTerms(o.payment_terms) ? 'partial_advance'
-        : isNetTerms(o.payment_terms) ? 'net' : 'other',
+      payment_type: isAdvanceTerms(effectivePaymentTerms) ? 'full_advance'
+        : isPartialAdvanceTerms(effectivePaymentTerms) ? 'partial_advance'
+        : isNetTerms(effectivePaymentTerms) ? 'net' : 'other',
       last_payment: orderPayments[0] || null,
       _computed_total: total,
       _computed_paid: paid,
@@ -3169,7 +3186,7 @@ console.log('[STARTUP] Finance routes registered');
 // ── GRN ROUTES ───────────────────────────────────────────────────────────────
 // POST /api/orders/:id/grn — record goods receipt
 app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
-  const { records = [], credit_note_no: cnNoInput } = req.body;
+  const { records = [], partial = false, filter_po_id: filterPoId = '', credit_note_no: cnNoInput, credit_note_amount: cnAmtInput } = req.body;
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (!Array.isArray(records)) return res.status(400).json({ error: 'Invalid GRN records' });
@@ -3228,7 +3245,16 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
       lineItem: li,
     });
   }
-  if (!acceptedRecords.length) return res.status(400).json({ error: 'Enter a received quantity for at least one pending item' });
+  const cnAmt = parseFloat(cnAmtInput);
+  const creditOnlyPartial = !acceptedRecords.length
+    && partial
+    && String(cnNoInput || '').trim()
+    && String(cnAmtInput ?? '').trim() !== ''
+    && Number.isFinite(cnAmt);
+
+  if (!acceptedRecords.length && !creditOnlyPartial) {
+    return res.status(400).json({ error: 'Enter a received quantity for at least one pending item' });
+  }
 
   for (const r of acceptedRecords) {
     const li = r.lineItem;
@@ -3252,7 +3278,7 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     if ((parseInt(totalRecRow?.t || 0)) < li.qty) allFull = false;
   }
   const anyReceived = acceptedRecords.length > 0;
-  const newOrderStatus = allFull && anyReceived ? 'delivery_hub' : anyReceived ? 'partial_hub' : order.status;
+  const newOrderStatus = allFull && anyReceived ? 'delivery_hub' : (anyReceived || creditOnlyPartial) ? 'partial_hub' : order.status;
   await runAsync("UPDATE orders SET status=? WHERE id=?", [newOrderStatus, req.params.id]);
 
   const affectedItemIds = acceptedRecords.map(r => r.order_item_id);
@@ -3278,6 +3304,18 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     const newPoStatus = poAllFull && poAnyReceived ? 'received' : poAnyReceived ? 'partially_received' : soRow.status;
     if (newPoStatus !== soRow.status) {
       await runAsync('UPDATE supplier_orders SET status=? WHERE id=?', [newPoStatus, soId]);
+    }
+  }
+
+  const cnNo = cnNoInput || (anyShort || creditOnlyPartial ? 'CN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0') : '');
+  if (cnNo || Number.isFinite(cnAmt)) {
+    let targetSoId = String(filterPoId || '').trim();
+    if (!targetSoId && affectedSOIds.length === 1) targetSoId = affectedSOIds[0];
+    if (targetSoId) {
+      await runAsync(
+        'UPDATE supplier_orders SET credit_note_no=?, credit_note_amount=?, credit_note_date=? WHERE id=?',
+        [cnNo || '', Number.isFinite(cnAmt) ? cnAmt : null, now.slice(0,10), targetSoId]
+      );
     }
   }
 
@@ -3316,12 +3354,13 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
     console.error('[GRN] Stock deduction error:', stockErr.message);
   }
 
-  const cnNo = cnNoInput || (anyShort ? 'CN-' + req.params.id + '-' + String(grnSeq).padStart(2,'0') : '');
-  const histNote = (allFull?'Full':'Partial')+' GRN recorded — '+grnNo+(cnNo?' | CN: '+cnNo:'');
+  const histNote = (allFull?'Full':'Partial')+' GRN recorded — '+grnNo
+    +(cnNo?' | CN: '+cnNo:'')
+    +(Number.isFinite(cnAmt) && cnAmt > 0 ? ' | CN Amount: ' + cnAmt.toFixed(2) : '');
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.id, histNote, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, grn_no: grnNo, credit_note_no: cnNo, order_status: newOrderStatus });
+  res.json({ ok: true, grn_no: grnNo, credit_note_no: cnNo, credit_note_amount: Number.isFinite(cnAmt) ? cnAmt : null, order_status: newOrderStatus });
 }));
 
 // POST /api/orders/:id/shipments — create outbound shipment from Delivery Hub

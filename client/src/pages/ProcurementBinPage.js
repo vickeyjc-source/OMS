@@ -1,6 +1,6 @@
 // client/src/pages/ProcurementBinPage.js  v3
 // Full P2P: Sourcing context · Allocation matrix · Payment terms · Finance queue · PO mode toggle
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
@@ -360,18 +360,47 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
     return g;
   }, [alloc]);
 
+  const buildSupplierPayload = (supplierId, itemIds) => {
+    const rows = itemIds.map(itemId => ({ itemId, row: alloc[itemId] })).filter(x => x.row);
+    if (rows.length === 0) return null;
+
+    const firstRow = rows[0].row;
+    const currencies = [...new Set(rows.map(({ row }) => row.confirmed_currency || 'INR'))];
+    const confirmedCurrency = currencies[0] || 'INR';
+    const confirmedPrice = rows.reduce((sum, { row }) => sum + (parseFloat(row.confirmed_price) || 0), 0);
+
+    const unitPrices = rows
+      .map(({ row }) => parseFloat(row.buying_price_per_unit))
+      .filter(price => Number.isFinite(price) && price > 0);
+    const uniqueUnitPrices = [...new Set(unitPrices.map(price => price.toFixed(6)))];
+    const buyingPricePerUnit = uniqueUnitPrices.length === 1 ? unitPrices[0] : '';
+
+    return {
+      ...firstRow,
+      supplier_id: supplierId,
+      item_ids: itemIds,
+      buying_price_per_unit: buyingPricePerUnit,
+      confirmed_price: confirmedPrice > 0 ? confirmedPrice.toFixed(2) : '',
+      confirmed_currency: confirmedCurrency,
+    };
+  };
+
   const sendFinanceRequest = async (itemId, data) => {
     const supplierItemIds = Object.entries(alloc)
       .filter(([, row])=>row.supplier_id===data.supplier_id)
       .map(([id])=>id);
+    const supplierPayload = buildSupplierPayload(data.supplier_id, supplierItemIds);
+    if (!supplierPayload) {
+      toast.error('No supplier items selected');
+      return;
+    }
     setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sending'}), r));
     try {
-      const poNotes = data.payment_terms_change_reason
-        ? `[Payment terms changed: ${data.payment_terms_change_reason}]${data.notes ? '\n' + data.notes : ''}`
-        : data.notes || '';
+      const poNotes = supplierPayload.payment_terms_change_reason
+        ? `[Payment terms changed: ${supplierPayload.payment_terms_change_reason}]${supplierPayload.notes ? '\n' + supplierPayload.notes : ''}`
+        : supplierPayload.notes || '';
       const po = await api.post('/orders/'+order.id+'/po', {
-        ...data,
-        item_ids: supplierItemIds,
+        ...supplierPayload,
         supplier_name: supName(data.supplier_id),
         notes: poNotes,
       });
@@ -381,12 +410,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
         supplier_order_id: po.data?.id || data._existing_po_id || '',
         supplier_name: supName(data.supplier_id),
         order_ref: order.po_number || order.id,
-        payment_terms_type: data.payment_terms_type||'net',
+        payment_terms_type: supplierPayload.payment_terms_type||'net',
       });
       setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sent'}), r));
       qc.invalidateQueries(['orders']);
       toast.success(
-        data.payment_terms_type==='advance'||data.payment_terms_type==='split'
+        supplierPayload.payment_terms_type==='advance'||supplierPayload.payment_terms_type==='split'
           ? 'PO Request and Supplier Advance sent to Finance.'
           : 'PO Request sent to Finance.'
       );
@@ -407,12 +436,14 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       const bySupplier = {};
       Object.entries(alloc).forEach(([itemId, row]) => {
         if (!row.supplier_id) return;
-        if (!bySupplier[row.supplier_id]) bySupplier[row.supplier_id] = { ...row, item_ids: [] };
-        bySupplier[row.supplier_id].item_ids.push(itemId);
+        if (!bySupplier[row.supplier_id]) bySupplier[row.supplier_id] = [];
+        bySupplier[row.supplier_id].push(itemId);
       });
       // ADDED: collect responses to check if any PO is advance-blocked
       let anyBlocked = false;
-      for (const [supplierId, data] of Object.entries(bySupplier)) {
+      for (const [supplierId, itemIds] of Object.entries(bySupplier)) {
+        const data = buildSupplierPayload(supplierId, itemIds);
+        if (!data) continue;
         const poNotes = data.payment_terms_change_reason
           ? `[Payment terms changed: ${data.payment_terms_change_reason}]${data.notes ? '\n' + data.notes : ''}`
           : data.notes || '';
@@ -434,7 +465,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
 
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-xl">
+      <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
         <div className="modal-header">
           <div><h2>{readOnly ? '👁 PO Allocation (View) — ' : '📋 PO Allocation — '}{order.id}</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
@@ -775,7 +806,7 @@ function CarrierCombo({ value, carrierOptions, onChange }) {
 }
 
 // ── Manage PO Modal ───────────────────────────────────────────────────────────
-function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers, poMode, onClose, onSaved, poList=[], poIndex=0, onNavigate, readOnly=false }) {
+function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
   const poGrnRecs = (order?.grnRecords||[]).filter(g=>(po.items||[]).includes(g.order_item_id));
   const poItemsForGrn = (po.items||[]).map(id=>(order?.lineItems||[]).find(li=>li.id===id)).filter(Boolean);
@@ -819,6 +850,10 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const [saving,    setSaving]    = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showPayForm, setShowPayForm] = useState(false);
+  const [financeSent, setFinanceSent] = useState(() => {
+    try { return typeof window !== 'undefined' && sessionStorage.getItem(`po_finance_notified_${po.id}`) === '1'; }
+    catch (_) { return false; }
+  });
   const [payForm, setPayForm]     = useState({
     payment_ref:'', payment_date:new Date().toISOString().slice(0,10),
     paid_amount:po.confirmed_price||'', notes:''
@@ -841,10 +876,26 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   };
   const isAdvanceOrSplit = form.payment_terms_type==='advance'||form.payment_terms_type==='split';
   const poItems=(po.items||[]).map(id=>(order.lineItems||[]).find(li=>li.id===id)).filter(Boolean);
-  const custTotal=poItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
-  const cost=parseFloat(form.confirmed_price)||0;
-  const margin=custTotal-cost;
+  const totalQty = poItems.reduce((s,li)=>s+(li.qty||0),0);
+  const totalPurchasePrice = (() => {
+    const confirmedTotal = parseFloat(form.confirmed_price);
+    if (Number.isFinite(confirmedTotal) && confirmedTotal > 0) return confirmedTotal;
+    const bpu = parseFloat(form.buying_price_per_unit);
+    if (Number.isFinite(bpu) && bpu > 0) return bpu * totalQty;
+    const sourceTotal = poItems.reduce((sum, li) => {
+      const enqItem = (enquiry?.items||[]).find(i=>i.id===li.id || i.component===li.component);
+      const srcRow = (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
+        || (enqItem ? (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id) : null);
+      return sum + ((parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
+    }, 0);
+    return sourceTotal;
+  })();
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
+  const markFinanceSent = () => {
+    setFinanceSent(true);
+    try { if (typeof window !== 'undefined') sessionStorage.setItem(`po_finance_notified_${po.id}`, '1'); } catch (_) {}
+    toast('💰 Finance team has been notified. Check Finance tab for payment status.');
+  };
   const canEditPaymentTerms = !readOnly && po.finance_returned === true && po.status === 'draft' && !isBlocked;
   const carrierOptions = (shippers && shippers.length)
     ? shippers
@@ -855,6 +906,17 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
         { id:'bluedart', name:'Blue Dart' },
         { id:'delhivery', name:'Delhivery' },
       ];
+  useEffect(() => {
+    if (!form.promised_delivery_date) return;
+    setForm(prev => {
+      if (prev.ship_load_date) return prev;
+      const d = new Date(prev.promised_delivery_date);
+      if (Number.isNaN(d.getTime())) return prev;
+      d.setDate(d.getDate() - 14);
+      const autoDate = d.toISOString().slice(0,10);
+      return { ...prev, ship_load_date: autoDate };
+    });
+  }, [form.promised_delivery_date]);
 
   const setStatusAndSave = async (nextStatus) => {
     const prevStatus = form.status;
@@ -920,23 +982,13 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             {/* ADDED: Go to Finance button in ManagePO header when blocked */}
             {isBlocked&&(
               <button className="btn btn-sm"
-                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',fontWeight:700}}
-                onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
-                💰 Notify Finance
+                disabled={financeSent}
+                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',fontWeight:700,opacity:financeSent?0.65:1,cursor:financeSent?'not-allowed':'pointer'}}
+                onClick={markFinanceSent}>
+                {financeSent ? '✅ Already Sent to Finance' : '💰 Send to Finance'}
               </button>
             )}
             <POStatusBadge status={effectivePoStatus}/>
-            {poList.length>1&&onNavigate&&(
-              <div style={{display:'flex',gap:4,alignItems:'center'}}>
-                <button className="btn btn-xs" disabled={poIndex===0}
-                  onClick={()=>onNavigate(poIndex-1)}
-                  title="Previous PO">‹ Prev</button>
-                <span style={{fontSize:11,color:'var(--text3)'}}>{poIndex+1}/{poList.length}</span>
-                <button className="btn btn-xs" disabled={poIndex===poList.length-1}
-                  onClick={()=>onNavigate(poIndex+1)}
-                  title="Next PO">Next ›</button>
-              </div>
-            )}
             <button className="close-x" onClick={onClose}>×</button>
           </div>
         </div>
@@ -1032,22 +1084,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             )}
             </div>
           )}
-          {poItems.length>0&&(
-            <div style={{marginBottom:14,padding:'10px 14px',background:'var(--accent-lt)',borderRadius:'var(--r-sm)',fontSize:12}}>
-              <div style={{fontWeight:700,marginBottom:6,color:'var(--accent)'}}>📦 Components</div>
-              {poItems.map(li=>(
-                <div key={li.id} style={{display:'flex',justifyContent:'space-between',padding:'3px 0',borderBottom:'0.5px solid var(--border)'}}>
-                  <span style={{fontWeight:600}}>{li.component}</span>
-                  <span style={{color:'var(--text2)'}}>Qty: {li.qty} · {fmtM(li.unit_price)}</span>
-                </div>
-              ))}
-              {cost>0&&custTotal>0&&(
-                <div style={{marginTop:6,fontWeight:700,fontSize:11,color:margin>=0?'var(--green)':'var(--red)'}}>
-                  Margin: {fmtM(margin,form.confirmed_currency)} ({custTotal>0?(margin/custTotal*100).toFixed(1):0}%)
-                </div>
-              )}
-            </div>
-          )}
           {/* PO Status — progress tracker only, action buttons moved to footer */}
           <div className="form-group">
             <label className="label" style={{fontWeight:700}}>PO Status</label>
@@ -1094,41 +1130,19 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                 }}/>
             </div>
             <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">Buying Price Per Unit</label>
-              <div style={{display:'flex',gap:6}}>
-                <input className="input" type="number" step="0.01"
-                  value={form.buying_price_per_unit !== '' && form.buying_price_per_unit != null ? parseFloat(form.buying_price_per_unit)||'' : ''}
-                  disabled
-                  onChange={e=>{
-                    const bpu = parseFloat(e.target.value)||0;
-                    const totalQty = poItems.reduce((s,li)=>s+(li.qty||0),0);
-                    const total = bpu * totalQty;
-                    set('buying_price_per_unit', e.target.value);
-                    set('confirmed_price', total>0?total.toFixed(2):'');
-                  }}
-                  placeholder="0.00 per unit" style={{flex:1,background:'var(--surface2)',color:'var(--text2)'}}/>
-                <select className="input" style={{width:80}} value={form.confirmed_currency}
-                  disabled
-                  onChange={e=>set('confirmed_currency',e.target.value)}>
-                  {['INR','USD','EUR','SGD','GBP','AED'].map(c=><option key={c}>{c}</option>)}
-                </select>
-              </div>
-              {/* Show auto-calculated total */}
-              {(form.buying_price_per_unit>0||form.confirmed_price>0)&&(()=>{
-                const bpu = parseFloat(form.buying_price_per_unit)||0;
-                const totalQty = poItems.reduce((s,li)=>s+(li.qty||0),0);
-                const total = bpu>0 ? bpu*totalQty : parseFloat(form.confirmed_price)||0;
-                const perUnit = bpu>0 ? bpu : (totalQty>0?total/totalQty:0);
-                return (
-                  <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
-                    Total PO Cost: <strong>{fmtM(total,form.confirmed_currency)}</strong>
-                    {totalQty>0&&perUnit>0&&<> ({totalQty} units × {fmtM(perUnit,form.confirmed_currency)}/unit)</>}
-                  </div>
-                );
-              })()}
+              <label className="label">Total Purchase Price</label>
+              <input className="input"
+                value={fmtM(totalPurchasePrice)}
+                disabled
+                style={{background:'var(--surface2)',color:'var(--text)',fontWeight:700}}/>
+              {form.promised_delivery_date && (
+                <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
+                  Expected delivery by {form.promised_delivery_date}
+                </div>
+              )}
             </div>
             <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">Promised Delivery Date</label>
+              <label className="label">Expected Delivery Date</label>
               {(() => {
                 const todayStr = new Date().toISOString().slice(0,10);
                 return (
@@ -1219,16 +1233,10 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                       <label className="label">Ship Load Date <span style={{fontSize:10,color:'var(--text3)',fontWeight:400}}>(date supplier dispatched)</span></label>
                       {(() => {
                         const todayStr2 = new Date().toISOString().slice(0,10);
-                        const maxDate = form.promised_delivery_date
-                          ? (() => {
-                              const d = new Date(form.promised_delivery_date);
-                              d.setDate(d.getDate()-1);
-                              return d.toISOString().slice(0,10);
-                            })()
-                          : undefined;
+                        const maxDate = form.promised_delivery_date || undefined;
                         return (
                           <input className="input" type="date" value={form.ship_load_date}
-                            min={todayStr2}
+                            min={todayStr2 > (form.ship_load_date || todayStr2) ? todayStr2 : undefined}
                             max={maxDate}
                             onChange={e=>set('ship_load_date',e.target.value)}/>
                         );
@@ -1384,10 +1392,15 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
 
 // ── Order Procurement Detail Modal ────────────────────────────────────────────
 function OrderProcurementModal({ order, suppliers, inventoryItems, customers, shippers, enquiry, poMode, onClose, onSaved, readOnly=false }) {
-  const { user } = useAuth();
   const qc = useQueryClient();
   const [showAlloc,  setShowAlloc]  = useState(false);
   const [managingPO, setManagingPO] = useState(null);
+  const [paymentBreakdownOpen, setPaymentBreakdownOpen] = useState(true);
+  const [lineItemsOpen, setLineItemsOpen] = useState(true);
+  const [financeSent, setFinanceSent] = useState(() => {
+    try { return typeof window !== 'undefined' && sessionStorage.getItem(`order_finance_notified_${order.id}`) === '1'; }
+    catch (_) { return false; }
+  });
   const custName=id=>customers.find(c=>c.id===id)?.name||id;
   const inventoryById = useMemo(() => {
     const map = {};
@@ -1405,6 +1418,11 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
   const poItemIds=soList.flatMap(so=>so.items||[]);
   const unPOd=allItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, enquiry));
   const orderVal=allItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
+  const orderTaxVal=allItems.reduce((s,li)=>{
+    const base=(li.qty||0)*(li.unit_price||0);
+    return s + base*((li.tax_rate||0)/100);
+  },0);
+  const customerTotal=orderVal+orderTaxVal;
   // Use buying_price_per_unit × qty if available, else confirmed_price
   const procVal = soList.reduce((s,so) => {
     const bpu = parseFloat(so.buying_price_per_unit);
@@ -1417,14 +1435,43 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     if (cp > 0) return s + cp;
     return s;
   }, 0);
-  const hasConfirmedPrices = procVal > 0;
-  const margin=orderVal-procVal;
   const blockedPOs=soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true);
   const allocationLocked = readOnly || soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update';
+  const sourcingRows = enquiry?.sourcing || [];
+  const enquiryItems = enquiry?.items || [];
+  const supplierSummaries = soList.map(so => {
+    const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+    const itemBreakdown = soItems.map(li => {
+      const enqItem = enquiryItems.find(ei => ei.id===li.id || ei.component===li.component);
+      const srcRow = sourcingRows.find(s=>s.enquiry_item_id===li.id)
+        || (enqItem ? sourcingRows.find(s=>s.enquiry_item_id===enqItem.id) : null);
+      const unitSource = parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
+      const lineSourceTotal = unitSource * (li.qty||0);
+      return {
+        component: li.component,
+        qty: li.qty||0,
+        unitSource,
+        lineSourceTotal,
+        currency: srcRow?.sourced_currency || so.confirmed_currency || li.currency || 'INR',
+      };
+    });
+    const sourceTotal = itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0);
+    return {
+      id: so.id,
+      supplierName: supName(so.supplier_id),
+      sourceTotal,
+      items: itemBreakdown,
+    };
+  });
+  const markFinanceSent = () => {
+    setFinanceSent(true);
+    try { if (typeof window !== 'undefined') sessionStorage.setItem(`order_finance_notified_${order.id}`, '1'); } catch (_) {}
+    toast('💰 Finance team has been notified. Check Finance tab for payment status.');
+  };
 
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-xl">
+      <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
         <div className="modal-header" style={{alignItems:'flex-start'}}>
           <div>
             <div style={{display:'flex',alignItems:'baseline',gap:10}}>
@@ -1479,31 +1526,105 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
               Finance team must record payment to release.</span>
               {/* ADDED: Go to Finance button — same pattern as customer advance in OrdersPage */}
               <button className="btn btn-sm"
+                disabled={financeSent}
                 style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
-                  fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
-                onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
-                💰 Notify Finance
+                  fontWeight:700,whiteSpace:'nowrap',flexShrink:0,opacity:financeSent?0.65:1,cursor:financeSent?'not-allowed':'pointer'}}
+                onClick={markFinanceSent}>
+                {financeSent ? '✅ Already Sent to Finance' : '💰 Send to Finance'}
               </button>
             </div>
           )}
+          <div className="card card-sm" style={{marginBottom:14}}>
+            <button
+              type="button"
+              onClick={()=>setPaymentBreakdownOpen(v=>!v)}
+              style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,background:'transparent',border:'none',padding:0,cursor:'pointer'}}
+            >
+              <div className="card-title" style={{marginBottom:0}}><span>₹ Payment Breakdown</span></div>
+              <span style={{fontSize:16,color:'var(--text3)',fontWeight:700,lineHeight:1}}>{paymentBreakdownOpen ? '▾' : '▸'}</span>
+            </button>
+            {paymentBreakdownOpen&&(
+              <>
+                <div style={{display:'grid',gridTemplateColumns:'1.15fr 1fr',gap:14}}>
+                  <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>CUSTOMER RECEIVES</div>
+                    <div style={{display:'grid',gap:6,fontSize:12}}>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                        <span>Base value</span><strong>{fmtM(orderVal)}</strong>
+                      </div>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                        <span>Tax</span><strong>{fmtM(orderTaxVal)}</strong>
+                      </div>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                        <span>Total incl. tax</span><strong style={{color:'var(--green)'}}>{fmtM(customerTotal)}</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>SUPPLIER PAYABLE</div>
+                    <div style={{display:'grid',gap:6,fontSize:12}}>
+                      {supplierSummaries.map(summary=>(
+                        <div key={summary.id} style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                          <span>{summary.supplierName}</span>
+                          <strong>{fmtM(summary.sourceTotal)}</strong>
+                        </div>
+                      ))}
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                        <span>Total source cost</span><strong style={{color:'var(--accent)'}}>{fmtM(supplierSummaries.reduce((sum, s)=>sum+s.sourceTotal,0))}</strong>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                {supplierSummaries.length>0&&(
+                  <div style={{display:'grid',gap:10,marginTop:12}}>
+                    {supplierSummaries.map(summary=>(
+                      <div key={summary.id} style={{padding:'10px 12px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface)'}}>
+                        <div style={{fontWeight:700,fontSize:12,marginBottom:6}}>{summary.supplierName}</div>
+                        <div style={{display:'grid',gap:4,fontSize:12}}>
+                          {summary.items.map(item=>(
+                            <div key={`${summary.id}_${item.component}`} style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                              <span>{item.component}: {item.qty} x {fmtM(item.unitSource)}</span>
+                              <strong>{fmtM(item.lineSourceTotal)}</strong>
+                            </div>
+                          ))}
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)'}}>
+                            <span>Supplier total</span>
+                            <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</strong>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
           {/* Line Items + sourcing context */}
           <div className="card card-sm" style={{marginBottom:14}}>
-            <div className="card-title">
-              <span>📦 Line Items ({allItems.length})</span>
-              {unPOd.length>0&&<span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ {unPOd.length} without PO</span>}
-            </div>
-            {/* ADDED: tableLayout fixed + colgroup for column alignment */}
+            <button
+              type="button"
+              onClick={()=>setLineItemsOpen(v=>!v)}
+              style={{width:'100%',display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,background:'transparent',border:'none',padding:0,cursor:'pointer'}}
+            >
+              <div className="card-title" style={{marginBottom:0}}>
+                <span>📦 Line Items ({allItems.length})</span>
+                {unPOd.length>0&&<span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ {unPOd.length} without PO</span>}
+              </div>
+              <span style={{fontSize:16,color:'var(--text3)',fontWeight:700,lineHeight:1}}>{lineItemsOpen ? '▾' : '▸'}</span>
+            </button>
+            {lineItemsOpen&&(
             <table className="li-table" style={{tableLayout:'fixed',width:'100%'}}>
               <colgroup>
                 <col style={{width:30}}/>{/* # */}
-                <col style={{width:140}}/>{/* Component */}
-                <col style={{width:45}}/>{/* Qty */}
-                <col style={{width:90}}/>{/* Cust Price */}
-                <col style={{width:90}}/>{/* Target Price */}
-                <col style={{width:55}}/>{/* Tax % */}
-                <col style={{width:80}}/>{/* Tax Amt */}
-                <col style={{width:140}}/>{/* Sourced From */}
-                <col style={{width:90}}/>{/* Sourced Price */}
+                <col style={{width:170}}/>{/* Component */}
+                <col style={{width:55}}/>{/* Qty */}
+                <col style={{width:150}}/>{/* Sourced From */}
+                <col style={{width:95}}/>{/* Sourced Price */}
+                <col style={{width:110}}/>{/* Source Total */}
+                <col style={{width:95}}/>{/* Customer Price */}
+                <col style={{width:60}}/>{/* Tax % */}
+                <col style={{width:90}}/>{/* Tax Amt */}
+                <col style={{width:110}}/>{/* Customer Total */}
                 <col style={{width:90}}/>{/* PO Assigned */}
                 <col style={{width:90}}/>{/* Status */}
                 <col style={{width:100}}/>{/* Gross Margin */}
@@ -1511,13 +1632,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
               <thead>
                 <tr>
                   <th>#</th><th>Component</th><th>Qty</th>
-                  <th>Cust. Price</th>
-                  <th style={{color:'var(--text2)'}}>Target Price</th>
-                  {/* FIX 2: Added Tax headers to match Tax cells in tbody */}
+                  <th style={{color:'var(--teal,#0d9488)'}}>★ Sourced From</th>
+                  <th style={{color:'var(--teal,#0d9488)'}}>Source Price</th>
+                  <th style={{textAlign:'right'}}>Source Total</th>
+                  <th>Customer Price</th>
                   <th style={{color:'var(--teal,#0d9488)',textAlign:'right'}}>Tax %</th>
                   <th style={{color:'var(--teal,#0d9488)',textAlign:'right'}}>Tax Amt</th>
-                  <th style={{color:'var(--teal,#0d9488)'}}>★ Sourced From</th>
-                  <th style={{color:'var(--teal,#0d9488)'}}>Sourced Price</th>
+                  <th style={{textAlign:'right'}}>Customer Total</th>
                   <th>PO Assigned</th><th>Status</th><th style={{color:'var(--green)',textAlign:'right'}}>Gross Margin</th>
                 </tr>
               </thead>
@@ -1536,31 +1657,6 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                         <div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div>
                       </td>
                       <td>{fmt(li.qty)}</td>
-                      {/* Customer price */}
-                      <td className="mono" style={{fontWeight:600}}>{fmtM(li.unit_price)}</td>
-                      {/* Target price from enquiry item */}
-                      <td style={{fontSize:11,color:'var(--text2)'}}>
-                        {(() => {
-                          const enqItem=(enquiry?.items||[]).find(ei=>ei.id===li.id||(ei.component&&ei.component===li.component));
-                          return enqItem?.target_price
-                            ? <span style={{fontWeight:600,color:(srcRow?.sourced_price&&parseFloat(srcRow.sourced_price)>parseFloat(enqItem.target_price))?'var(--red)':'var(--text2)'}}>
-                                {fmtM(enqItem.target_price, enqItem.target_currency||li.currency)}
-                                {srcRow?.sourced_price&&parseFloat(srcRow.sourced_price)>parseFloat(enqItem.target_price)&&
-                                  <span style={{fontSize:9,color:'var(--red)',marginLeft:4}}>↑ above target</span>}
-                              </span>
-                            : <span style={{color:'var(--text3)'}}>—</span>;
-                        })()}
-                      </td>
-                      {/* ADDED: Tax % and Tax Amt tds to match thead — reads from order_items.tax_rate */}
-                      <td style={{textAlign:'right',fontSize:12}}>
-                        {Number(li.tax_rate)||0}%
-                      </td>
-                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>
-                        {Number(li.tax_rate)>0
-                          ? fmtM((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100))
-                          : <span style={{color:'var(--text3)'}}>—</span>}
-                      </td>
-                      {/* Sourced from */}
                       <td>
                         {srcSup
                           ? <div>
@@ -1578,9 +1674,52 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                           : <span style={{color:'var(--text3)'}}>—</span>
                         }
                       </td>
+                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',fontWeight:700}}>
+                        {(() => {
+                          const srcPrice = Number(srcRow?.sourced_price) || 0;
+                          const base = srcPrice * (li.qty||0);
+                          return base ? <div>{fmtM(base, srcRow?.sourced_currency||li.currency)}</div> : <span style={{color:'var(--text3)'}}>—</span>;
+                        })()}
+                      </td>
+                      <td className="mono" style={{fontWeight:600}}>{fmtM(li.unit_price, li.currency)}</td>
+                      <td style={{textAlign:'right',fontSize:12}}>
+                        {Number(li.tax_rate)||0}%
+                      </td>
+                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',fontWeight:700}}>
+                        {(() => {
+                          const customerBase = (Number(li.unit_price)||0) * (li.qty||0);
+                          const taxAmt = customerBase * ((Number(li.tax_rate)||0) / 100);
+                          return taxAmt ? <div>{fmtM(taxAmt, li.currency)}</div> : <span style={{color:'var(--text3)'}}>—</span>;
+                        })()}
+                      </td>
+                      <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',fontWeight:700}}>
+                        {(() => {
+                          const customerBase = (Number(li.unit_price)||0) * (li.qty||0);
+                          const total = customerBase + (customerBase * ((Number(li.tax_rate)||0) / 100));
+                          return customerBase ? <div>{fmtM(total, li.currency)}</div> : <span style={{color:'var(--text3)'}}>—</span>;
+                        })()}
+                      </td>
                       <td>
                         {so
-                          ? <><POStatusBadge status={so.status}/>
+                          ? <>
+                              {(() => {
+                                const poAssignedRef = so.zoho_po_number || so.supplier_ref || so.po_no || so.internal_po_no;
+                                if (poAssignedRef) {
+                                  return (
+                                    <span style={{fontSize:11,fontWeight:700,color:'var(--green)',display:'inline-flex',alignItems:'center',gap:4}}>
+                                      ✓ <span className="mono">{poAssignedRef}</span>
+                                    </span>
+                                  );
+                                }
+                                return (
+                                  <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,
+                                    color:so.status==='draft'?'var(--amber,#d97706)':(PO_STATUS[so.status]?.color||'var(--text3)'),
+                                    background:so.status==='draft'?'var(--amber-lt,#fffbeb)':(PO_STATUS[so.status]?.bg||'var(--surface2)'),
+                                    border:`1px solid ${so.status==='draft'?'var(--amber,#d97706)':(PO_STATUS[so.status]?.color||'var(--text3)')}33`}}>
+                                    {so.status==='draft' ? '⏳ Pending' : `${PO_STATUS[so.status]?.icon||'•'} ${PO_STATUS[so.status]?.label||so.status}`}
+                                  </span>
+                                );
+                              })()}
                               {(so.payment_blocked===1||so.payment_blocked===true)&&
                                 <span style={{fontSize:10,color:'var(--red)',marginLeft:4}}>🔒</span>}
                             </>
@@ -1615,6 +1754,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                 })}
               </tbody>
             </table>
+            )}
           </div>
           {/* POs */}
           <div className="card card-sm">
@@ -1834,9 +1974,9 @@ export default function ProcurementBinPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [selected,      setSelected]      = useState(null);
+  const [previewOrder,  setPreviewOrder]  = useState(null);
   const [search,        setSearch]        = useState('');
   const [poFilter,      setPoFilter]      = useState('all');
-  const [expandedRows,  setExpandedRows]  = useState(new Set());
   const [seenProc, setSeenProc] = useState(() => { try { return new Set(JSON.parse(localStorage.getItem('seen_procurement')||'[]')); } catch(_) { return new Set(); } });
   const markProcSeen = (id) => {
     setSeenProc(prev => {
@@ -1846,9 +1986,6 @@ export default function ProcurementBinPage() {
       return next;
     });
   };
-  const toggleRow = (id) => setExpandedRows(prev => {
-    const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next;
-  });
   const today = new Date().toISOString().slice(0,10);
 
   const { data: orders    = [], isLoading } = useQuery({ queryKey:['orders'],    queryFn:()=>api.get('/orders').then(r=>{ const d=r.data; return Array.isArray(d)?d:[]; }).catch(()=>[]),    refetchInterval:20000 });
@@ -2050,7 +2187,6 @@ export default function ProcurementBinPage() {
           },0);
           const hasBuyingPrice = soList.some(so=>parseFloat(so.buying_price_per_unit)>0);
           const margin      = orderVal-procVal;
-          const isExpanded  = expandedRows.has(order.id);
           const delayed     = isDelayed(order);
           const isUnseen    = !seenProc.has(order.id);
 
@@ -2064,13 +2200,13 @@ export default function ProcurementBinPage() {
               {/* ── Summary row ── */}
               <div style={{display:'grid',gridTemplateColumns:'28px 1fr 160px 120px 110px 110px 110px 90px 120px',
                 gap:0,padding:'10px 12px',borderBottom:'1px solid var(--border)',
-                background:isExpanded?'var(--accent-lt)':rowBg,
+                background:rowBg,
                 borderLeft:`3px solid ${accentCol}`,cursor:'pointer',alignItems:'center'}}
-                onClick={()=>{ markProcSeen(order.id); toggleRow(order.id); }}>
+                onClick={()=>{ markProcSeen(order.id); setPreviewOrder(order); }}>
 
                 {/* Expand toggle */}
                 <div style={{fontSize:13,color:'var(--accent)',fontWeight:700,userSelect:'none'}}>
-                  {isExpanded?'▾':'▸'}
+                  ▸
                 </div>
 
                 {/* Order + Customer */}
@@ -2133,193 +2269,18 @@ export default function ProcurementBinPage() {
                 </div>
               </div>
 
-              {/* ── Expanded detail panel ── */}
-              {isExpanded&&(
-                <div style={{background:'var(--surface2)',borderBottom:'2px solid var(--border)',
-                  padding:'12px 20px 14px 40px'}}>
-
-                  {/* Alerts */}
-                  {hasBlocked&&(
-                    <div style={{marginBottom:10,padding:'8px 12px',borderRadius:'var(--r-sm)',
-                      background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)33',
-                      fontSize:12,color:'var(--red)',fontWeight:600,
-                      display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-                      <span>🔒 Waiting for Finance to pay:&nbsp;
-                      {soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true).map(so=>(
-                        <strong key={so.id} style={{marginRight:8}}>
-                          {so.internal_po_no} ({supName(so.supplier_id)})
-                        </strong>
-                      ))}</span>
-                      <button className="btn btn-sm"
-                        style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
-                          fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}
-                        onClick={()=>toast('💰 Finance team has been notified. Check Finance tab for payment status.')}>
-                        💰 Notify Finance
-                      </button>
-                    </div>
-                  )}
-                  {allRcvd&&(
-                    <div style={{marginBottom:10,padding:'8px 12px',borderRadius:'var(--r-sm)',
-                      background:'var(--green-lt)',border:'1px solid var(--green)33'}}>
-                      <span style={{fontSize:12,color:'var(--green)',fontWeight:600}}>
-                        ✅ All POs received — goods at hub. Ready for GRN and outbound.
-                      </span>
-                    </div>
-                  )}
-
-                  {/* ── Per-supplier PO sections ── */}
-                  {(()=>{
-                    // Build received/shipped maps from order data
-                    const grnMap = (order.grnRecords||[]).reduce((m,r)=>{
-                      m[r.order_item_id]=(m[r.order_item_id]||0)+(parseInt(r.qty_received)||0);
-                      return m;
-                    },{});
-                    const shipMap = (order.shipments||[]).flatMap(s=>s.items||[]).reduce((m,si)=>{
-                      m[si.order_item_id]=(m[si.order_item_id]||0)+(parseInt(si.qty_shipped)||0);
-                      return m;
-                    },{});
-
-                    // Items with no PO
-                    const unPoedItems = allItems.filter(li=>!soList.some(so=>(so.items||[]).includes(li.id)));
-
-                    return (
-                      <div style={{display:'flex',flexDirection:'column',gap:10}}>
-                        {soList.map(so=>{
-                          const cfg   = PO_STATUS[so.status]||PO_STATUS.draft;
-                          const blk   = so.payment_blocked===1||so.payment_blocked===true;
-                          const late  = so.promised_delivery_date&&so.promised_delivery_date<today&&!['received','cancelled'].includes(so.status);
-                          const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
-
-                          // Totals for this PO
-                          const totOrdered  = soItems.reduce((s,li)=>s+(li.qty||0),0);
-                          const totReceived = soItems.reduce((s,li)=>s+(grnMap[li.id]||0),0);
-                          const totShipped  = soItems.reduce((s,li)=>s+(shipMap[li.id]||0),0);
-                          const totPending  = totOrdered - totReceived;
-
-                          const borderCol = blk?'var(--red)':['received'].includes(so.status)?'var(--green)':['partially_received'].includes(so.status)?'var(--amber,#d97706)':cfg.color;
-
-                          return (
-                            <div key={so.id} style={{border:`2px solid ${borderCol}33`,borderRadius:'var(--r)',overflow:'hidden'}}>
-                              {/* PO header */}
-                              <div style={{padding:'8px 12px',background:`${borderCol}11`,
-                                display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-                                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-                                  <span className="mono" style={{fontWeight:700,fontSize:13,color:borderCol}}>
-                                    {so.internal_po_no||so.id}
-                                  </span>
-                                  <span style={{fontWeight:700,fontSize:13}}>
-                                    {supName(so.supplier_id)}
-                                  </span>
-                                  <POStatusBadge status={so.status}/>
-                                  {blk&&<span style={{fontSize:10,fontWeight:700,color:'var(--red)',padding:'2px 7px',borderRadius:999,background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)44'}}>🔒 Blocked</span>}
-                                  {late&&!blk&&<span style={{fontSize:10,fontWeight:700,color:'var(--red)',padding:'2px 7px',borderRadius:999,background:'var(--red-lt,#fef2f2)'}}>⏰ Overdue</span>}
-                                  {(so.zoho_po_number||so.po_no)&&<span style={{fontSize:11,color:'var(--text3)'}}>Ref: {so.zoho_po_number||so.po_no}</span>}
-                                  {so.promised_delivery_date&&<span style={{fontSize:11,color:late?'var(--red)':'var(--text3)'}}>Due: {so.promised_delivery_date}</span>}
-                                  {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>🚚 {so.tracking_no}</span>}
-                                </div>
-                                {/* Summary pills */}
-                                <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
-                                  <span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--surface)',border:'1px solid var(--border)',color:'var(--text2)',fontWeight:600}}>
-                                    Ordered: {totOrdered}
-                                  </span>
-                                  {totReceived>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--green-lt)',color:'var(--green)',fontWeight:700,border:'1px solid var(--green)44'}}>
-                                    ✅ Rcvd: {totReceived}
-                                  </span>}
-                                  {totPending>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700,border:'1px solid var(--amber,#d97706)44'}}>
-                                    ⏳ Pending: {totPending}
-                                  </span>}
-                                  {totShipped>0&&<span style={{fontSize:11,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700,border:'1px solid var(--teal,#0d9488)44'}}>
-                                    🚚 Shipped: {totShipped}
-                                  </span>}
-                                </div>
-                              </div>
-
-                              {/* Per-item rows */}
-                              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-                                <thead>
-                                  <tr style={{background:'var(--surface)',borderBottom:'1px solid var(--border)'}}>
-                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>COMPONENT</th>
-                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>MANUFACTURER</th>
-                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--text2)'}}>ORDERED</th>
-                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--green)'}}>RECEIVED</th>
-                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--amber,#d97706)'}}>PENDING</th>
-                                    <th style={{padding:'5px 8px',textAlign:'center',fontSize:10,fontWeight:700,color:'var(--teal,#0d9488)'}}>SHIPPED OUT</th>
-                                    <th style={{padding:'5px 10px',textAlign:'left',fontSize:10,fontWeight:700,color:'var(--text2)'}}>ITEM STATUS</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {soItems.map(li=>{
-                                    const rcvd    = grnMap[li.id]||0;
-                                    const shipped = shipMap[li.id]||0;
-                                    const pending = (li.qty||0) - rcvd;
-                                    const LINE_STATUS_LABEL = {
-                                      negotiating:     {l:'Confirmed',      c:'var(--green)'},
-                                      confirmed:       {l:'Confirmed',      c:'var(--green)'},
-                                      procurement:     {l:'Procurement',    c:'var(--accent)'},
-                                      shipped:         {l:'🚚 Shipped',     c:'var(--teal,#0d9488)'},
-                                      ready_to_ship:   {l:'✅ Ready',       c:'var(--green)'},
-                                      grn_partial:     {l:'⚠ Partial GRN',  c:'var(--amber,#d97706)'},
-                                      delivered_hub:   {l:'📦 At Hub',      c:'var(--teal,#0d9488)'},
-                                      partial_shipped: {l:'🔄 Bal. Pending', c:'var(--purple,#7c3aed)'},
-                                      delivered:       {l:'✅ Delivered',   c:'var(--green)'},
-                                    };
-                                    const ls = LINE_STATUS_LABEL[li.line_status]||{l:li.line_status||'—',c:'var(--text3)'};
-                                    return (
-                                      <tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}>
-                                        <td style={{padding:'7px 10px',fontWeight:600,color:'var(--accent)'}}>{li.component}</td>
-                                        <td style={{padding:'7px 10px',color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
-                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600}}>{li.qty}</td>
-                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:700,color:rcvd>0?'var(--green)':'var(--text3)'}}>
-                                          {rcvd>0?rcvd:'—'}
-                                        </td>
-                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:700,color:pending>0?'var(--amber,#d97706)':'var(--green)'}}>
-                                          {pending>0?pending:<span style={{fontSize:11}}>✓</span>}
-                                        </td>
-                                        <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600,color:shipped>0?'var(--teal,#0d9488)':'var(--text3)'}}>
-                                          {shipped>0?shipped:'—'}
-                                        </td>
-                                        <td style={{padding:'7px 10px'}}>
-                                          <span style={{fontSize:11,fontWeight:700,color:ls.c}}>{ls.l}</span>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })}
-                                </tbody>
-                              </table>
-                            </div>
-                          );
-                        })}
-
-                        {/* Items with no PO */}
-                        {unPoedItems.length>0&&(
-                          <div style={{border:'2px solid var(--amber,#d97706)33',borderRadius:'var(--r)',overflow:'hidden'}}>
-                            <div style={{padding:'8px 12px',background:'var(--amber-lt,#fffbeb)',fontSize:12,fontWeight:700,color:'var(--amber,#d97706)'}}>
-                              ⚠ {unPoedItems.length} item{unPoedItems.length>1?'s':''} with no PO assigned
-                            </div>
-                            <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-                              <tbody>
-                                {unPoedItems.map(li=>(
-                                  <tr key={li.id} style={{borderBottom:'0.5px solid var(--border)'}}>
-                                    <td style={{padding:'7px 10px',fontWeight:600,color:'var(--amber,#d97706)'}}>{li.component}</td>
-                                    <td style={{padding:'7px 10px',color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
-                                    <td style={{padding:'7px 8px',textAlign:'center',fontWeight:600}}>{li.qty}</td>
-                                    <td style={{padding:'7px 10px',color:'var(--text3)',fontSize:11}}>No PO raised</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
             </React.Fragment>
           );
         })}
       </div>
 
+      {previewOrder&&<OrderProcurementModal
+        order={previewOrder} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} shippers={shippers}
+        enquiry={findEnquiry(previewOrder.enquiry_id, previewOrder.enquiry_no)} poMode={poMode}
+        readOnly={true}
+        onClose={()=>setPreviewOrder(null)}
+        onSaved={()=>{ qc.invalidateQueries(['orders']); }}
+      />}
       {selected&&<OrderProcurementModal
         order={selected} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} shippers={shippers}
         readOnly={READ_ONLY_STATUSES.includes(selected.status)}

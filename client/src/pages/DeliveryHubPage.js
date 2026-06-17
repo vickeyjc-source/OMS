@@ -49,6 +49,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
   const nextGrnSeq = (order.grnRecords||[]).length + 1;
   const autoGenCN = 'CN-' + order.id + '-' + String(nextGrnSeq).padStart(2,'0');
   const [creditNoteNo, setCreditNoteNo] = useState(autoGenCN);
+  const [creditNoteAmount, setCreditNoteAmount] = useState('');
 
   useEffect(() => {
     if (!cooOpenFor) return;
@@ -120,16 +121,22 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
     };
   });
 
+  const canSaveCreditOnlyPartial = !!(creditNoteNo.trim() && creditNoteAmount !== '');
+
   const handleGRN = async (partialSave=false) => {
-    if (!anyFilled) return toast.error('Enter a received quantity for at least one pending item');
+    if (!anyFilled && !(partialSave && canSaveCreditOnlyPartial)) {
+      return toast.error('Enter a received quantity or save a credit-note partial');
+    }
     setSaving(true);
     try {
       const records = buildRecords();
       const isPartial = partialSave || hasShortage;
       const res = await api.post('/orders/'+order.id+'/grn', {
         records,
-        partial: partialSave,
+        partial: partialSave || !records.length,
+        filter_po_id: filterPoId || '',
         credit_note_no: isPartial ? creditNoteNo.trim() : '',
+        credit_note_amount: isPartial ? creditNoteAmount : '',
       });
       const partialMsg = res.data.order_status === 'partial_hub' ? ' — Partial, balance still expected' : '';
       const grnLabel = res.data.grn_no ? res.data.grn_no + ' recorded!' : 'GRN recorded!';
@@ -416,6 +423,19 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
                     style={{width:200,fontWeight:700,fontSize:12,
                       borderColor:'var(--amber,#d97706)',background:'#fff'}}
                   />
+                  <label style={{fontSize:12,fontWeight:700,color:'var(--amber,#d97706)',whiteSpace:'nowrap'}}>
+                    Amount:
+                  </label>
+                  <input
+                    className="input"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={creditNoteAmount}
+                    onChange={e=>setCreditNoteAmount(e.target.value)}
+                    placeholder="0.00"
+                    style={{width:140,fontWeight:700,fontSize:12,borderColor:'var(--amber,#d97706)',background:'#fff'}}
+                  />
                   <span style={{fontSize:11,color:'var(--text3)'}}>Auto-generated — edit if needed</span>
                 </div>
               )}
@@ -429,7 +449,7 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
           {/* P2: Separate partial save and full submit buttons */}
           <button className="btn"
             style={{background:'#FAEEDA',color:'#633806',borderColor:'#EF9F27',fontWeight:600}}
-            disabled={saving || !anyFilled || allFull}
+            disabled={saving || allFull || (!anyFilled && !canSaveCreditOnlyPartial)}
             onClick={()=>handleGRN(true)}>
             {saving?'Saving…':'⚠ Save Partial GRN'}
           </button>
@@ -754,51 +774,123 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
     if (!form.delivery_date) { toast.error('Delivery date is required'); return; }
     setSaving(true);
     try {
-      await api.put('/shipments/'+shipment.id, {
-        status:        'delivered',
-        pod_ref:       form.pod_ref,
-        notes:         form.notes,
-        delivered_at:  form.delivery_date,
-      });
-      toast.success('✅ Shipment marked as delivered!');
+      const openShipments = (order.shipments || []).filter(s => s.status !== 'delivered');
+      if (!openShipments.length) {
+        toast.error('No active shipment found');
+        setSaving(false);
+        return;
+      }
+      for (const ship of openShipments) {
+        await api.put('/shipments/' + ship.id, {
+          status:       'delivered',
+          pod_ref:      form.pod_ref,
+          notes:        form.notes,
+          delivered_at: form.delivery_date,
+        });
+      }
+      toast.success(openShipments.length > 1 ? '✅ Order marked as received by customer!' : '✅ Shipment marked as delivered!');
       qc.invalidateQueries(['orders']);
       onSaved();
     } catch(e) { toast.error(e.response?.data?.error||'Failed to confirm delivery'); }
     finally { setSaving(false); }
   };
 
-  const shipItems = (shipment.items||[]).map(si =>
-    (order.lineItems||[]).find(li=>li.id===si.order_item_id)
-  ).filter(Boolean);
+  const allItems = order.lineItems || [];
+  const grnQtyByItem = (order.grnRecords || []).reduce((m, r) => {
+    m[r.order_item_id] = (m[r.order_item_id] || 0) + (parseInt(r.qty_received, 10) || 0);
+    return m;
+  }, {});
+  const shippedQtyByItem = (order.shipments || []).flatMap(s => s.items || []).reduce((m, si) => {
+    m[si.order_item_id] = (m[si.order_item_id] || 0) + (parseInt(si.qty_shipped, 10) || 0);
+    return m;
+  }, {});
+  const supplierSections = (order.supplierOrders || []).map(so => {
+    const items = (so.items || []).map(id => allItems.find(li => li.id === id)).filter(Boolean);
+    const ordered = items.reduce((sum, li) => sum + (li.qty || 0), 0);
+    const received = items.reduce((sum, li) => sum + (grnQtyByItem[li.id] || 0), 0);
+    const shipped = items.reduce((sum, li) => sum + (shippedQtyByItem[li.id] || 0), 0);
+    const pending = Math.max(0, ordered - received);
+    return { so, items, ordered, received, shipped, pending };
+  }).filter(section => section.items.length > 0);
+  const orderOrdered = supplierSections.reduce((sum, section) => sum + section.ordered, 0);
+  const orderReceived = supplierSections.reduce((sum, section) => sum + section.received, 0);
+  const orderPending = supplierSections.reduce((sum, section) => sum + section.pending, 0);
+  const orderShipped = supplierSections.reduce((sum, section) => sum + section.shipped, 0);
 
   return (
     <div className="overlay">
-      <div className="modal modal-md">
+      <div className="modal" style={{width:'min(1120px, 96vw)', maxWidth:'96vw', maxHeight:'92vh'}}>
         <div className="modal-header">
           <div>
-            <h2>✅ Confirm Delivery — Shipment {shipment.shipment_no}</h2>
+            <h2>✅ Mark Received by Customer</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              {order.id} · AWB: {shipment.tracking_no||'—'}
+              {order.id} · {((order.shipments || []).filter(s => s.status !== 'delivered').length || 1)} active shipment{((order.shipments || []).filter(s => s.status !== 'delivered').length || 1)!==1?'s':''}
             </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
-          {/* Items in this shipment */}
-          {shipItems.length > 0 && (
-            <div style={{marginBottom:16,padding:'10px 14px',background:'var(--accent-lt)',
-              borderRadius:'var(--r-sm)',fontSize:12}}>
-              <div style={{fontWeight:700,marginBottom:6,color:'var(--accent)'}}>📦 Items in this shipment</div>
-              {shipItems.map(li=>(
-                <div key={li.id} style={{display:'flex',justifyContent:'space-between',
-                  padding:'3px 0',borderBottom:'0.5px solid var(--border)'}}>
-                  <span style={{fontWeight:600}}>{li.component}</span>
-                  <span style={{color:'var(--text2)'}}>Qty: {li.qty}</span>
-                </div>
-              ))}
+          <div style={{marginBottom:16,padding:'12px 14px',background:'var(--accent-lt)',borderRadius:'var(--r-sm)',fontSize:12}}>
+            <div style={{fontWeight:700,marginBottom:8,color:'var(--accent)'}}>📦 Delivery Summary</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4, minmax(120px, 1fr))',gap:10}}>
+              <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>ORDERED</div><div style={{fontWeight:800,fontSize:20}}>{orderOrdered}</div></div>
+              <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>GRN RECEIVED</div><div style={{fontWeight:800,fontSize:20,color:'var(--green)'}}>{orderReceived}</div></div>
+              <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PENDING</div><div style={{fontWeight:800,fontSize:20,color:'var(--purple,#7c3aed)'}}>{orderPending}</div></div>
+              <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIPPED TO CUSTOMER</div><div style={{fontWeight:800,fontSize:20,color:'var(--teal,#0d9488)'}}>{orderShipped}</div></div>
             </div>
-          )}
-          <div style={{display:'grid',gap:12}}>
+          </div>
+
+          <div style={{display:'flex',flexDirection:'column',gap:12,marginBottom:16}}>
+            {supplierSections.map(section => {
+              const supplierName = section.so.supplier_name || section.so.supplier_id || section.so.supplier || 'Supplier';
+              return (
+                <div key={section.so.id} style={{border:'1px solid var(--border)',borderRadius:'var(--r-sm)',overflow:'hidden',background:'var(--surface)'}}>
+                  <div style={{padding:'10px 14px',background:'var(--accent-lt)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                      <div style={{fontWeight:800,color:'var(--accent)'}}>📦 {supplierName}</div>
+                      <div className="mono" style={{fontSize:11,color:'var(--text3)'}}>{section.so.internal_po_no || section.so.id}</div>
+                    </div>
+                    <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontSize:10,padding:'2px 8px',borderRadius:999,background:'#fff',border:'1px solid var(--border)',fontWeight:700,color:'var(--text2)'}}>Ordered: {section.ordered}</span>
+                      <span style={{fontSize:10,padding:'2px 8px',borderRadius:999,background:'var(--green-lt)',border:'1px solid var(--green)33',fontWeight:700,color:'var(--green)'}}>Rcvd: {section.received}</span>
+                      <span style={{fontSize:10,padding:'2px 8px',borderRadius:999,background:'#f5f3ff',border:'1px solid #c4b5fd',fontWeight:700,color:'var(--purple,#7c3aed)'}}>Pending: {section.pending}</span>
+                      <span style={{fontSize:10,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)',border:'1px solid var(--teal,#0d9488)33',fontWeight:700,color:'var(--teal,#0d9488)'}}>Shipped: {section.shipped}</span>
+                    </div>
+                  </div>
+
+                  {section.so.credit_note_no && (
+                    <div style={{padding:'8px 14px',background:'var(--amber-lt,#fffbeb)',borderTop:'1px solid #f59e0b33',display:'flex',gap:18,flexWrap:'wrap',fontSize:11}}>
+                      <div style={{fontWeight:700,color:'var(--amber,#92400e)'}}>Credit Note: <span className="mono">{section.so.credit_note_no}</span></div>
+                      <div style={{fontWeight:700,color:'var(--amber,#92400e)'}}>Amount: {fmtM(Number(section.so.credit_note_amount) || 0)}</div>
+                      <div style={{fontWeight:600,color:'var(--text2)'}}>Date: {section.so.credit_note_date || '—'}</div>
+                    </div>
+                  )}
+
+                  <div style={{display:'grid',gridTemplateColumns:'1.5fr 90px 90px 90px 100px',padding:'8px 14px',background:'var(--surface2)',fontSize:10,fontWeight:700,color:'var(--text3)',letterSpacing:.3}}>
+                    <span>COMPONENT</span>
+                    <span style={{textAlign:'right'}}>ORDERED</span>
+                    <span style={{textAlign:'right'}}>RECEIVED</span>
+                    <span style={{textAlign:'right'}}>PENDING</span>
+                    <span style={{textAlign:'right'}}>SHIPPED</span>
+                  </div>
+                  {section.items.map(li => (
+                    <div key={li.id} style={{display:'grid',gridTemplateColumns:'1.5fr 90px 90px 90px 100px',padding:'8px 14px',borderTop:'1px solid var(--border)',fontSize:12,alignItems:'center'}}>
+                      <div>
+                        <div style={{fontWeight:700}}>{li.component}</div>
+                        <div style={{fontSize:11,color:'var(--text3)'}}>{li.manufacturer || '—'}</div>
+                      </div>
+                      <div style={{textAlign:'right',fontWeight:700}}>{li.qty || 0}</div>
+                      <div style={{textAlign:'right',fontWeight:700,color:'var(--green)'}}>{grnQtyByItem[li.id] || 0}</div>
+                      <div style={{textAlign:'right',fontWeight:700,color:'var(--purple,#7c3aed)'}}>{Math.max(0, (li.qty || 0) - (grnQtyByItem[li.id] || 0))}</div>
+                      <div style={{textAlign:'right',fontWeight:700,color:'var(--teal,#0d9488)'}}>{shippedQtyByItem[li.id] || 0}</div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Actual Delivery Date <span className="req">*</span></label>
               <input className="input" type="date" value={form.delivery_date}
@@ -811,6 +903,8 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
                 onChange={e=>set('pod_ref',e.target.value)}
                 placeholder="e.g. Signed delivery receipt number, customer ref"/>
             </div>
+          </div>
+          <div style={{display:'grid',gap:12,marginTop:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Notes</label>
               <textarea className="input" rows={2} value={form.notes}
@@ -818,21 +912,18 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
                 placeholder="e.g. Delivered to warehouse manager John"/>
             </div>
           </div>
-          {/* Auto-close notice */}
-          {(order.shipments||[]).filter(s=>s.id!==shipment.id&&s.status!=='delivered').length===0 && (
-            <div style={{marginTop:12,padding:'10px 14px',borderRadius:'var(--r)',
-              background:'var(--green-lt)',border:'1px solid var(--green)33',fontSize:12,
-              color:'var(--green)',fontWeight:600}}>
-              ✅ This is the last shipment — confirming delivery will automatically close the order.
-            </div>
-          )}
+          <div style={{marginTop:12,padding:'10px 14px',borderRadius:'var(--r)',
+            background:'var(--green-lt)',border:'1px solid var(--green)33',fontSize:12,
+            color:'var(--green)',fontWeight:600}}>
+            ✅ Confirming this will mark the remaining shipment(s) delivered and close the order.
+          </div>
         </div>
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
             style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
             disabled={saving} onClick={handleConfirm}>
-            {saving?'Confirming…':'✅ Confirm Delivery'}
+            {saving?'Confirming…':'✅ Mark Received by Customer'}
           </button>
         </div>
       </div>
@@ -843,13 +934,34 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
 export default function DeliveryHubPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const [selected,     setSelected]     = useState(null);
-  const [selectedPoId, setSelectedPoId] = useState(null);
-  const [escalating,   setEscalating]   = useState(null); // { order, newDate }
-  const [search,       setSearch]       = useState('');
-  const [filter,       setFilter]       = useState('all');
-  const [dispatch,     setDispatch]     = useState(null);
-  const [confirming,   setConfirming]   = useState(null);
+  const [selected,         setSelected]         = useState(null);
+  const [selectedPoId,     setSelectedPoId]     = useState(null);
+  const [escalating,       setEscalating]       = useState(null);
+  const [search,           setSearch]           = useState('');
+  const [filter,           setFilter]           = useState('all');
+  const [dispatch,         setDispatch]         = useState(null);
+  const [confirming,       setConfirming]       = useState(null);
+  const [editDelivery,     setEditDelivery]     = useState(null); // { soId, field, value }
+  const [savingDelivery,   setSavingDelivery]   = useState(false);
+  const [collapsedHubSections, setCollapsedHubSections] = useState({});
+
+  const isHubSectionOpen = (key) => collapsedHubSections[key] !== false;
+  const toggleHubSection = (key) => setCollapsedHubSections(prev => ({ ...prev, [key]: prev[key] === false ? true : false }));
+
+  const saveDeliveryDate = async () => {
+    if (!editDelivery) return;
+    setSavingDelivery(true);
+    try {
+      await api.put(`/supplier-orders/${editDelivery.soId}`, { [editDelivery.field]: editDelivery.value });
+      qc.invalidateQueries(['orders']);
+      toast.success('Date updated');
+      setEditDelivery(null);
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to update');
+    } finally {
+      setSavingDelivery(false);
+    }
+  };
 
   const { data: orders    = [], isLoading } = useQuery({ queryKey:['orders'],    queryFn:()=>api.get('/orders').then(r=>r.data).catch(()=>[]),    refetchInterval:20000 });
   const { data: suppliers = [] }            = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data).catch(()=>[]) });
@@ -985,6 +1097,34 @@ export default function DeliveryHubPage() {
           const readyToShipItems    = allItems.filter(li=>['ready_to_ship','grn_partial','delivered_hub'].includes(li.line_status));
           const hasBalance     = partialShippedItems.length > 0;
           const hasReadyItems  = readyToShipItems.length > 0;
+          const compactMeta = [
+            order.enquiry_no ? `ENQ ${order.enquiry_no}` : '',
+            order.quote_no ? `QT ${order.quote_no}` : '',
+            order.po_number ? `PO ${order.po_number}` : '',
+          ].filter(Boolean).join(' · ');
+          const shippedQtyByItem = (shipmentList || []).flatMap(s => s.items || []).reduce((m, si) => {
+            m[si.order_item_id] = (m[si.order_item_id] || 0) + (parseInt(si.qty_shipped, 10) || 0);
+            return m;
+          }, {});
+          const allOpenShipments = shipmentList.filter(s => s.status !== 'delivered');
+          const hasCustomerShipmentInFlight = allOpenShipments.length > 0;
+          const supplierDeliveryReady = soList.length > 0 && soList.every(so => {
+            const soItems = (so.items || []).map(id => allItems.find(li => li.id === id)).filter(Boolean);
+            if (!soItems.length) return false;
+            const fullyShipped = soItems.every(li => ['shipped', 'delivered'].includes(li.line_status));
+            if (fullyShipped) return true;
+            if (!so.credit_note_no) return false;
+            return soItems.every(li => {
+              const received = grnQtyByItem[li.id] || 0;
+              const shipped = shippedQtyByItem[li.id] || 0;
+              return shipped >= received;
+            });
+          });
+          const canMarkCustomerReceived = hasCustomerShipmentInFlight && supplierDeliveryReady;
+          const shipperNameFor = (value) => {
+            if (!value) return '';
+            return shippers.find(s => s.id === value)?.name || value;
+          };
 
           return (
             <div key={order.id} className="card" style={{
@@ -994,6 +1134,7 @@ export default function DeliveryHubPage() {
               <div className="flex-between" style={{marginBottom:10}}>
                 <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                   <span className="mono bold" style={{fontSize:14}}>{order.id}</span>
+                  {compactMeta && <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{compactMeta}</span>}
                   <StatusBadge s={order.status}/>
                   {isInTransit && <span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)'}}>🚚 In Transit to Customer</span>}
                   {grnDone && !isInTransit && !hasBalance && <span className="badge badge-green">✅ GRN Done — Ready for Outbound</span>}
@@ -1041,12 +1182,17 @@ export default function DeliveryHubPage() {
                       );
                     })()}
                     {/* Mark Received: for dispatched shipments awaiting customer */}
-                    {isInTransit && (
+                    {hasCustomerShipmentInFlight && (
                       <button className="btn btn-xs"
                         style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                        disabled={!canMarkCustomerReceived}
                         onClick={()=>{
-                          const activeShipment = (shipmentList||[]).find(s=>s.status!=='delivered') || shipmentList[0] || null;
+                          const activeShipment = allOpenShipments[0] || shipmentList[0] || null;
                           if (!activeShipment) { toast.error('No shipment found for this order'); return; }
+                          if (!canMarkCustomerReceived) {
+                            toast.error('Wait until all supplier GRN and shipment lines are completed');
+                            return;
+                          }
                           setConfirming({ order, shipment: activeShipment });
                         }}>
                         ✅ Mark Received by Customer
@@ -1056,14 +1202,54 @@ export default function DeliveryHubPage() {
                 </div>
               </div>
 
-              <div style={{display:'flex',gap:20,flexWrap:'wrap',fontSize:12,marginBottom:10}}>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(110px, 1fr))',gap:14,fontSize:12,marginBottom:10,alignItems:'flex-start'}}>
                 <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>CUSTOMER</div><div style={{fontWeight:600}}>{custName(order.customer_id)}</div></div>
-                {order.po_number&&<div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>CUST PO</div><div className="mono" style={{fontWeight:600}}>{order.po_number}</div></div>}
                 <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>ORDER VALUE</div><div style={{fontWeight:700,color:'var(--accent)'}}>{fmtM(orderVal)}</div></div>
                 <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>ITEMS</div><div style={{fontWeight:600}}>{allItems.length} line item{allItems.length!==1?'s':''}</div></div>
                 {order.delivery_address && (
-                  <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIP TO</div><div style={{fontWeight:600,maxWidth:200,fontSize:11}}>{order.delivery_address}</div></div>
+                  <div style={{gridColumn:'span 2'}}><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIP TO</div><div style={{fontWeight:600,maxWidth:260,fontSize:11}}>{order.delivery_address}</div></div>
                 )}
+                {(order.supplierOrders||[]).map(so => (
+                  <React.Fragment key={so.id}>
+                    {so.promised_delivery_date && (
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
+                          📅 PROMISE DATE{(order.supplierOrders||[]).length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
+                        </div>
+                        <div style={{fontWeight:700,color:'var(--text)'}}>{so.promised_delivery_date}</div>
+                      </div>
+                    )}
+                    <div>
+                      <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
+                        🚚 ACTUAL DELIVERY{(order.supplierOrders||[]).length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
+                      </div>
+                      {editDelivery?.soId===so.id && editDelivery?.field==='actual_delivery_date' ? (
+                        <span style={{display:'inline-flex',alignItems:'center',gap:4}}>
+                          <input type="date" className="input"
+                            style={{height:24,padding:'0 4px',fontSize:11,width:130}}
+                            value={editDelivery.value}
+                            onChange={e=>setEditDelivery(d=>({...d,value:e.target.value}))}
+                            onKeyDown={e=>{if(e.key==='Enter')saveDeliveryDate();if(e.key==='Escape')setEditDelivery(null);}}
+                            autoFocus/>
+                          <button className="btn btn-sm btn-primary" disabled={savingDelivery} onClick={saveDeliveryDate}
+                            style={{fontSize:10,padding:'1px 7px',height:24,fontWeight:700}}>{savingDelivery?'…':'✓'}</button>
+                          <button className="btn btn-sm" onClick={()=>setEditDelivery(null)}
+                            style={{fontSize:10,padding:'1px 5px',height:24}}>✕</button>
+                        </span>
+                      ) : (
+                        <div style={{display:'flex',alignItems:'center',gap:5}}>
+                          <span style={{fontWeight:700,color:so.actual_delivery_date?'var(--green)':'var(--text3)'}}>
+                            {so.actual_delivery_date||'—'}
+                          </span>
+                          <span
+                            onClick={()=>setEditDelivery({soId:so.id,field:'actual_delivery_date',value:so.actual_delivery_date||''})}
+                            style={{cursor:'pointer',fontSize:11,color:'var(--accent)',opacity:.75}}
+                            title="Set actual delivery date">✎</span>
+                        </div>
+                      )}
+                    </div>
+                  </React.Fragment>
+                ))}
               </div>
 
               {/* Shipments list for in-transit orders */}
@@ -1077,9 +1263,10 @@ export default function DeliveryHubPage() {
                         border:`1px solid ${ship.status==='delivered'?'var(--green)':'var(--accent)'}33`,
                         display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
                         <div style={{fontSize:12}}>
-                          <span style={{fontWeight:700}}>Shipment {ship.shipment_no}</span>
-                          <span style={{color:'var(--text3)',marginLeft:8}}>{ship.tracking_no||'No AWB'}</span>
-                          {ship.invoice_ref&&<span style={{color:'var(--text2)',marginLeft:8}}>INV: {ship.invoice_ref}</span>}
+                              <span style={{fontWeight:700}}>Shipment {ship.shipment_no}</span>
+                              <span style={{color:'var(--text3)',marginLeft:8}}>{ship.tracking_no||'No AWB'}</span>
+                              {ship.shipper_id && <span style={{color:'var(--accent)',marginLeft:8,fontWeight:600}}>{shipperNameFor(ship.shipper_id)}</span>}
+                              {ship.invoice_ref&&<span style={{color:'var(--text2)',marginLeft:8}}>INV: {ship.invoice_ref}</span>}
                           <span style={{marginLeft:8,fontSize:11,padding:'1px 7px',borderRadius:999,fontWeight:600,
                             background:ship.status==='delivered'?'var(--green-lt)':'var(--amber-lt,#fffbeb)',
                             color:ship.status==='delivered'?'var(--green)':'var(--amber,#d97706)'}}>
@@ -1087,13 +1274,6 @@ export default function DeliveryHubPage() {
                           </span>
                           {ship.delivered_at&&<span style={{color:'var(--text3)',marginLeft:8,fontSize:11}}>on {ship.delivered_at.slice(0,10)}</span>}
                         </div>
-                        {ship.status!=='delivered'&&(
-                          <button className="btn btn-xs"
-                            style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:600}}
-                            onClick={()=>setConfirming({order, shipment:ship})}>
-                            ✅ Mark Delivered
-                          </button>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -1129,7 +1309,7 @@ export default function DeliveryHubPage() {
                 );
 
                 return (
-                  <div style={{display:'flex',flexDirection:'column',gap:8,marginTop:4}}>
+                  <div style={{display:'flex',flexDirection:'column',gap:12,marginTop:4}}>
                     {visibleSoList.map(so=>{
                       const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
                       if (!soItems.length) return null;
@@ -1143,6 +1323,8 @@ export default function DeliveryHubPage() {
                       const headerBg    = poStatus==='received'?'var(--green-lt)':totPending>0?'#f5f3ff':'var(--surface2)';
                       const headerBord  = poStatus==='received'?'var(--green)':totPending>0?'#c4b5fd':'var(--border)';
                       const headerCol   = poStatus==='received'?'var(--green)':totPending>0?'var(--purple,#7c3aed)':'var(--text2)';
+                      const sectionKey  = `${order.id}:${so.id}`;
+                      const sectionOpen = isHubSectionOpen(sectionKey);
                       return (
                         <div key={so.id} style={{borderRadius:'var(--r-sm)',border:`1.5px solid ${headerBord}`,overflow:'hidden'}}>
                           {/* Supplier header row */}
@@ -1154,7 +1336,9 @@ export default function DeliveryHubPage() {
                               <span className="mono" style={{fontSize:11,color:'var(--text3)'}}>
                                 {so.internal_po_no||so.id}
                               </span>
-                              {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>🚚 {so.tracking_no}</span>}
+                              {so.shipper_id&&<span style={{fontSize:11,color:'var(--accent)',fontWeight:600}}>🚚 {shipperNameFor(so.shipper_id)}</span>}
+                              {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>AWB {so.tracking_no}</span>}
+                              {so.ship_load_date&&<span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>Load {so.ship_load_date}</span>}
                             </div>
                             <div style={{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>
                               <span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--surface)',border:'1px solid var(--border)',color:'var(--text2)',fontWeight:600}}>Ordered: {totOrdered}</span>
@@ -1162,6 +1346,7 @@ export default function DeliveryHubPage() {
                               {totPending>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'#f5f3ff',color:'var(--purple,#7c3aed)',fontWeight:700,border:'1px solid #c4b5fd'}}>⏳ Pending: {totPending}</span>}
                               {totBalShip>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700,border:'1px solid var(--amber,#d97706)44'}}>📦 At Hub: {totBalShip}</span>}
                               {totShipped>0&&<span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700,border:'1px solid var(--teal,#0d9488)44'}}>🚚 Shipped: {totShipped}</span>}
+                              {so.credit_note_no && <span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#92400e)',fontWeight:700,border:'1px solid #f59e0b44'}}>📄 CN {so.credit_note_no}</span>}
                               {/* Per-supplier action buttons */}
                               {(()=>{
                                 const needsGRN = totPending > 0 || soItems.some(li=>['delivered_hub','grn_partial','partial_shipped'].includes(li.line_status));
@@ -1187,10 +1372,22 @@ export default function DeliveryHubPage() {
                                   </div>
                                 );
                               })()}
+                              <button className="btn btn-xs"
+                                style={{fontSize:10,padding:'2px 8px',fontWeight:700}}
+                                onClick={()=>toggleHubSection(sectionKey)}>
+                                {sectionOpen ? '▾ Hide' : '▸ Show'}
+                              </button>
                             </div>
                           </div>
+                          {so.credit_note_no && (
+                            <div style={{padding:'8px 12px',background:'var(--amber-lt,#fffbeb)',borderTop:'1px solid #f59e0b33',display:'flex',gap:16,flexWrap:'wrap',fontSize:11}}>
+                              <div style={{fontWeight:700,color:'var(--amber,#92400e)'}}>Credit Note: <span className="mono">{so.credit_note_no}</span></div>
+                              <div style={{fontWeight:600,color:'var(--amber,#92400e)'}}>Amount: {fmtM(Number(so.credit_note_amount)||0)}</div>
+                              <div style={{fontWeight:600,color:'var(--text2)'}}>Date: {so.credit_note_date || '—'}</div>
+                            </div>
+                          )}
                           {/* Per-item detail rows */}
-                          <div style={{background:'var(--surface)'}}>
+                          {sectionOpen && <div style={{background:'var(--surface)'}}>
                             {soItems.map((li,idx)=>{
                               const rcvd    = grnQtyByItem[li.id]||0;
                               const shipped = shippedQtyMap[li.id]||0;
@@ -1224,7 +1421,7 @@ export default function DeliveryHubPage() {
                               <span style={{textAlign:'center',color:'var(--amber,#d97706)'}}>AT HUB</span>
                               <span style={{textAlign:'right'}}>STATUS</span>
                             </div>
-                          </div>
+                          </div>}
                         </div>
                       );
                     })}

@@ -16,12 +16,51 @@ const getTaxRates = (currency) => {
 
 const fmt = n => new Intl.NumberFormat('en-IN', { maximumFractionDigits: 2 }).format(n || 0);
 const money = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const hasValue = v => v !== '' && v !== null && v !== undefined;
+const DEFAULT_MARGIN_PCT = '15';
+const noBidSrcFields = {
+  supplier_id: '',
+  sourced_price: '',
+  sourced_currency: 'INR',
+  src_price_foreign: '',
+  exchange_rate: '',
+  hsn_code: '',
+  availability: '',
+  lead_time: '',
+  freight_pct: '',
+  insurance_pct: '',
+  duty_pct: '',
+  cess_pct: '',
+  bank_fixed_foreign: '',
+  bank_fixed_inr: '',
+  bank_fixed_usd: '',
+  clearance_fixed_inr: '',
+  margin_pct: '',
+  freight_inr: null,
+  insurance_inr: null,
+  duty_inr: null,
+  cess_inr: null,
+  bank_inr: null,
+  clearance_inr: null,
+  margin_inr: null,
+  quote_price: null,
+  tax_rate: null,
+  _transport: '',
+  _packaging: '',
+  _buffer: '',
+  _gst_pct: '',
+  _fieldModes: {},
+  src_dc: '',
+  delivery_promise_date: '',
+};
+const toNoBidSourceRow = row => ({ ...row, ...noBidSrcFields, item_status: 'no_bid' });
+const toEmptyQuoteRow = row => ({ ...row, quote_price: '', tax_rate: '' });
 const closeEnough = (a, b) => Math.abs(Number(a) - Number(b)) <= 0.05;
 const inferMarginMode = (src, qrow) => {
   const source = Number(src?.sourced_price) || 0;
   const margin = Number(src?.margin_pct) || 0;
   const quote = Number(qrow?.quote_price) || 0;
-  if (source <= 0 || margin <= 0 || quote <= 0) return 'amt';
+  if (source <= 0 || margin <= 0 || quote <= 0) return 'pct';
   const pctQuote = source * (1 + margin / 100);
   const amtQuote = source + margin;
   if (closeEnough(quote, pctQuote) && !closeEnough(quote, amtQuote)) return 'pct';
@@ -36,6 +75,13 @@ const parseFieldModes = value => {
   } catch (_) {
     return {};
   }
+};
+
+const ITEM_STATUS = {
+  ready: { label: 'Ready', color: '#15803d', bg: '#dcfce7', border: '#86efac', help: 'Ready items are included when you send this enquiry to Quote Bin.' },
+  checking: { label: 'Checking', color: '#92400e', bg: '#fffbeb', border: '#f59e0b', help: 'Checking means sourcing may still be possible later. It stays in Sourcing and is not included in the current quote.' },
+  no_bid: { label: 'No Bid', color: '#991b1b', bg: '#fee2e2', border: '#fca5a5', help: 'No Bid means this item is cancelled for quoting and will not go to Quote Bin.' },
+  quoted: { label: 'Quoted', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd', help: 'This item was already sent in an earlier split quote.' },
 };
 
 // ── per-item cost calc ────────────────────────────────────────────────────────
@@ -125,7 +171,7 @@ function calcLanded(src, item, modes = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItems, isReadOnly,
                       onClose, onApply }) {
-  const [row,  setRow]  = useState({ ...srcRow, _transport: srcRow._transport || '', _packaging: srcRow._packaging || '', _buffer: srcRow._buffer || '', _gst_pct: srcRow._gst_pct || '' });
+  const [row,  setRow]  = useState({ ...srcRow, _transport: srcRow._transport ?? '', _packaging: srcRow._packaging ?? '', _buffer: srcRow._buffer ?? '', _gst_pct: srcRow._gst_pct ?? '' });
   const [qrow, setQrow] = useState({ ...qRow });
 
   const isInvStock  = !!row.supplier_id?.startsWith('__inv__');
@@ -458,17 +504,17 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
                   </select>
                 </div>
                 <div className="id-fg">
-                  <label style={{ ...LBL, color: (!qrow.tax_rate && qrow.tax_rate !== 0) ? 'var(--red)' : undefined }}>GST / Tax *</label>
+                  <label style={{ ...LBL, color: !hasValue(qrow.tax_rate) ? 'var(--red)' : undefined }}>GST / Tax *</label>
                   <select className="input" value={qrow.tax_rate ?? ''} onChange={e => updQrow('tax_rate', e.target.value)} disabled={isReadOnly}
-                    style={{ height: 36, fontSize: 12, borderColor: (!qrow.tax_rate && qrow.tax_rate !== 0) ? 'var(--red)' : undefined }}>
+                    style={{ height: 36, fontSize: 12, borderColor: !hasValue(qrow.tax_rate) ? 'var(--red)' : undefined }}>
                     <option value="">— None —</option>
                     {getTaxRates('INR').map(t => <option key={t.label} value={t.rate}>{t.label}</option>)}
                   </select>
                 </div>
                 <div className="id-fg">
-                  <label style={{ ...LBL, color: qrow.quote_price ? 'var(--green)' : undefined }}>Quote Price / Unit *</label>
-                  <input className="input" style={{ height: 36, fontSize: 12, fontWeight: 700, background: qrow.quote_price ? 'var(--green-lt)' : undefined, borderColor: qrow.quote_price ? 'var(--green)' : undefined }}
-                    type="number" step="0.01" min="0" value={qrow.quote_price || ''} disabled={isReadOnly}
+                  <label style={{ ...LBL, color: hasValue(qrow.quote_price) ? 'var(--green)' : undefined }}>Quote Price / Unit *</label>
+                  <input className="input" style={{ height: 36, fontSize: 12, fontWeight: 700, background: hasValue(qrow.quote_price) ? 'var(--green-lt)' : undefined, borderColor: hasValue(qrow.quote_price) ? 'var(--green)' : undefined }}
+                    type="number" step="0.01" min="0" value={qrow.quote_price ?? ''} disabled={isReadOnly}
                     onChange={e => updQrow('quote_price', e.target.value)} />
                 </div>
                 {(() => {
@@ -594,21 +640,22 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           duty_pct:            hasData ? (ex.duty_pct     ?? '') : '',
           cess_pct:            hasData ? (ex.cess_pct     ?? '') : '',
           clearance_fixed_inr: hasData ? (ex.clearance_fixed_inr ?? '') : '',
-          margin_pct:          hasData ? (ex.margin_pct   ?? '') : '',
+          margin_pct:          hasValue(ex.margin_pct) ? ex.margin_pct : DEFAULT_MARGIN_PCT,
           bank_fixed_foreign:  isIntl  ? (ex.bank_fixed_usd ?? '') : '',
           bank_fixed_inr:     !isIntl  ? (ex.bank_fixed_usd ?? '') : '',
           // ALWAYS preserve sent_to_enquiry flag regardless of supplier
           sent_to_enquiry:     ex.sent_to_enquiry ? 1 : 0,
           sent_to_enquiry_note: ex.sent_to_enquiry_note || '',
           preferred_delivery_date: ex.preferred_delivery_date || item.preferred_delivery_date || '',
-          _transport: ex._transport || '', _packaging: ex._packaging || '',
-          _buffer: ex._buffer || '', _gst_pct: ex._gst_pct || '',
+          _transport: ex._transport ?? '', _packaging: ex._packaging ?? '',
+          _buffer: ex._buffer ?? '', _gst_pct: ex._gst_pct ?? '',
           _fieldModes: parseFieldModes(ex.field_modes),
           src_dc: ex.src_dc || '', delivery_promise_date: ex.delivery_promise_date || '',
+          item_status: ex.item_status || 'ready',
         };
       }
       // No sourcing row in DB yet — blank slate
-      return { id: null, enquiry_item_id: item.id, supplier_id: '', sourced_price: '', sourced_currency: 'INR', src_price_foreign: '', exchange_rate: '', hsn_code: '', availability: '', lead_time: '', notes: '', freight_pct: '', insurance_pct: '', duty_pct: '', cess_pct: '', bank_fixed_foreign: '', bank_fixed_inr: '', clearance_fixed_inr: '', margin_pct: '', preferred_delivery_date: item.preferred_delivery_date || '', _transport: '', _packaging: '', _buffer: '', _gst_pct: '', src_dc: '', delivery_promise_date: '', sent_to_enquiry: 0, sent_to_enquiry_note: '' };
+      return { id: null, enquiry_item_id: item.id, supplier_id: '', sourced_price: '', sourced_currency: 'INR', src_price_foreign: '', exchange_rate: '', hsn_code: '', availability: '', lead_time: '', notes: '', item_status: 'ready', freight_pct: '', insurance_pct: '', duty_pct: '', cess_pct: '', bank_fixed_foreign: '', bank_fixed_inr: '', clearance_fixed_inr: '', margin_pct: DEFAULT_MARGIN_PCT, preferred_delivery_date: item.preferred_delivery_date || '', _transport: '', _packaging: '', _buffer: '', _gst_pct: '', src_dc: '', delivery_promise_date: '', sent_to_enquiry: 0, sent_to_enquiry_note: '' };
     })
   );
 
@@ -616,7 +663,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     (enq.items || []).map(item => {
       const candidates = (enq.sourcing || []).filter(s => s.enquiry_item_id === item.id);
       const ex = candidates.find(s => s.supplier_id) || candidates[0];
-      return { enquiry_item_id: item.id, quote_price: ex?.quote_price || '', quote_currency: ex?.quote_currency || item.target_currency || 'INR', tax_rate: ex?.tax_rate ?? '' };
+      return { enquiry_item_id: item.id, quote_price: ex?.quote_price ?? '', quote_currency: ex?.quote_currency || item.target_currency || 'INR', tax_rate: ex?.tax_rate ?? '' };
     })
   );
 
@@ -647,16 +694,51 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
   const updSrc   = (idx, k, v) => setSrcRows(p  => p.map((r, i) => i === idx ? { ...r, [k]: v } : r));
   const updQuote = (idx, k, v) => setQuoteRows(p => p.map((r, i) => i === idx ? { ...r, [k]: v } : r));
-
-  // pendingRevision: active revision quote waiting for re-pricing
-  // Covers returned_to_sourcing (normal revision) AND sourcing (Flow B: order-section modify → ENQ → Sourcing)
+  const setItemStatus = (idx, status) => {
+    const nextStatus = ITEM_STATUS[status] ? status : 'ready';
+    setSrcRows(p => p.map((r, i) => i === idx ? (nextStatus === 'no_bid' ? toNoBidSourceRow(r) : { ...r, item_status: nextStatus }) : r));
+    if (nextStatus !== 'ready') {
+      setQuoteRows(p => p.map((r, i) => i === idx ? toEmptyQuoteRow(r) : r));
+    }
+  };
+  // pendingRevision: quote revision explicitly waiting for re-pricing.
+  // New server rows use status returned_to_sourcing. Older/live rows may already be
+  // active while the enquiry is still returned_to_sourcing; treat those as pending
+  // only in that enquiry state. Once sourcing returns it and the enquiry moves back
+  // to sourcing/quoted, active V2 is no longer considered pending.
+  const revisionQuotes = (quotes || [])
+    .filter(q => q.enquiry_id === enq.id && (
+      q.status === 'returned_to_sourcing' ||
+      (enq.status === 'returned_to_sourcing' && q.status === 'active' && (q.revision || 1) > 1)
+    ))
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '') || ((b.revision || 1) - (a.revision || 1)));
   const pendingRevision = (enq.status === 'returned_to_sourcing' || enq.status === 'sourcing')
-    ? ((quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'returned_to_sourcing') ||
-       (enq.status === 'returned_to_sourcing'
-         ? ((quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'active' && (q.revision || 1) > 1) || null)
-         : null))
+    ? (revisionQuotes[0] || null)
     : null;
   const isRevision = !!pendingRevision;
+  const revisionItemKeys = useMemo(() => {
+    const keys = new Set();
+    (pendingRevision?.notes || '').split('\n').forEach(line => {
+      const m = line.match(/^([^:]+):\s*Quote\s+/i);
+      if (m) keys.add(m[1].trim().toLowerCase());
+    });
+    return keys;
+  }, [pendingRevision?.notes]);
+  const itemKey = item => (item?.component || '').trim().toLowerCase();
+  const isRevisionItem = (item, row) => {
+    if (!isRevision) return false;
+    if (revisionItemKeys.size > 0) return revisionItemKeys.has(itemKey(item));
+    return ['ready', 'quoted'].includes(row?.item_status || 'ready');
+  };
+  const quoteableIndexes = () => srcRows
+    .map((r, idx) => {
+      const status = r.item_status || 'ready';
+      const item = enq.items?.[idx];
+      const canReturnRevisionItem = isRevisionItem(item, r);
+      const canSendNewQuoteItem = !isRevision && status === 'ready';
+      return ((canSendNewQuoteItem || canReturnRevisionItem) && !r.sent_to_enquiry) ? idx : -1;
+    })
+    .filter(idx => idx >= 0);
   const isQuoted   = enq.status === 'quoted' && !pendingRevision;
   // Whole ENQ sent: every enquiry item is flagged (via srcRows), or no sourcing rows but send_to_enq_note set
   const totalEnqItems = (enq.items || []).length;
@@ -671,7 +753,10 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   const isModifyWholeEnqLocked = enq.status === 'modify_requested' && (
     !!(enq.modify_reason) || isWholeEnquirySent || (enq.send_to_enq_note && srcRows.every(r => !r.sent_to_enquiry))
   );
-  const isReadOnly = forceReadOnly || isQuoted || ['ordered', 'order_created'].includes(enq.status)
+  const hasSplitHistory = srcRows.some(r => (r.item_status || 'ready') === 'quoted');
+  const hasPendingSplitItems = hasSplitHistory && srcRows.some(r => ['checking', 'ready'].includes(r.item_status || 'ready'));
+  const isCompletedWithoutPendingSplit = ['ordered', 'order_created'].includes(enq.status) && !hasPendingSplitItems;
+  const isReadOnly = forceReadOnly || isQuoted || isCompletedWithoutPendingSplit
     || isModifyWholeEnqLocked;
   // Once this enquiry has gone to quote at least once, never show "Send to ENQ" again
   const hasEverBeenQuoted = (quotes || []).some(q => q.enquiry_id === enq.id);
@@ -714,7 +799,10 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   }, [srcRows, quoteRows, charges, enq.items, suppliers, inventoryItems]);
 
   const allFieldsFilled = useMemo(() => {
-    return (enq.items || []).every((item, idx) => {
+    const qIdxs = quoteableIndexes();
+    if (qIdxs.length === 0) return false;
+    return qIdxs.every(idx => {
+      const item = enq.items?.[idx];
       const row  = srcRows[idx]   || {};
       const qrow = quoteRows[idx] || {};
       const isInvRow = !!row.supplier_id?.startsWith('__inv__');
@@ -729,11 +817,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         && (!isIntlSup || Number(row.src_price_foreign) > 0)
         && (qrow.tax_rate !== '' && qrow.tax_rate != null);
     });
-  }, [srcRows, quoteRows, enq.items, suppliers, inventoryItems]);
+  }, [srcRows, quoteRows, enq.items, suppliers, inventoryItems, isRevision]);
 
   const handleSave = async (mode) => {
+    const quoteIdxs = quoteableIndexes();
     if (mode === 'quote' || mode === 'return_revision') {
-      for (let i = 0; i < srcRows.length; i++) {
+      if (quoteIdxs.length === 0) {
+        toast.error(mode === 'return_revision'
+          ? 'No quoted items are available to return to Quote Bin.'
+          : 'Select at least one Ready item to send to Quote Bin.');
+        return;
+      }
+      for (const i of quoteIdxs) {
         const item = enq.items?.[i];
         const lt = (srcRows[i].lead_time || '').toString().trim();
         if (!lt || lt === '0' || lt === '0 Days' || lt === '0 Weeks' || lt === '0 Months') { toast.error(`Lead Time is required for "${item?.component || 'item ' + (i + 1)}"`); return; }
@@ -742,7 +837,14 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     }
     setSaving(true); setSaveMode(mode);
     try {
-      const rowsToSave = srcRows.map(r => {
+      let rowsToSave = srcRows.map(r => {
+        if ((r.item_status || 'ready') === 'no_bid') {
+          return {
+            ...toNoBidSourceRow(r),
+            id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()),
+            sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null,
+          };
+        }
         const qrow = quoteRows.find(q => q.enquiry_item_id === r.enquiry_item_id) || quoteRows[0];
         const item = enq.items?.find(i => i.id === r.enquiry_item_id);
         const isInvHolder = r.supplier_id?.startsWith('__inv__');
@@ -756,25 +858,34 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         const fieldModes = normalized._fieldModes ? JSON.stringify(normalized._fieldModes) : null;
         return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, field_modes: fieldModes, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
       });
-      const newStatus = (mode === 'quote' || mode === 'return_revision') ? 'quoted' : 'sourcing';
-      const action    = mode === 'quote' ? 'Sent to Quote Bin' : mode === 'draft' ? 'Saved as draft in Sourcing' : 'Sourcing saved';
-      const srcSummary = rowsToSave.map((r, idx) => { const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx]; if (!item) return null; const srcDisplay = (r.src_price_foreign && r.exchange_rate) ? `${r.sourced_currency} ${r.src_price_foreign} (=₹${r.sourced_price || '—'} @ rate ${r.exchange_rate})` : `₹ ${r.sourced_price || '—'}`; return `${item.component}: Quote ${r.quote_currency} ${r.quote_price || '—'} | Src ${srcDisplay} | Qty ${item.quantity}${srcRevNotes[r.enquiry_item_id] ? ' | Note: ' + srcRevNotes[r.enquiry_item_id] : ''}`; }).filter(Boolean).join('\n');
+      const hasCheckingItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'checking');
+      const hasNoBidItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'no_bid');
+      const isSplitQuote = mode === 'quote' && (hasCheckingItemsBeforeQuote || hasNoBidItemsBeforeQuote || hasEverBeenQuoted);
+      if (mode === 'quote') {
+        const quoteItemIds = new Set(quoteIdxs.map(i => enq.items?.[i]?.id).filter(Boolean));
+        rowsToSave = rowsToSave.map(r => quoteItemIds.has(r.enquiry_item_id) ? { ...r, item_status: 'quoted' } : r);
+      }
+      const hasPendingAfterAction = rowsToSave.some(r => ['checking', 'ready'].includes(r.item_status || 'ready'));
+      const newStatus = (mode === 'quote' || mode === 'return_revision' || mode === 'no_bid') ? (hasPendingAfterAction ? 'sourcing' : 'quoted') : 'sourcing';
+      const action    = mode === 'quote' ? 'Sent to Quote Bin' : mode === 'return_revision' ? 'Returned to Quote Bin' : mode === 'no_bid' ? 'No Bid submitted' : mode === 'draft' ? 'Saved as draft in Sourcing' : 'Sourcing saved';
+      const srcSummary = rowsToSave.map((r, idx) => { const item = enq.items?.find(i => i.id === r.enquiry_item_id) || enq.items?.[idx]; if (!item || !quoteIdxs.includes((enq.items || []).findIndex(i => i.id === r.enquiry_item_id))) return null; const srcDisplay = (r.src_price_foreign && r.exchange_rate) ? `${r.sourced_currency} ${r.src_price_foreign} (=₹${r.sourced_price || '—'} @ rate ${r.exchange_rate})` : `₹ ${r.sourced_price || '—'}`; return `${item.component}: Quote ${r.quote_currency} ${r.quote_price || '—'} | Src ${srcDisplay} | Qty ${item.quantity}${srcRevNotes[r.enquiry_item_id] ? ' | Note: ' + srcRevNotes[r.enquiry_item_id] : ''}`; }).filter(Boolean).join('\n');
       const addlTotal = ['customs','handling','freight','bank','insurance','duty','cess','clearance'].reduce((s, k) => s + (Number(charges[k]) || 0), 0);
       const fullNotes = srcSummary + (addlTotal > 0 ? `\nAdditional charges: ${JSON.stringify(charges)}` : '');
       // For a first-time quote the server creates the quote row atomically as part of
       // this PUT (when _action === 'Sent to Quote Bin'), so we no longer make a separate
       // POST /quotes call — that two-step flow could leave the enquiry marked 'quoted'
       // with no quote row if the second request failed (production Quote Bin showing empty).
-      const putRes = await api.put(`/enquiries/${enq.id}`, { sourcing: rowsToSave, charges, status: newStatus, assigned_to: assignTo || null, _action: action, quote_notes: (mode === 'quote' ? fullNotes : undefined) });
+      const putRes = await api.put(`/enquiries/${enq.id}`, { sourcing: rowsToSave, charges, status: newStatus, assigned_to: assignTo || null, _action: action, quote_notes: (mode === 'quote' ? fullNotes : undefined), allow_partial_quote: isSplitQuote });
       if (mode === 'return_revision' && pendingRevision) {
         try { await api.put('/quotes/' + pendingRevision.id, { quote_no: pendingRevision.quote_no, zoho_quote_no: pendingRevision.zoho_quote_no || '', file_ref: pendingRevision.file_ref || '', valid_until: pendingRevision.valid_until || '', status: 'active', notes: fullNotes }); toast.success('✅ Prices updated — ' + pendingRevision.quote_no + ' returned to Quote Bin!'); }
         catch (e) { toast.error('Failed to update revision quote: ' + (e.response?.data?.error || e.message)); }
       } else if (mode === 'quote') {
         const qNo = putRes?.data?._created_quote_no;
         toast.success(qNo ? '✅ Sent to Quote Bin! Quote ' + qNo + ' created.' : '✅ Sent to Quote Bin!');
-      } else if (mode === 'draft') { toast.success('Saved as draft'); }
+      } else if (mode === 'no_bid') { toast.success('✅ No Bid submitted'); }
+      else if (mode === 'draft') { toast.success('Saved as draft'); }
       else { toast.success('Sourcing saved'); }
-      if (mode === 'quote' || mode === 'return_revision' || mode === 'draft') { onSaved(); }
+      if (mode === 'quote' || mode === 'return_revision' || mode === 'draft' || mode === 'no_bid') { onSaved(); }
       else if (onSavedDraft) { onSavedDraft(); }
     } catch (e) { toast.error(e.response?.data?.error || 'Save failed'); }
     finally { setSaving(false); setSaveMode(''); }
@@ -846,6 +957,16 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   };
 
   const md = marginData;
+  const readyQuoteCount = quoteableIndexes().length;
+  const quoteCountLabel = isRevision ? `${readyQuoteCount} quote item${readyQuoteCount === 1 ? '' : 's'}` : `${readyQuoteCount} ready`;
+  const checkingCount = srcRows.filter(r => (r.item_status || 'ready') === 'checking').length;
+  const noBidCount = srcRows.filter(r => (r.item_status || 'ready') === 'no_bid').length;
+  const submittedNoBidIds = new Set((enq.sourcing || [])
+    .filter(s => (s.item_status || 'ready') === 'no_bid')
+    .map(s => s.enquiry_item_id));
+  const pendingNoBidCount = srcRows.filter(r =>
+    (r.item_status || 'ready') === 'no_bid' && !submittedNoBidIds.has(r.enquiry_item_id)
+  ).length;
 
   // When drawer Apply is clicked, merge the edited row/qrow back into state
   const handleDrawerApply = (idx, { row, qrow }) => {
@@ -969,10 +1090,12 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             </div>
 
             {/* Single unified grid — heading always visible, same columns always */}
-            {/* Columns: # | MPN | Manufacturer | Supplier | Qty | HSN | Lead Time | Src Price | Margin | Quote/Unit | Quote Total | GST | Quote+GST | action */}
-            <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
+            {/* Columns: # | Include | Status | MPN | Manufacturer | Supplier | Qty | HSN | Lead Time | Src Price | Margin | Quote/Unit | Quote Total | GST | Quote+GST | action */}
+            <div style={{ display:'grid', gridTemplateColumns:'24px 34px minmax(94px,0.65fr) minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', background:'#1e293b', borderRadius:'6px 6px 0 0' }}>
               {[
                 {l:'#',          align:'center'},
+                {l:'✓',          align:'center'},
+                {l:'Status',     align:'center'},
                 {l:'MPN',        align:'center'},
                 {l:'Mfr',        align:'center'},
                 {l:'Supplier',   align:'center'},
@@ -1010,8 +1133,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const marginMode    = domesticMarginMode[idx] || 'amt';
               const aboveTarget   = Number(item.target_price) > 0 && srcUnit > 0 && srcUnit > Number(item.target_price);
               const hasIntlDetails = isIntlItem && (
-                srcUnit > 0 || quoteUnit > 0 || row.src_price_foreign || row.exchange_rate
+                srcUnit > 0 || quoteUnit > 0 || hasValue(row.src_price_foreign) || hasValue(row.exchange_rate)
               );
+              const itemStatus    = row.item_status || 'ready';
+              const statusCfg     = ITEM_STATUS[itemStatus] || ITEM_STATUS.ready;
+              const isInRevisionQuote = isRevisionItem(item, row);
+              const isQuoteReady  = isRevision ? isInRevisionQuote : itemStatus === 'ready';
+              const isSkippedItem = itemStatus !== 'ready';
+              const isNoBidItem = itemStatus === 'no_bid';
+              const isSubmittedNoBid = (enq.sourcing || []).some(s => s.enquiry_item_id === item.id && (s.item_status || 'ready') === 'no_bid');
+              const rowLocked = Boolean(row.sent_to_enquiry) || isSubmittedNoBid || (isRevision ? !isInRevisionQuote : itemStatus === 'quoted');
+              const fieldLocked = rowLocked || isNoBidItem;
+              const statusLocked = isReadOnly || Boolean(row.sent_to_enquiry) || isRevision || itemStatus === 'quoted' || isSubmittedNoBid;
 
               const calcDomesticQuote = (sp, mv, mm) => {
                 const s = Number(sp)||0, m = Number(mv)||0;
@@ -1031,9 +1164,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                   const isStockIntl = stCur !== 'INR';
                   const price = hit?.target_price ? String(hit.target_price) : '';
                   if (isStockIntl) {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   } else {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   }
                   setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
                   setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
@@ -1042,9 +1175,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 const sup = suppliers.find(s => s.id === supId);
                 const st  = sup?.type || 'domestic';
                 if (st === 'international') {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 } else {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', sourced_price:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 }
                 setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
                 setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
@@ -1084,16 +1217,49 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
               // Lock based purely on sent_to_enquiry flag from DB.
               // Server clears this flag when ENQ resubmits to sourcing → item unlocks automatically.
-              const rowLocked = Boolean(row.sent_to_enquiry);
               const sentNote = row.sent_to_enquiry_note ? row.sent_to_enquiry_note.trim() : '';
               return (
-                <div key={item.id} style={{ borderTop:'1px solid var(--border)', background: rowLocked ? '#f8fafc' : mrow.aboveTarget ? '#fff5f5' : '#fff' }}>
+                <div key={item.id} style={{ borderTop:'1px solid var(--border)', background: rowLocked ? '#f8fafc' : isSkippedItem ? statusCfg.bg : mrow.aboveTarget ? '#fff5f5' : '#fff' }}>
 
                   {/* ── Main row grid ── */}
-                  <div style={{ display:'grid', gridTemplateColumns:'24px minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', alignItems:'start' }}>
+                  <div style={{ display:'grid', gridTemplateColumns:'24px 34px minmax(94px,0.65fr) minmax(120px,1.2fr) minmax(90px,0.7fr) 1.2fr 44px 0.6fr 0.9fr 0.8fr 1fr 0.8fr 0.8fr 0.7fr 1fr 82px', gap:'0 6px', padding:'6px 14px', alignItems:'start' }}>
 
                     {/* # */}
                     <div style={{ fontSize:13, fontWeight:700, color:'var(--text3)', textAlign:'center', paddingTop:8 }}>{idx+1}</div>
+
+                    {/* Include */}
+                    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', paddingTop:6 }}>
+                      <input
+                        type="checkbox"
+                        checked={isQuoteReady}
+                        disabled={statusLocked || isNoBidItem}
+                        onChange={e => setItemStatus(idx, e.target.checked ? 'ready' : 'checking')}
+                        title={isQuoteReady ? 'Included in Quote Bin' : 'Not included in current quote'}
+                        style={{ width:16, height:16, cursor:(statusLocked || isNoBidItem) ? 'not-allowed' : 'pointer' }}
+                      />
+                    </div>
+
+                    {/* Status */}
+                    <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+                      <select
+                        className="input"
+                        value={itemStatus}
+                        disabled={statusLocked}
+                        onChange={e => setItemStatus(idx, e.target.value)}
+                        style={{ height:32, fontSize:11, width:'100%', minWidth:0, fontWeight:800, color:statusCfg.color, background:statusCfg.bg, borderColor:statusCfg.border, padding:'2px 4px' }}
+                      >
+                        <option value="ready">Ready</option>
+                        <option value="checking">Checking</option>
+                        <option value="no_bid">No Bid</option>
+                        {itemStatus === 'quoted' && <option value="quoted">Quoted</option>}
+                      </select>
+                      <button
+                        type="button"
+                        title={statusCfg.help}
+                        onClick={e => { e.stopPropagation(); toast(statusCfg.help, { icon: 'ℹ️' }); }}
+                        style={{ width:18, height:18, borderRadius:'50%', border:`1.5px solid ${statusCfg.border}`, background:statusCfg.bg, color:statusCfg.color, fontSize:11, fontWeight:900, display:'inline-flex', alignItems:'center', justifyContent:'center', cursor:'pointer', flexShrink:0, padding:0 }}
+                      >i</button>
+                    </div>
 
                     {/* MPN */}
                     <div style={{ textAlign:'center', paddingTop:6 }}>
@@ -1105,7 +1271,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     <div style={{ fontSize:13, color:'var(--text2)', textAlign:'center', wordBreak:'break-word', whiteSpace:'normal', lineHeight:1.3, paddingTop:6 }}>{item.manufacturer||'—'}</div>
 
                     {/* Supplier dropdown — always */}
-                    <select {...inp} value={row.supplier_id||''} disabled={isReadOnly || rowLocked}
+                    <select {...inp} value={row.supplier_id||''} disabled={isReadOnly || fieldLocked}
                       style={{ height:32, fontSize:13, width:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
                       onChange={e=>handleSupChange(e.target.value)}>
                       <option value="">— Select —</option>
@@ -1119,18 +1285,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* HSN */}
                     {isDomestic
-                      ? <input {...inp} value={row.hsn_code||''} disabled={isReadOnly || rowLocked} onChange={e=>updSrc(idx,'hsn_code',e.target.value)} />
+                      ? <input {...inp} value={row.hsn_code||''} disabled={isReadOnly || fieldLocked} onChange={e=>updSrc(idx,'hsn_code',e.target.value)} />
                       : <div style={{ textAlign:'center', color:row.hsn_code?'var(--text2)':'var(--text3)', fontSize:13 }}>{row.hsn_code||'—'}</div>}
 
                     {/* Lead Time */}
                     {isDomestic
                       ? <div style={{ display:'flex', gap:3 }}>
                           <input className="input" style={{ flex:1, height:32, fontSize:13, textAlign:'center', minWidth:0 }} type="number" min="1"
-                            value={(row.lead_time||'').replace(/[^0-9]/g,'')} disabled={isReadOnly || rowLocked}
+                            value={(row.lead_time||'').replace(/[^0-9]/g,'')} disabled={isReadOnly || fieldLocked}
                             onChange={e=>{ const u=(row.lead_time||'').replace(/[0-9]/g,'').trim()||'Days'; updSrc(idx,'lead_time',e.target.value?e.target.value+' '+u:''); }} />
                           <select className="input" style={{ flex:'1 1 0', height:32, fontSize:12, minWidth:0, cursor:'pointer' }}
                             value={(row.lead_time||'').replace(/[0-9]/g,'').trim()||'Days'}
-                            disabled={isReadOnly || rowLocked}
+                            disabled={isReadOnly || fieldLocked}
                             onChange={e=>{ const n=(row.lead_time||'').replace(/[^0-9]/g,'')||''; updSrc(idx,'lead_time',n?n+' '+e.target.value:''); }}>
                             <option value="Days">Days</option><option value="Weeks">Weeks</option><option value="Months">Months</option>
                           </select>
@@ -1139,7 +1305,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Source Price (INR) */}
                     {isDomestic
-                      ? <input {...inp} type="number" step="0.01" min="0" value={row.sourced_price||''} disabled={isReadOnly || rowLocked}
+                      ? <input {...inp} type="number" step="0.01" min="0" value={row.sourced_price||''} disabled={isReadOnly || fieldLocked}
                           style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:aboveTarget?'var(--red)':undefined, background:aboveTarget?'#fee2e2':undefined }}
                           onChange={e=>{ if(Number(e.target.value)<0) return; handleSrcPrice(e.target.value); }} />
                       : <div style={{ textAlign:'center', fontWeight:700, color:srcUnit>0?'var(--text)':'var(--text3)', fontSize:13 }}>
@@ -1153,10 +1319,10 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     {/* Margin/Unit */}
                     {isDomestic
                       ? <div style={{ display:'flex', alignItems:'center', gap:3 }}>
-                          <input className="input" type="number" step="0.01" min="0" value={row.margin_pct||''} disabled={isReadOnly || rowLocked}
+                          <input className="input" type="number" step="0.01" min="0" value={row.margin_pct ?? ''} disabled={isReadOnly || fieldLocked}
                             style={{ flex:1, height:32, fontSize:13, minWidth:0, textAlign:'center' }}
                             onChange={e=>{ if(Number(e.target.value)<0) return; handleMargin(e.target.value); }} />
-                          <UnitToggle mode={marginMode} onToggle={toggleMarginMode} disabled={isReadOnly || rowLocked} />
+                          <UnitToggle mode={marginMode} onToggle={toggleMarginMode} disabled={isReadOnly || fieldLocked} />
                         </div>
                       : (() => {
                           const mAmt = mrow.lc?.marginAmt;
@@ -1170,8 +1336,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Quote/Unit — input if domestic, value or dash otherwise */}
                     {isDomestic
-                      ? <input {...inp} type="number" step="0.01" min="0" value={qrow.quote_price||''} disabled={isReadOnly || rowLocked}
-                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', fontWeight:700, background:qrow.quote_price?'var(--green-lt)':undefined, borderColor:qrow.quote_price?'var(--green)':undefined }}
+                      ? <input {...inp} type="number" step="0.01" min="0" value={qrow.quote_price ?? ''} disabled={isReadOnly || fieldLocked || !isQuoteReady}
+                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', fontWeight:700, background:hasValue(qrow.quote_price)?'var(--green-lt)':undefined, borderColor:hasValue(qrow.quote_price)?'var(--green)':undefined }}
                           onChange={e=>{ if(Number(e.target.value)<0) return; updQuote(idx,'quote_price',e.target.value); }} />
                       : <div style={{ textAlign:'center', fontWeight:700, color:quoteUnit>0?'var(--green)':'var(--text3)', fontSize:13 }}>{quoteUnit>0?`₹${fmt(quoteUnit)}`:'—'}</div>}
 
@@ -1180,8 +1346,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* GST — select if domestic, display value for intl */}
                     {isDomestic
-                      ? <select {...inp} value={qrow.tax_rate??''} disabled={isReadOnly || rowLocked}
-                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:(!qrow.tax_rate&&qrow.tax_rate!==0)?'#ef4444':undefined }}
+                      ? <select {...inp} value={qrow.tax_rate??''} disabled={isReadOnly || fieldLocked}
+                          style={{ height:32, fontSize:13, width:'100%', textAlign:'center', borderColor:!hasValue(qrow.tax_rate)?'#ef4444':undefined }}
                           onChange={e=>updQuote(idx,'tax_rate',e.target.value)}>
                           <option value="">—GST—</option>
                           {getTaxRates('INR').map(t=><option key={t.label} value={t.rate}>{t.label}</option>)}
@@ -1197,7 +1363,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Action col: Calculate button for intl only + send-to-enquiry action */}
                     <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap:3, justifyContent:'center', minWidth:0 }}>
-                      {isIntlItem && !rowLocked && !isReadOnly && <button
+                      {isIntlItem && isQuoteReady && !fieldLocked && !isReadOnly && <button
                         type="button"
                         className="btn btn-xs btn-primary"
                         onClick={() => { setDrawerMode('edit'); setDrawerItemIdx(idx); }}
@@ -1213,7 +1379,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4-6.5-4-6.5-4z"/><circle cx="8" cy="8" r="2"/></svg>
                         View
                       </button>}
-                      {!isReadOnly && !hasEverBeenQuoted && (!rowLocked ? (
+                      {!isNoBidItem && !isReadOnly && !hasEverBeenQuoted && (!rowLocked ? (
                         <button className="btn btn-xs btn-secondary" onClick={() => handleSendToEnquiry(idx)} style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
                           Send to ENQ
                         </button>
@@ -1294,7 +1460,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                       {/* Line Note — label + field inline */}
                       <span style={{ fontSize:10, fontWeight:700, color:'#6b7280', letterSpacing:.4, whiteSpace:'nowrap', flexShrink:0 }}>LINE NOTE</span>
                       <input className="input" value={row.notes||''} placeholder="Note to team…"
-                        onChange={e=>updSrc(idx,'notes',e.target.value)} disabled={isReadOnly || rowLocked}
+                        onChange={e=>updSrc(idx,'notes',e.target.value)} disabled={isReadOnly || fieldLocked}
                         style={{ flex:'1 1 0', minWidth:100, maxWidth:320, height:28, fontSize:11, padding:'2px 8px' }}/>
 
                       {/* right-side chips — label + chip inline, pushed to far right */}
@@ -1424,28 +1590,39 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
             </div>
           ) : (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ fontSize: 12, color: 'var(--text2)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: '#15803d' }}>{quoteCountLabel}</span>
+                {checkingCount > 0 && <span style={{ color: '#92400e' }}>· {checkingCount} checking</span>}
+                {noBidCount > 0 && <span style={{ color: '#991b1b' }}>· {noBidCount} no bid</span>}
+              </div>
               <button className="btn" disabled={saving} onClick={() => handleSave('draft')} style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14 }}>
                 <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="1.5"/><path d="M5 2v5h6V2"/><rect x="9" y="2" width="2" height="3"/></svg>
                 {saving && saveMode === 'draft' ? 'Saving…' : 'Save as Draft'}
               </button>
+              {pendingNoBidCount > 0 && (
+                <button className="btn" disabled={saving} onClick={() => handleSave('no_bid')}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14, background:'#fee2e2', borderColor:'#fca5a5', color:'#991b1b', fontWeight:700 }}>
+                  {saving && saveMode === 'no_bid' ? 'Submitting…' : `Submit ${pendingNoBidCount} No Bid`}
+                </button>
+              )}
               {!hasEverBeenQuoted && (
                 <button className="btn btn-secondary" disabled={sendInProgress || isWholeEnquirySent} onClick={() => handleSendToEnquiry(null)} style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 24px', fontSize:14, background: isWholeEnquirySent ? 'var(--surface2)' : undefined, borderColor: isWholeEnquirySent ? 'var(--border)' : undefined, color: isWholeEnquirySent ? 'var(--text3)' : undefined }}>
                   {sendInProgress ? 'Sending…' : isWholeEnquirySent ? 'Sent to Enquiry' : 'Send full enquiry to ENQ'}
                 </button>
               )}
-              {isRevision ? (
+              {readyQuoteCount > 0 && (isRevision ? (
                 <button className="btn btn-primary" disabled={saving || !allFieldsFilled} onClick={() => handleSave('return_revision')}
                   style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 28px', fontSize:14, background: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--amber,#d97706)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
                   <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
-                  {saving && saveMode === 'return_revision' ? 'Returning…' : '↩ Return to Quote Bin — ' + (pendingRevision?.quote_no || 'Revision')}
+                  {saving && saveMode === 'return_revision' ? 'Returning…' : `↩ Return ${readyQuoteCount} to Quote Bin — ` + (pendingRevision?.quote_no || 'Revision')}
                 </button>
               ) : (
                 <button className="btn btn-primary" disabled={saving || !allFieldsFilled} onClick={() => handleSave('quote')}
                   style={{ display: 'flex', alignItems: 'center', gap: 7, padding:'10px 28px', fontSize:14, background: allFieldsFilled ? 'var(--accent)' : 'var(--border)', borderColor: allFieldsFilled ? 'var(--accent)' : 'var(--border)', color: allFieldsFilled ? '#fff' : 'var(--text3)', cursor: allFieldsFilled ? 'pointer' : 'not-allowed', opacity: allFieldsFilled ? 1 : 0.6 }}>
                   <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" viewBox="0 0 16 16"><path d="M2 2h12v13H2zM5 5h6M5 8h4M11 8l3 3-3 3"/></svg>
-                  {saving && saveMode === 'quote' ? 'Sending...' : 'Send to Quote Bin →'}
+                  {saving && saveMode === 'quote' ? 'Sending...' : `Send ${readyQuoteCount} to Quote Bin →`}
                 </button>
-              )}
+              ))}
             </div>
           )}
         </div>
@@ -1577,19 +1754,27 @@ export default function SourcingBinDrawerPage() {
   const custName = id => customers.find(c => c.id === id)?.name || id;
   const userName = id => users.find(u => u.id === id)?.name || 'Unassigned';
 
-  const hasRevisionReturned = enq => !!(quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'active');
+  const hasActiveQuote = enq => !!(quotes || []).find(q => q.enquiry_id === enq.id && q.status === 'active');
+  const hasCheckingItems = enq => (enq.sourcing || []).some(s => (s.item_status || 'ready') === 'checking');
+  const hasPendingSplit = enq => (enq.sourcing || []).some(s => (s.item_status || 'ready') === 'quoted')
+    && (enq.sourcing || []).some(s => ['checking', 'ready'].includes(s.item_status || 'ready'))
+    && !['returned_to_sourcing', 'modify_requested', 'closed', 'quoted'].includes(enq.status);
+  const hasPendingRevision = enq => enq.status === 'returned_to_sourcing'
+    || (quotes || []).some(q => q.enquiry_id === enq.id && q.status === 'active' && (q.revision || 1) > 1);
+  const isOpenSourcing = enq => (enq.status === 'sourcing' && (!hasActiveQuote(enq) || hasCheckingItems(enq))) || hasPendingSplit(enq);
+  const isMovedToQuote = enq => enq.status === 'quoted' || (hasActiveQuote(enq) && !hasCheckingItems(enq) && enq.status !== 'returned_to_sourcing');
   const hasDownstreamOrder  = enq => (orders || []).some(o => o.enquiry_id === enq.id && !['cancelled', 'deleted'].includes((o.status || '').toLowerCase()));
   const isCompleted = e => ['ordered', 'order_created', 'closed'].includes(e.status) || hasDownstreamOrder(e);
 
   const visibleEnquiries = enquiries;
 
   const binEnqs = enquiries.filter(e => {
-    if (statusFilter === 'sourcing')             return e.status === 'sourcing' && !hasRevisionReturned(e);
-    if (statusFilter === 'quoted')               return e.status === 'quoted';
+    if (statusFilter === 'sourcing')             return isOpenSourcing(e);
+    if (statusFilter === 'quoted')               return isMovedToQuote(e);
     if (statusFilter === 'returned_to_sourcing') return e.status === 'returned_to_sourcing';
     if (statusFilter === 'modify_requested')     return e.status === 'modify_requested';
     if (statusFilter === 'completed')            return isCompleted(e);
-    return (e.status === 'sourcing' && !hasRevisionReturned(e)) || e.status === 'quoted' || e.status === 'returned_to_sourcing' || e.status === 'modify_requested' || ['ordered', 'order_created'].includes(e.status) || hasDownstreamOrder(e);
+    return isOpenSourcing(e) || isMovedToQuote(e) || e.status === 'returned_to_sourcing' || e.status === 'modify_requested' || ['ordered', 'order_created'].includes(e.status) || hasDownstreamOrder(e);
   });
 
   const filtered = binEnqs.filter(e => {
@@ -1613,7 +1798,7 @@ export default function SourcingBinDrawerPage() {
           users={users}
           quotes={quotes}
           pageMode={true}
-          forceReadOnly={hasDownstreamOrder(selected) || ['ordered', 'order_created'].includes(selected.status)}
+          forceReadOnly={(hasDownstreamOrder(selected) || ['ordered', 'order_created'].includes(selected.status)) && !hasPendingSplit(selected) && !hasPendingRevision(selected)}
           onClose={() => setSelected(null)}
           onSaved={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); qc.invalidateQueries(['summary']); setSelected(null); }}
           onSavedDraft={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); }}
@@ -1648,10 +1833,10 @@ export default function SourcingBinDrawerPage() {
         </div>
         <div className="filter-row" style={{ marginBottom: 0 }}>
           {[
-            { v: 'all',                   l: `All (${visibleEnquiries.filter(e => (e.status === 'sourcing' && !hasRevisionReturned(e)) || e.status === 'quoted' || e.status === 'returned_to_sourcing' || e.status === 'modify_requested' || ['ordered','order_created'].includes(e.status) || hasDownstreamOrder(e)).length})` },
-            { v: 'sourcing',              l: `New (${visibleEnquiries.filter(e => e.status === 'sourcing' && !hasRevisionReturned(e)).length})` },
+            { v: 'all',                   l: `All (${visibleEnquiries.filter(e => isOpenSourcing(e) || isMovedToQuote(e) || e.status === 'returned_to_sourcing' || e.status === 'modify_requested' || ['ordered','order_created'].includes(e.status) || hasDownstreamOrder(e)).length})` },
+            { v: 'sourcing',              l: `New (${visibleEnquiries.filter(isOpenSourcing).length})` },
             { v: 'modify_requested',      l: `Sent to ENQ (${visibleEnquiries.filter(e => e.status === 'modify_requested').length})` },
-            { v: 'quoted',                l: `Moved to Quote (${visibleEnquiries.filter(e => e.status === 'quoted').length})` },
+            { v: 'quoted',                l: `Moved to Quote (${visibleEnquiries.filter(isMovedToQuote).length})` },
             { v: 'returned_to_sourcing',  l: `Revision Needed (${visibleEnquiries.filter(e => e.status === 'returned_to_sourcing').length})` },
             { v: 'completed',             l: `Completed (${visibleEnquiries.filter(isCompleted).length})` },
           ].map(f => <span key={f.v} className={`fchip ${statusFilter === f.v ? 'active' : ''}`} onClick={() => setStatusFilter(f.v)}>{f.l}</span>)}
@@ -1714,6 +1899,11 @@ export default function SourcingBinDrawerPage() {
               const quickSrc   = (enq.sourcing || []).reduce((sum, s) => sum + (Number(s.sourced_price) || 0) * ((enq.items || []).find(i => i.id === s.enquiry_item_id)?.quantity || 0), 0);
               const quickQuote = (enq.sourcing || []).reduce((sum, s) => sum + (Number(s.quote_price) || 0) * ((enq.items || []).find(i => i.id === s.enquiry_item_id)?.quantity || 0), 0);
               const quickGross = quickQuote - quickSrc;
+              const checkingItems = (enq.sourcing || []).filter(s => (s.item_status || 'ready') === 'checking').length;
+              const readyPendingItems = (enq.sourcing || []).filter(s => (s.item_status || 'ready') === 'ready').length;
+              const quotedItems = (enq.sourcing || []).filter(s => (s.item_status || 'ready') === 'quoted').length;
+              const noBidItems = (enq.sourcing || []).filter(s => (s.item_status || 'ready') === 'no_bid').length;
+              const isSplitPending = hasPendingSplit(enq);
               return (
                 <tr key={enq.id} className="clickable" style={{ borderLeft: isUrgent ? '3px solid var(--red)' : isHigh ? '3px solid var(--amber)' : undefined }} onClick={() => setSelected(enq)}>
                   {isAdmin && (
@@ -1744,11 +1934,22 @@ export default function SourcingBinDrawerPage() {
                     {hasMarginData && <div style={{ fontSize: 10, fontWeight: 700, marginTop: 3, color: quickGross >= 0 ? 'var(--green)' : 'var(--red)' }}>{quickGross >= 0 ? '+' : ''}{fmt(quickGross)} margin</div>}
                   </td>
                   <td><DaysBadge updatedAt={enq.updated_at || enq.created_at} /></td>
-                  <td><StatusBadge s={enq.status} /></td>
+                  <td>
+                    {isSplitPending ? (
+                      <div style={{ display:'flex', flexDirection:'column', gap:3, alignItems:'flex-start' }}>
+                        <span className="badge" style={{ background:'#dbeafe', color:'#1d4ed8', border:'1px solid #93c5fd' }}>Split quote sent</span>
+                        <span style={{ fontSize:10, color:'#92400e', fontWeight:700 }}>
+                          {checkingItems ? `${checkingItems} checking` : ''}{readyPendingItems ? `${checkingItems ? ' · ' : ''}${readyPendingItems} ready` : ''}{quotedItems ? ` · ${quotedItems} quoted` : ''}{noBidItems ? ` · ${noBidItems} no bid` : ''}
+                        </span>
+                      </div>
+                    ) : (
+                      <StatusBadge s={enq.status} />
+                    )}
+                  </td>
                   <td style={{ fontSize: 12 }}>{userName(enq.assigned_to)}</td>
                   <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
                     <button className="btn btn-xs btn-primary" onClick={() => setSelected(enq)}>
-                      {(enq.status === 'quoted' || ['ordered', 'order_created'].includes(enq.status) || hasDownstreamOrder(enq)) ? 'View' : enq.status === 'returned_to_sourcing' ? 'Review Revision' : enq.status === 'modify_requested' ? 'View (Sent to ENQ)' : srcPct === 0 ? 'Start' : srcPct === 100 ? 'Review' : 'Continue'}
+                      {isSplitPending ? 'Continue Split' : (enq.status === 'quoted' || ['ordered', 'order_created'].includes(enq.status) || hasDownstreamOrder(enq)) ? 'View' : enq.status === 'returned_to_sourcing' ? 'Review Revision' : enq.status === 'modify_requested' ? 'View (Sent to ENQ)' : srcPct === 0 ? 'Start' : srcPct === 100 ? 'Review' : 'Continue'}
                     </button>
                   </td>
                 </tr>

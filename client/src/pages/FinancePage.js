@@ -542,8 +542,8 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
     : '';
   const [form, setForm] = useState({
     amount: type === 'customer' ? custDefaultAmt : type === 'supplier-net' ? netAmount : String(item.amount||''),
-    currency: type === 'customer' ? 'INR' : (item.confirmed_currency||item.currency||'INR'),
-    payment_method: '', payment_ref: '', payment_date: today(), notes: '',
+    currency: 'INR',
+    payment_method: 'Bank Transfer', payment_ref: '', payment_date: today(), notes: '',
     customer_po_no: type === 'customer' ? (item.po_number || '') : '',
     zoho_po_number: item.zoho_po_number || '',
     supplier_ref: item.supplier_ref || '',
@@ -1045,6 +1045,196 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
   );
 }
 
+function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', suppliers, customers, inventoryItems, onClose }) {
+  const { data: order, isLoading } = useQuery({
+    queryKey: ['finance-breakdown-order', orderId],
+    queryFn: () => api.get('/orders/' + orderId).then(r => r.data),
+    enabled: !!orderId,
+  });
+  const { data: enquiries = [] } = useQuery({
+    queryKey: ['finance-breakdown-enquiries'],
+    queryFn: () => api.get('/enquiries').then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
+    enabled: !!orderId,
+  });
+
+  const enquiry = useMemo(() => {
+    if (!order) return null;
+    return (enquiries || []).find(e =>
+      e.id === order.enquiry_id ||
+      (order.enquiry_no && e.enquiry_no === order.enquiry_no)
+    ) || null;
+  }, [enquiries, order]);
+
+  const inventoryById = useMemo(() => {
+    const map = {};
+    (inventoryItems || []).forEach(inv => { map[inv.id] = inv; });
+    return map;
+  }, [inventoryItems]);
+
+  const customerName = useMemo(() => {
+    if (!order) return '—';
+    return customers.find(c => c.id === order.customer_id)?.name || order.customer_id || '—';
+  }, [customers, order]);
+
+  const supName = (id) => {
+    if (!id) return '—';
+    if (id.startsWith('__inv__')) {
+      const inv = inventoryById[id.slice(7)];
+      return inv?.holder_name || id;
+    }
+    return suppliers.find(s => s.id === id)?.name || id;
+  };
+
+  const allItems = order?.lineItems || [];
+  const soList = order?.supplierOrders || [];
+  const orderVal = allItems.reduce((s, li) => s + (li.qty || 0) * (li.unit_price || 0), 0);
+  const orderTaxVal = allItems.reduce((s, li) => {
+    const base = (li.qty || 0) * (li.unit_price || 0);
+    return s + base * ((li.tax_rate || 0) / 100);
+  }, 0);
+  const customerTotal = orderVal + orderTaxVal;
+  const sourcingRows = enquiry?.sourcing || [];
+  const enquiryItems = enquiry?.items || [];
+  const supplierSummaries = soList.map(so => {
+    const soItems = (so.items || []).map(id => allItems.find(li => li.id === id)).filter(Boolean);
+    const itemBreakdown = soItems.map(li => {
+      const enqItem = enquiryItems.find(ei => ei.id === li.id || ei.component === li.component);
+      const srcRow = sourcingRows.find(s => s.enquiry_item_id === li.id)
+        || (enqItem ? sourcingRows.find(s => s.enquiry_item_id === enqItem.id) : null);
+      const unitSource = parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
+      const lineSourceTotal = unitSource * (li.qty || 0);
+      return {
+        component: li.component,
+        qty: li.qty || 0,
+        unitSource,
+        lineSourceTotal,
+      };
+    });
+    return {
+      id: so.id,
+      supplierOrderId: so.id,
+      supplierName: supName(so.supplier_id),
+      sourceTotal: itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0),
+      items: itemBreakdown,
+    };
+  });
+  const selectedSupplierSummary = supplierOrderId
+    ? supplierSummaries.find(s => s.supplierOrderId === supplierOrderId || s.id === supplierOrderId)
+    : null;
+  const visibleSupplierSummaries = mode === 'customer'
+    ? supplierSummaries
+    : selectedSupplierSummary ? [selectedSupplierSummary] : supplierSummaries.slice(0, 1);
+
+  return (
+    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal modal-lg">
+        <div className="modal-header">
+          <div>
+            <h2>₹ Payment Breakdown</h2>
+            {order && (
+              <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
+                <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{order.id}</span>
+                {' · '}{customerName}
+                {order.po_number ? ` · PO ${order.po_number}` : ''}
+              </div>
+            )}
+          </div>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body">
+          {isLoading || !order ? (
+            <div style={{padding:24,textAlign:'center',color:'var(--text3)'}}>Loading…</div>
+          ) : (
+            <div style={{display:'grid',gap:14}}>
+              {mode === 'customer' ? (
+                <>
+                  <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                    <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>CUSTOMER RECEIVES</div>
+                    <div style={{display:'grid',gap:6,fontSize:12}}>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                        <span>Base value</span><strong>{fmtM(orderVal)}</strong>
+                      </div>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                        <span>Tax</span><strong>{fmtM(orderTaxVal)}</strong>
+                      </div>
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                        <span>Total incl. tax</span><strong style={{color:'var(--green)'}}>{fmtM(customerTotal)}</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{padding:'10px 12px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface)'}}>
+                    <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>Customer Line Totals</div>
+                    <table className="table" style={{margin:0}}>
+                      <thead><tr>
+                        <th>Component</th><th style={{textAlign:'right'}}>Qty</th><th style={{textAlign:'right'}}>Unit Price</th><th style={{textAlign:'right'}}>Tax %</th><th style={{textAlign:'right'}}>Total</th>
+                      </tr></thead>
+                      <tbody>
+                        {allItems.map(item=> {
+                          const base = (item.qty||0) * (item.unit_price||0);
+                          const total = base + base * ((item.tax_rate||0) / 100);
+                          return (
+                            <tr key={item.id}>
+                              <td>{item.component}</td>
+                              <td style={{textAlign:'right'}}>{item.qty||0}</td>
+                              <td style={{textAlign:'right',fontFamily:'monospace'}}>{fmtM(item.unit_price)}</td>
+                              <td style={{textAlign:'right'}}>{item.tax_rate||0}%</td>
+                              <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>{fmtM(total)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : (
+                visibleSupplierSummaries.map(summary=>(
+                  <React.Fragment key={summary.id}>
+                    <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
+                      <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>SUPPLIER PAYABLE</div>
+                      <div style={{display:'grid',gap:6,fontSize:12}}>
+                        <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                          <span>{summary.supplierName}</span>
+                          <strong>{fmtM(summary.sourceTotal)}</strong>
+                        </div>
+                        <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                          <span>Total supplier payable</span>
+                          <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</strong>
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{padding:'10px 12px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface)'}}>
+                      <div style={{fontWeight:700,fontSize:12,marginBottom:8}}>{summary.supplierName}</div>
+                      <table className="table" style={{margin:0}}>
+                        <thead><tr>
+                          <th>Component</th><th style={{textAlign:'right'}}>Qty</th><th style={{textAlign:'right'}}>Unit Price</th><th style={{textAlign:'right'}}>Total</th>
+                        </tr></thead>
+                        <tbody>
+                          {summary.items.map(item=>(
+                            <tr key={`${summary.id}_${item.component}`}>
+                              <td>{item.component}</td>
+                              <td style={{textAlign:'right'}}>{item.qty}</td>
+                              <td style={{textAlign:'right',fontFamily:'monospace'}}>{fmtM(item.unitSource)}</td>
+                              <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>{fmtM(item.lineSourceTotal)}</td>
+                            </tr>
+                          ))}
+                          <tr>
+                            <td colSpan={3} style={{fontWeight:700}}>Supplier total</td>
+                            <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </React.Fragment>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Finance Page ─────────────────────────────────────────────────────────
 export default function FinancePage() {
   const { user } = useAuth();
@@ -1058,6 +1248,7 @@ export default function FinancePage() {
   const [viewPayModal, setViewPayModal] = useState(null); // { item } — view/edit recorded payment
   const [bankModal, setBankModal] = useState(null); // { supplier }
   const [customerBankModal, setCustomerBankModal] = useState(null); // customer object
+  const [breakdownModal, setBreakdownModal] = useState(null); // { orderId }
   const [releaseConfirm, setReleaseConfirm] = useState(null); // order to release
   const [returnConfirm, setReturnConfirm] = useState(null); // { type, item }
   const [returningId, setReturningId] = useState(null);
@@ -1315,7 +1506,7 @@ export default function FinancePage() {
               </tr></thead>
               <tbody>
                 {filterCust(custAdvance).map(o=>(
-                  <tr key={o.id}>
+                  <tr key={o.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: o.id, mode:'customer' })}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
                     <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
                     <td style={{fontSize:11}}>
@@ -1337,7 +1528,7 @@ export default function FinancePage() {
                         : <span style={{fontSize:11,color:'var(--text3)'}}>Not generated</span>}
                     </td>
                     <td><StatusBadge s={o.status}/></td>
-                    <td style={{textAlign:'right'}}>
+                    <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         {o.total_paid <= 0 && o.customer_payment_status !== 'payment_recorded' && (
                           <button className="btn btn-xs"
@@ -1400,7 +1591,7 @@ export default function FinancePage() {
                 {filterCust([...custNet,...custOther]).map(o=>{
                   const daysLeft = o.computed_due_date ? daysDiff(o.computed_due_date) : null;
                   return (
-                    <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: o.id, mode:'customer' })}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
                       <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
                       <td style={{fontSize:11}}>
@@ -1422,7 +1613,7 @@ export default function FinancePage() {
                         ) : '—'}
                       </td>
                       <td><StatusBadge s={o.customer_payment_status||'pending'}/></td>
-                      <td style={{textAlign:'right'}}>
+                      <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                         {o.balance_due > 0 && (
                           <button className="btn btn-xs btn-primary"
                             onClick={()=>setPayModal({item:o,type:'customer'})}
@@ -1463,7 +1654,7 @@ export default function FinancePage() {
                     const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                     const hasBank = isSupplierBankReady(fullEntity);
                     return (
-                  <tr key={r.id}>
+                  <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
                     <td style={{fontWeight:500}}>
                       {displayName}
@@ -1484,12 +1675,12 @@ export default function FinancePage() {
                       {fullEntity?.bank_swift && <div style={{color:'var(--text3)'}}>{fullEntity.bank_swift}</div>}
                       {!hasBank && <span style={{color:'var(--text3)'}}>No bank details</span>}
                     </td>
-                    <td style={{textAlign:'right'}}>
+                    <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         <button className="btn btn-xs"
                           onClick={()=>setReturnConfirm({type:'supplier',item:r})}
                           disabled={returningId===r.id}
-                          style={{fontSize:11,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
+                          style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
                           {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
                         </button>
                         {!hasBank && (
@@ -1551,7 +1742,7 @@ export default function FinancePage() {
                   const paid    = parseFloat(r.net_total_paid)||0;
                   const balance = Math.max(0, total - paid);
                   return (
-                    <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent'}}>
+                    <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.id })}>
                       <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.id}</span></td>
                       <td style={{fontWeight:500}}>
                         {displayName}
@@ -1578,7 +1769,7 @@ export default function FinancePage() {
                         ) : '—'}
                       </td>
                       <td><StatusBadge s={r.status||'pending'}/></td>
-                      <td style={{textAlign:'right'}}>
+                      <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                         <button className="btn btn-xs btn-primary"
                           onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
                           style={{fontSize:11}}>
@@ -1705,6 +1896,18 @@ export default function FinancePage() {
             </div>
           </div>
         </div>
+      )}
+
+      {breakdownModal && (
+        <FinanceBreakdownModal
+          orderId={breakdownModal.orderId}
+          mode={breakdownModal.mode}
+          supplierOrderId={breakdownModal.supplierOrderId}
+          suppliers={suppliers}
+          customers={customers}
+          inventoryItems={inventoryItems}
+          onClose={()=>setBreakdownModal(null)}
+        />
       )}
 
       {/* Record Payment Modal */}
