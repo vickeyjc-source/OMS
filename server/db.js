@@ -656,22 +656,42 @@ async function initDb() {
       SELECT
         so.id,
         ROUND(COALESCE(SUM(
-          (
-            CASE
-              WHEN COALESCE(oi.procurement_price, 0) > 0 THEN oi.procurement_price
-              WHEN COALESCE(so.buying_price_per_unit, 0) > 0 THEN so.buying_price_per_unit
-              ELSE 0
-            END
+          COALESCE(
+            NULLIF(oi.procurement_price, 0),
+            NULLIF(so.buying_price_per_unit, 0),
+            NULLIF(src.sourced_price, 0),
+            0
           ) * COALESCE(oi.qty, 0)
         ), 0)::numeric, 2) AS source_total
       FROM supplier_orders so
+      JOIN orders o ON o.id = so.order_id
       LEFT JOIN supplier_order_items soi ON soi.supplier_order_id = so.id
       LEFT JOIN order_items oi ON oi.id = soi.item_id
-      GROUP BY so.id, so.buying_price_per_unit
+      LEFT JOIN LATERAL (
+        SELECT es.sourced_price
+        FROM enquiry_items ei
+        JOIN enquiry_sourcing es ON es.enquiry_item_id = ei.id
+          AND es.enquiry_id = o.enquiry_id
+          AND es.supplier_id = so.supplier_id
+        WHERE ei.enquiry_id = o.enquiry_id
+          AND (
+            ei.id = oi.id
+            OR LOWER(COALESCE(ei.component, '')) = LOWER(COALESCE(oi.component, ''))
+            OR (
+              COALESCE(ei.ipn, '') <> ''
+              AND COALESCE(oi.ipn, '') <> ''
+              AND LOWER(ei.ipn) = LOWER(oi.ipn)
+            )
+          )
+        ORDER BY es.updated_at DESC
+        LIMIT 1
+      ) src ON true
+      GROUP BY so.id
     `);
     let repaired = 0;
     for (const row of poTotals.rows) {
       const sourceTotal = Number(row.source_total || 0);
+      if (sourceTotal <= 0) continue;
       await pool.query(
         "UPDATE supplier_orders SET confirmed_price=$1, confirmed_currency='INR' WHERE id=$2",
         [sourceTotal, row.id]
