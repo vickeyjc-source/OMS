@@ -877,18 +877,22 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const isAdvanceOrSplit = form.payment_terms_type==='advance'||form.payment_terms_type==='split';
   const poItems=(po.items||[]).map(id=>(order.lineItems||[]).find(li=>li.id===id)).filter(Boolean);
   const totalQty = poItems.reduce((s,li)=>s+(li.qty||0),0);
+  const sourceTotal = poItems.reduce((sum, li) => {
+    const enqItem = (enquiry?.items||[]).find(i=>i.id===li.id || i.component===li.component);
+    const srcRows = (enquiry?.sourcing||[]).filter(s =>
+      (s.enquiry_item_id===li.id || (enqItem && s.enquiry_item_id===enqItem.id)) &&
+      (!po.supplier_id || s.supplier_id===po.supplier_id)
+    );
+    const srcRow = srcRows[0] || null;
+    return sum + ((parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
+  }, 0);
   const totalPurchasePrice = (() => {
+    if (sourceTotal > 0) return sourceTotal;
     const confirmedTotal = parseFloat(form.confirmed_price);
     if (Number.isFinite(confirmedTotal) && confirmedTotal > 0) return confirmedTotal;
     const bpu = parseFloat(form.buying_price_per_unit);
     if (Number.isFinite(bpu) && bpu > 0) return bpu * totalQty;
-    const sourceTotal = poItems.reduce((sum, li) => {
-      const enqItem = (enquiry?.items||[]).find(i=>i.id===li.id || i.component===li.component);
-      const srcRow = (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
-        || (enqItem ? (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id) : null);
-      return sum + ((parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
-    }, 0);
-    return sourceTotal;
+    return 0;
   })();
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
   const markFinanceSent = () => {
@@ -920,7 +924,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
 
   const setStatusAndSave = async (nextStatus) => {
     const prevStatus = form.status;
-    const nextForm = { ...form, status: nextStatus };
+    const nextForm = { ...form, status: nextStatus, confirmed_price: totalPurchasePrice || form.confirmed_price };
     setForm(nextForm);
     setSaving(true);
     try {
@@ -949,7 +953,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     }
     setSaving(true);
     try{
-      await api.put('/supplier-orders/'+po.id,form);
+      await api.put('/supplier-orders/'+po.id,{...form, confirmed_price: totalPurchasePrice || form.confirmed_price});
       toast.success('PO updated');
       qc.invalidateQueries(['orders']);
       onSaved();
