@@ -650,6 +650,43 @@ async function initDb() {
   // order_items line_status valid values: negotiating, procurement, payment, shipped,
   // delivered_hub, ready_to_ship, grn_partial, grn_rejected, delivered
 
+  // ── Backfill supplier PO totals from linked item source costs (legacy data repair) ──
+  try {
+    const poTotals = await pool.query(`
+      SELECT
+        so.id,
+        ROUND(COALESCE(SUM(
+          (
+            CASE
+              WHEN COALESCE(oi.procurement_price, 0) > 0 THEN oi.procurement_price
+              WHEN COALESCE(so.buying_price_per_unit, 0) > 0 THEN so.buying_price_per_unit
+              ELSE 0
+            END
+          ) * COALESCE(oi.qty, 0)
+        ), 0)::numeric, 2) AS source_total
+      FROM supplier_orders so
+      LEFT JOIN supplier_order_items soi ON soi.supplier_order_id = so.id
+      LEFT JOIN order_items oi ON oi.id = soi.item_id
+      GROUP BY so.id, so.buying_price_per_unit
+    `);
+    let repaired = 0;
+    for (const row of poTotals.rows) {
+      const sourceTotal = Number(row.source_total || 0);
+      await pool.query(
+        "UPDATE supplier_orders SET confirmed_price=$1, confirmed_currency='INR' WHERE id=$2",
+        [sourceTotal, row.id]
+      );
+      await pool.query(
+        "UPDATE finance_queue SET amount=$1, currency='INR' WHERE supplier_order_id=$2",
+        [sourceTotal, row.id]
+      );
+      repaired++;
+    }
+    if (repaired > 0) {
+      console.log('[db] Repaired supplier PO totals for ' + repaired + ' supplier orders');
+    }
+  } catch(e) { console.error('[db] Supplier PO total backfill error:', e.message); }
+
   // ── Backfill: create finance_queue entries for any blocked POs that have no queue entry ──
   try {
     const blockedPOs = await pool.query(

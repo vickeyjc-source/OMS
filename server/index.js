@@ -1350,6 +1350,111 @@ app.post('/api/enquiries/:id/modify-request', auth, asyncRoute(async (req, res) 
   res.json({ ok: true });
 }));
 
+// ── Admin: cascade ENQ item qty change to all sections ──────────────────────
+app.put('/api/enquiries/:id/update-qty', auth, asyncRoute(async (req, res) => {
+  if (req.session.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { item_id, new_qty } = req.body;
+  if (!item_id || new_qty == null || isNaN(Number(new_qty)) || Number(new_qty) < 0)
+    return res.status(400).json({ error: 'item_id and valid new_qty required' });
+
+  const qty = Number(new_qty);
+  const now = nowStr();
+  const enqId = req.params.id;
+
+  // 1. Verify ENQ exists and item belongs to it
+  const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [enqId]);
+  if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
+  const enqItem = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [item_id, enqId]);
+  if (!enqItem) return res.status(404).json({ error: 'Enquiry item not found' });
+  const oldQty = Number(enqItem.quantity);
+
+  // 2. Block if GRN already created for this item (goods physically received)
+  const liveOrders = await allAsync(
+    "SELECT id FROM orders WHERE enquiry_id=? AND status NOT IN ('deleted','cancelled')", [enqId]
+  );
+  for (const ord of liveOrders) {
+    const orderItem = await getAsync(
+      'SELECT oi.id FROM order_items oi WHERE oi.order_id=? AND (oi.component=? OR oi.ipn=?)',
+      [ord.id, enqItem.component, enqItem.ipn || '__none__']
+    );
+    if (orderItem) {
+      const grn = await getAsync(
+        "SELECT id FROM grn_records WHERE order_item_id=? LIMIT 1", [orderItem.id]
+      );
+      if (grn) return res.status(400).json({ error: `Cannot change qty: GRN already recorded for ${enqItem.component}` });
+    }
+  }
+
+  // 3. Update enquiry_items qty
+  await runAsync('UPDATE enquiry_items SET quantity=? WHERE id=?', [qty, item_id]);
+
+  // 4. Update order_items qty + cascade to supplier orders and finance for all live orders
+  for (const ord of liveOrders) {
+    const orderItem = await getAsync(
+      'SELECT oi.id, oi.unit_price, oi.procurement_price, oi.tax_rate FROM order_items oi WHERE oi.order_id=? AND (oi.component=? OR oi.ipn=?)',
+      [ord.id, enqItem.component, enqItem.ipn || '__none__']
+    );
+    if (!orderItem) continue;
+
+    // 4a. Update order_items qty
+    await runAsync('UPDATE order_items SET qty=? WHERE id=?', [qty, orderItem.id]);
+
+    // 4b. Find all supplier POs that contain this order item
+    const soLinks = await allAsync(
+      'SELECT soi.supplier_order_id FROM supplier_order_items soi WHERE soi.item_id=?', [orderItem.id]
+    );
+    for (const link of soLinks) {
+      const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [link.supplier_order_id]);
+      if (!so) continue;
+
+      // 4c. Recalculate supplier PO confirmed_price = sum(qty × source price) across all its items
+      const soItems = await allAsync(
+        `SELECT oi.qty, oi.procurement_price FROM order_items oi
+         JOIN supplier_order_items soi ON soi.item_id=oi.id
+         WHERE soi.supplier_order_id=?`, [so.id]
+      );
+      const newConfirmedPrice = soItems.reduce((s, i) => {
+        const unitSource = Number(i.procurement_price || 0) || Number(so.buying_price_per_unit || 0);
+        return s + (Number(i.qty || 0) * unitSource);
+      }, 0);
+      const newConfirmedPriceRounded = Math.round(newConfirmedPrice * 100) / 100;
+
+      // 4d. Update supplier_orders confirmed_price
+      await runAsync(
+        'UPDATE supplier_orders SET confirmed_price=? WHERE id=?',
+        [newConfirmedPriceRounded, so.id]
+      );
+
+      // 4e. Update finance_queue amount for ALL records (pending and paid) — admin correction
+      await runAsync(
+        'UPDATE finance_queue SET amount=? WHERE supplier_order_id=?',
+        [newConfirmedPriceRounded, so.id]
+      );
+
+      // 4f. Log PO price update in order history
+      try {
+        await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+          [uuid(), ord.id,
+           `PO ${so.internal_po_no || so.id}: price recalculated after qty change (${enqItem.component} ${oldQty}→${qty}) — new total ₹${newConfirmedPriceRounded.toLocaleString('en-IN')}`,
+           req.session.user.name, '', now]);
+      } catch(_) {}
+    }
+
+    // 4g. Log in order history
+    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), ord.id,
+       `Admin updated ${enqItem.component} qty: ${oldQty} → ${qty} (from ENQ)`,
+       req.session.user.name, '', now]);
+  }
+
+  // 7. Log in enquiry history
+  await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+    [uuid(), enqId, `Qty of ${enqItem.component} changed: ${oldQty} → ${qty}`, req.session.user.name, now]);
+
+  saveNow();
+  res.json({ ok: true, old_qty: oldQty, new_qty: qty });
+}));
+
 // Returns enquiry line items with quote_price for order creation
 // Create a revision of an existing quote
 app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
