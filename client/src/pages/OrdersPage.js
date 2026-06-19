@@ -135,6 +135,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
   const savedEffectiveTerms = savedOrderTerms || custTerms;
   const paymentTermsDirty = orderTerms !== savedOrderTerms;
   const termsChanged   = orderTerms && orderTerms !== custTerms;
+  const hasAdvanceTerms = isFullAdvance(savedEffectiveTerms) || isPartialAdvance(savedEffectiveTerms);
+  const customerAdvanceReleased = hasAdvanceTerms &&
+    order.status === 'open' &&
+    !!order.pi_no &&
+    order.customer_payment_status === 'pending';
+  const customerAdvanceComplete = order.customer_payment_status === 'paid';
+  const customerAdvanceFinanceLocked = order.status === 'payment_approval' || customerAdvanceReleased || customerAdvanceComplete;
 
   const mutation = useMutation({
     mutationFn: d => api.put(`/orders/${order.id}`, d).then(r=>r.data),
@@ -346,21 +353,22 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                       be collected before this order goes to Procurement.
                       Go to the Finance page to raise a PI and record payment.
                     </div>
-                    {order.customer_payment_status === 'paid' && (
+                    {(customerAdvanceReleased || customerAdvanceComplete) && (
                       <div style={{fontSize:12,color:'var(--green)',fontWeight:700,marginTop:4}}>
                         ✅ Payment recorded by Finance — order released
+                        {customerAdvanceReleased ? ' (remaining balance pending)' : ''}
                       </div>
                     )}
                   </div>
                   <button className="btn btn-sm"
-                    disabled={paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid'}
+                    disabled={paymentTermsDirty || customerAdvanceFinanceLocked}
                     style={{background:'var(--amber,#d97706)',color:'#fff',
                       borderColor:'var(--amber,#d97706)',fontWeight:700,whiteSpace:'nowrap',
-                      opacity:(paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 0.4 : 1,
-                      cursor:(paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') ? 'not-allowed' : 'pointer'}}
-                    title={paymentTermsDirty ? 'Save payment terms first' : order.customer_payment_status === 'paid' ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
+                      opacity:(paymentTermsDirty || customerAdvanceFinanceLocked) ? 0.4 : 1,
+                      cursor:(paymentTermsDirty || customerAdvanceFinanceLocked) ? 'not-allowed' : 'pointer'}}
+                    title={paymentTermsDirty ? 'Save payment terms first' : customerAdvanceReleased ? 'Advance released by Finance' : customerAdvanceComplete ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
                     onClick={async()=>{
-                      if (paymentTermsDirty || order.status === 'payment_approval' || order.customer_payment_status === 'paid') return;
+                      if (paymentTermsDirty || customerAdvanceFinanceLocked) return;
                       try {
                         await mutation.mutateAsync({
                           status:                  'payment_approval',
@@ -371,7 +379,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                         });
                       } catch(_) {}
                     }}>
-                    {order.customer_payment_status === 'paid' ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Send to Finance'}
+                    {customerAdvanceReleased ? '✅ Released by Finance' : customerAdvanceComplete ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Send to Finance'}
                   </button>
                 </div>
               )}
@@ -747,8 +755,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
               {['open','draft','payment_pending'].includes(order.status) &&
                !paymentTermsDirty &&
                !showProcurement &&
-               (!(isFullAdvance(savedEffectiveTerms) || isPartialAdvance(savedEffectiveTerms)) ||
-                order.customer_payment_status === 'paid') && (
+               (!hasAdvanceTerms || customerAdvanceReleased || customerAdvanceComplete) && (
                 <button className="btn"
                   style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,padding:'8px 18px'}}
                   onClick={()=>setShowProcurement(true)}>

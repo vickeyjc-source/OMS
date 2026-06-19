@@ -1071,6 +1071,27 @@ function parsePaymentTerms(termsText) {
   return { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 };
 }
 
+function requiredCustomerPaymentTotal(total, termsText) {
+  const parsed = parsePaymentTerms(termsText || '');
+  if (parsed.payment_terms_type === 'split') {
+    const pct = parsed.payment_advance_pct || 0;
+    return total * (pct / 100);
+  }
+  return total;
+}
+
+function requiredSupplierReleaseTotal(total, row = {}) {
+  const termsType = row.payment_terms_type || '';
+  const pct = parseFloat(row.payment_advance_pct) || parseFloat(String(row.payment_terms || '').match(/(\d+)\s*%/)?.[1]) || 0;
+  if (termsType === 'split' && pct > 0) return total * (pct / 100);
+  if (termsType === 'advance') return total;
+  return total;
+}
+
+function isAwaitingCustomerReleaseStatus(status) {
+  return ['payment_approval', 'waiting_for_payment', 'cust_payment_update'].includes(status);
+}
+
 function addDaysIso(baseText, days) {
   const dt = baseText ? new Date(baseText) : new Date();
   if (Number.isNaN(dt.getTime())) return '';
@@ -2718,14 +2739,20 @@ app.put('/api/finance-queue/:id', auth, asyncRoute(async (req, res) => {
   const fq = await getAsync('SELECT * FROM finance_queue WHERE id=?', [req.params.id]);
   if (!fq) return res.status(404).json({ error: 'Not found' });
   const now = nowStr();
+  const requiredAmount = parseFloat(fq.amount) || 0;
+  const previousPaid = parseFloat(fq.paid_amount) || 0;
+  const thisPayment = parseFloat(d.amount ?? d.paid_amount ?? requiredAmount) || 0;
+  const totalPaid = previousPaid + thisPayment;
+  const remaining = Math.max(0, requiredAmount - totalPaid);
+  const nextStatus = remaining > 0 ? 'pending' : (d.status || 'paid');
   await runAsync(`UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,
        paid_amount=?,paid_by=?,notes=?,paid_at=? WHERE id=?`,
-    [d.status||'paid', d.payment_ref||'', d.payment_date||now.slice(0,10),
-     d.paid_amount||fq.amount, req.session.user.name,
+    [nextStatus, d.payment_ref||'', d.payment_date||now.slice(0,10),
+     totalPaid, req.session.user.name,
      d.notes||'', now, req.params.id]);
 
   // Release the PO block
-  if (d.status==='paid' || d.status==='released') {
+  if (remaining <= 0 && (nextStatus==='paid' || nextStatus==='released')) {
     await runAsync('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?',
       ['sent', fq.supplier_order_id]);
     try {
@@ -2737,7 +2764,7 @@ app.put('/api/finance-queue/:id', auth, asyncRoute(async (req, res) => {
     } catch(_) {}
   }
   saveNow();
-  res.json({ ok: true });
+  res.json({ ok: true, paid_amount: totalPaid, remaining, status: nextStatus });
 }));
 
 // ── Update PO to include payment terms + Zoho PO + finance queue trigger ─────
@@ -2804,10 +2831,6 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     if (o.customer_payment_status === 'paid') return false;
     const SUPPLIER_ONLY_STATUSES = ['sourcing', 'enquiry', 'quote'];
     if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
-    // Customer Net/Other settlements remain trackable after the order enters
-    // Procurement. Supplier payment holds should not hide customer receivables.
-    // Advance orders only appear when explicitly sent to Finance.
-    if (o.status === 'procurement' && (isAdvanceTerms(o.payment_terms) || isPartialAdvanceTerms(o.payment_terms))) return false;
     if (o.status === 'payment_approval' || o.status === 'waiting_for_payment' || o.status === 'cust_payment_update') return true;
     return (o.payment_terms || '').length > 0;
   });
@@ -2831,14 +2854,22 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     }, 0);
     const orderPayments = payments.filter(p => p.order_id === o.id && p.status === 'paid');
     const paid = orderPayments.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
+    const releaseDueTotal = requiredCustomerPaymentTotal(total, effectivePaymentTerms);
+    const fullBalance = Math.max(0, total - paid);
+    const dueNow = isAwaitingCustomerReleaseStatus(o.status)
+      ? Math.max(0, releaseDueTotal - paid)
+      : fullBalance;
     return {
       ...o,
       customer: custMap[o.customer_id] || null,
       payment_terms: effectivePaymentTerms,
       computed_due_date: computedDueDate,
       order_total: parseFloat(total.toFixed(2)),
+      payment_due_total: parseFloat(dueNow.toFixed(2)),
+      release_due_total: parseFloat(releaseDueTotal.toFixed(2)),
+      full_balance_due: parseFloat(fullBalance.toFixed(2)),
       total_paid:  parseFloat(paid.toFixed(2)),
-      balance_due: parseFloat(Math.max(0, total - paid).toFixed(2)),
+      balance_due: parseFloat(dueNow.toFixed(2)),
       payment_type: isAdvanceTerms(effectivePaymentTerms) ? 'full_advance'
         : isPartialAdvanceTerms(effectivePaymentTerms) ? 'partial_advance'
         : isNetTerms(effectivePaymentTerms) ? 'net' : 'other',
@@ -2853,14 +2884,16 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   // Do NOT set 'paid' here — that only happens when Finance explicitly clicks Release.
   const healPromises = [];
   for (const o of enriched) {
-    if (o._computed_total > 0 && o._computed_paid >= o._computed_total && o.customer_payment_status === 'payment_approval') {
+    const releaseDueTotal = requiredCustomerPaymentTotal(o._computed_total, o.payment_terms);
+    if (releaseDueTotal > 0 && o._computed_paid >= releaseDueTotal && o.customer_payment_status === 'payment_approval') {
       healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
     }
   }
   if (healPromises.length) await Promise.all(healPromises);
   const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => {
     // Reflect healed status in response immediately without waiting for next request
-    if (_computed_total > 0 && _computed_paid >= _computed_total && o.customer_payment_status === 'payment_approval') {
+    const releaseDueTotal = requiredCustomerPaymentTotal(_computed_total, o.payment_terms);
+    if (releaseDueTotal > 0 && _computed_paid >= releaseDueTotal && o.customer_payment_status === 'payment_approval') {
       return { ...o, customer_payment_status: 'payment_recorded' };
     }
     return o;
@@ -2952,14 +2985,15 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
     prevPaid = prevRows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   } catch(_) {}
   const incomingAmount = parseFloat(d.amount)||0;
-  if (total > 0 && incomingAmount > total) {
-    return res.status(400).json({ error: `Payment amount (${incomingAmount.toFixed(2)}) exceeds order total (${total.toFixed(2)}). Please check the amount.` });
-  }
-  if (total > 0 && prevPaid >= total) {
-    return res.status(400).json({ error: `Order is already fully paid (paid: ${prevPaid.toFixed(2)}, total: ${total.toFixed(2)}). Use the Edit option to correct any wrong payment.` });
-  }
+  const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
-  const balance  = parseFloat(Math.max(0,total-newPaid).toFixed(2));
+  const fullBalance  = parseFloat(Math.max(0, total-newPaid).toFixed(2));
+  const releaseBalance = parseFloat(Math.max(0, releaseDueTotal-newPaid).toFixed(2));
+  const paymentStatus = fullBalance <= 0
+    ? 'payment_recorded'
+    : releaseBalance <= 0 && isAwaitingCustomerReleaseStatus(o.status)
+      ? 'payment_recorded'
+      : 'pending';
   await runAsync(`INSERT INTO customer_payments(
         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
         payment_type, amount, currency, payment_method, payment_ref,
@@ -2969,13 +3003,13 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
      d.pi_no||o.pi_no||'', d.pi_sent_at||'',
      d.payment_type||'advance', parseFloat(d.amount)||0, d.currency||'INR',
      d.payment_method||'', d.payment_ref||'', d.payment_date||now.slice(0,10),
-     parseFloat(d.advance_pct)||0, balance, 'paid',
+     parseFloat(d.advance_pct)||0, fullBalance, 'paid',
      req.session.user.id, now, d.notes||'']);
-  await runAsync('UPDATE orders SET customer_payment_status=? WHERE id=?', ['payment_recorded', req.params.order_id]);
+  await runAsync('UPDATE orders SET customer_payment_status=? WHERE id=?', [paymentStatus, req.params.order_id]);
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment recorded: '+(d.currency||'INR')+' '+d.amount, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, balance_due: balance, status: 'payment_recorded' });
+  res.json({ ok: true, balance_due: fullBalance, status: paymentStatus });
 }));
 
 // POST /api/finance/customer-release/:order_id — confirm and release payment to procurement
@@ -2983,7 +3017,15 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   const o = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
   if (!o) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
-  await runAsync("UPDATE orders SET status='open', customer_payment_status='paid' WHERE id=?", [req.params.order_id]);
+  const items = await allAsync('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
+  const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
+  const paid = await getAsync(
+    "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
+    [req.params.order_id]
+  );
+  const fullPaid = total > 0 && (parseFloat(paid?.total)||0) >= total;
+  await runAsync("UPDATE orders SET status='open', customer_payment_status=? WHERE id=?",
+    [fullPaid ? 'paid' : 'pending', req.params.order_id]);
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
@@ -3129,12 +3171,28 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 // GET /api/finance/supplier-queue
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
-  try { advRows = await allAsync("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
+  try { advRows = await allAsync("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
   const netRows = await allAsync("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('paid','cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
   res.json({
-    advance: advRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
+    advance: advRows.map(r => {
+      const total = parseFloat(r.amount) || parseFloat(r.confirmed_price) || 0;
+      const paid = parseFloat(r.paid_amount) || 0;
+      const releaseTotal = requiredSupplierReleaseTotal(total, r);
+      const fullBalance = Math.max(0, total - paid);
+      const releaseBalance = Math.max(0, releaseTotal - paid);
+      const releaseReady = paid >= releaseTotal;
+      const dueNow = r.payment_blocked === 0 ? fullBalance : (releaseBalance > 0 ? releaseBalance : 0);
+      return {
+        ...r,
+        supplier: supMap[r.supplier_id]||null,
+        payment_due_total: parseFloat(dueNow.toFixed(2)),
+        release_due_total: parseFloat(releaseTotal.toFixed(2)),
+        full_balance_due: parseFloat(fullBalance.toFixed(2)),
+        release_ready: releaseReady ? 1 : 0,
+      };
+    }),
     net:     netRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
   });
 }));
@@ -3198,9 +3256,43 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
   if (!zohoPo || !supplierRef) return res.status(400).json({ error: 'Zoho PO Number and Supplier PI Number are required' });
 
   const now = nowStr();
-  await runAsync('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_by=?,paid_at=?,notes=? WHERE id=?',
-    ['paid', d.payment_ref||'', d.payment_date||now.slice(0,10), req.session.user.id, now, d.notes||'', req.params.fq_id]);
-  await runAsync('UPDATE supplier_orders SET payment_blocked=0, status=?, zoho_po_number=?, supplier_ref=? WHERE id=?', ['po_issued', zohoPo, supplierRef, fq.supplier_order_id]);
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
+  const total = parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0;
+  const previousPaid = parseFloat(fq.paid_amount) || 0;
+  const thisPayment = parseFloat(d.amount ?? d.paid_amount ?? 0) || 0;
+  const totalPaid = previousPaid + thisPayment;
+  const fullBalance = Math.max(0, total - totalPaid);
+  const queueStatus = 'pending';
+  await runAsync('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_amount=?,paid_by=?,paid_at=?,notes=? WHERE id=?',
+    [queueStatus, d.payment_ref||'', d.payment_date||now.slice(0,10), totalPaid, req.session.user.id, now, d.notes||'', req.params.fq_id]);
+  await runAsync('UPDATE supplier_orders SET zoho_po_number=?, supplier_ref=? WHERE id=?', [zohoPo, supplierRef, fq.supplier_order_id]);
+  try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), fq.order_id, 'Supplier payment recorded | Ref: '+(d.payment_ref||'—')+(queueStatus==='paid'?' | fully paid':' | release/balance pending'), req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, paid_amount: totalPaid, balance_due: fullBalance, status: queueStatus });
+}));
+
+// POST /api/finance/supplier-release/:fq_id — release supplier PO after required advance is paid
+app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, res) => {
+  const fq = await getAsync('SELECT * FROM finance_queue WHERE id=?', [req.params.fq_id]);
+  if (!fq) return res.status(404).json({ error: 'Finance queue item not found' });
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier PO not found' });
+
+  const total = parseFloat(fq.amount) || parseFloat(so.confirmed_price) || 0;
+  const paid = parseFloat(fq.paid_amount) || 0;
+  const releaseDueTotal = requiredSupplierReleaseTotal(total, so || fq);
+  if (paid < releaseDueTotal) {
+    return res.status(400).json({ error: `Required advance not fully paid. Need ${releaseDueTotal.toFixed(2)}, paid ${paid.toFixed(2)}.` });
+  }
+
+  const fullBalance = Math.max(0, total - paid);
+  const nextQueueStatus = fullBalance <= 0 ? 'paid' : 'pending';
+  const now = nowStr();
+  await runAsync('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?', ['po_issued', fq.supplier_order_id]);
+  await runAsync('UPDATE finance_queue SET status=?, paid_at=COALESCE(paid_at, ?), notes=? WHERE id=?',
+    [nextQueueStatus, now, fullBalance > 0 ? 'Advance released; balance pending' : 'Payment released and fully paid', fq.id]);
+
   const remainingBlocked = await getAsync(
     "SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=? AND payment_blocked=1",
     [fq.order_id]
@@ -3212,9 +3304,9 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
     }
   }
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-    [uuid(), fq.order_id, 'Supplier paid | Ref: '+(d.payment_ref||'—')+' | PO unblocked → back to Procurement', req.session.user.name, '', now]); } catch(_) {}
+    [uuid(), fq.order_id, 'Supplier advance released to Procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true });
+  res.json({ ok: true, status: nextQueueStatus, balance_due: fullBalance });
 }));
 
 // PUT /api/finance/supplier-net-pay/:so_id — record net-term settlement against a supplier order
@@ -3255,7 +3347,7 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
   const newTotalPaid = prevPaid + thisPayment;
   const total        = parseFloat(so.confirmed_price) || 0;
   const isFullyPaid  = total > 0 ? newTotalPaid >= total : true;
-  const newStatus    = isFullyPaid ? 'paid' : 'partial_paid';
+  const newStatus    = 'net_payment_recorded';
   const remaining    = Math.max(0, total - newTotalPaid);
   const now = nowStr();
 
@@ -3285,6 +3377,27 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
     [uuid(), so.order_id, histMsg, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true, total_paid: newTotalPaid, remaining, status: newStatus });
+}));
+
+// POST /api/finance/supplier-net-release/:so_id — release recorded supplier net settlement
+app.post('/api/finance/supplier-net-release/:so_id', auth, asyncRoute(async (req, res) => {
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [req.params.so_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier order not found' });
+
+  const total = parseFloat(so.confirmed_price) || 0;
+  const paid = parseFloat(so.net_total_paid) || 0;
+  if (paid <= 0) return res.status(400).json({ error: 'Record supplier payment before release' });
+
+  const fullBalance = Math.max(0, total - paid);
+  const nextStatus = fullBalance <= 0 ? 'paid' : 'partial_paid';
+  const now = nowStr();
+  await runAsync('UPDATE supplier_orders SET status=? WHERE id=?', [nextStatus, so.id]);
+  try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), so.order_id,
+     fullBalance <= 0 ? 'Supplier net payment released and fully settled' : `Supplier net payment released — ${fullBalance.toFixed(2)} remaining`,
+     req.session.user.name, '', now]); } catch(_) {}
+  saveNow();
+  res.json({ ok: true, status: nextStatus, balance_due: fullBalance });
 }));
 
 console.log('[STARTUP] Finance routes registered');

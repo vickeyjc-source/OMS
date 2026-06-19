@@ -537,11 +537,14 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const netAmount = type === 'supplier-net'
     ? String(Math.max(0, (parseFloat(item.confirmed_price)||0) - (parseFloat(item.net_total_paid)||0)) || item.confirmed_price || '')
     : '';
+  const supplierAdvanceAmount = type === 'supplier-advance'
+    ? String(parseFloat(item.payment_due_total)||parseFloat(item.full_balance_due)||Math.max(0, (parseFloat(item.amount)||0) - (parseFloat(item.paid_amount)||0)) || item.amount || '')
+    : '';
   const custDefaultAmt = type === 'customer'
-    ? String(Math.min(parseFloat(item.balance_due)||0, parseFloat(item.order_total)||0) || parseFloat(item.order_total)||'')
+    ? String(parseFloat(item.payment_due_total)||parseFloat(item.balance_due)||parseFloat(item.order_total)||'')
     : '';
   const [form, setForm] = useState({
-    amount: type === 'customer' ? custDefaultAmt : type === 'supplier-net' ? netAmount : String(item.amount||''),
+    amount: type === 'customer' ? custDefaultAmt : type === 'supplier-net' ? netAmount : type === 'supplier-advance' ? supplierAdvanceAmount : String(item.amount||''),
     currency: 'INR',
     payment_method: 'Bank Transfer', payment_ref: '', payment_date: today(), notes: '',
     customer_po_no: type === 'customer' ? (item.po_number || '') : '',
@@ -642,15 +645,8 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Amount <span className="req">*</span></label>
-              {(type === 'customer' || type === 'supplier-net') ? (
-                <div style={{padding:'8px 12px',borderRadius:'var(--r-sm)',background:'var(--surface2)',
-                  border:'1px solid var(--border)',fontSize:13,fontFamily:'DM Mono,monospace',fontWeight:700}}>
-                  {fmtM(parseFloat(form.amount)||0, form.currency)}
-                </div>
-              ) : (
-                <input className="input" type="number" step="0.01" value={form.amount}
-                  onChange={e=>set('amount',e.target.value)} placeholder="0.00"/>
-              )}
+              <input className="input" type="number" step="0.01" value={form.amount}
+                onChange={e=>set('amount',e.target.value)} placeholder="0.00"/>
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Currency</label>
@@ -1250,6 +1246,8 @@ export default function FinancePage() {
   const [customerBankModal, setCustomerBankModal] = useState(null); // customer object
   const [breakdownModal, setBreakdownModal] = useState(null); // { orderId }
   const [releaseConfirm, setReleaseConfirm] = useState(null); // order to release
+  const [supplierReleaseConfirm, setSupplierReleaseConfirm] = useState(null); // supplier finance queue item
+  const [supplierNetReleaseConfirm, setSupplierNetReleaseConfirm] = useState(null); // supplier net order item
   const [returnConfirm, setReturnConfirm] = useState(null); // { type, item }
   const [returningId, setReturningId] = useState(null);
   const [search, setSearch]   = useState('');
@@ -1266,6 +1264,32 @@ export default function FinancePage() {
       setTab('history');
     },
     onError: e => toast.error(e.response?.data?.error || 'Release failed'),
+  });
+
+  const supplierReleaseMutation = useMutation({
+    mutationFn: fqId => api.post('/finance/supplier-release/' + fqId),
+    onSuccess: () => {
+      qc.invalidateQueries(['finance-supplier']);
+      qc.invalidateQueries(['finance-history']);
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['summary']);
+      toast.success('✅ Supplier PO released to Procurement');
+      setSupplierReleaseConfirm(null);
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Supplier release failed'),
+  });
+
+  const supplierNetReleaseMutation = useMutation({
+    mutationFn: soId => api.post('/finance/supplier-net-release/' + soId),
+    onSuccess: () => {
+      qc.invalidateQueries(['finance-supplier']);
+      qc.invalidateQueries(['finance-history']);
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['summary']);
+      toast.success('✅ Supplier net payment released');
+      setSupplierNetReleaseConfirm(null);
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Supplier net release failed'),
   });
 
   const returnCustomerToOrder = async (order) => {
@@ -1348,8 +1372,9 @@ export default function FinancePage() {
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
   const custAdvance = custQueue.filter(o =>
-    (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded') &&
-    (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms))
+    (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
+    (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
+    o.customer_payment_status !== 'paid'
   );
   const custNet     = custQueue.filter(o =>
     o.status !== 'payment_approval' &&
@@ -1614,7 +1639,14 @@ export default function FinancePage() {
                       </td>
                       <td><StatusBadge s={o.customer_payment_status||'pending'}/></td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                        {o.balance_due > 0 && (
+                        {o.customer_payment_status === 'payment_recorded' ? (
+                          <button className="btn btn-xs"
+                            style={{fontSize:11,background:'var(--green)',color:'#fff',
+                              borderColor:'var(--green)',fontWeight:600}}
+                            onClick={()=>setReleaseConfirm(o)}>
+                            🚀 Release
+                          </button>
+                        ) : o.balance_due > 0 && (
                           <button className="btn btn-xs btn-primary"
                             onClick={()=>setPayModal({item:o,type:'customer'})}
                             style={{fontSize:11}}>💳 Record Payment</button>
@@ -1646,6 +1678,8 @@ export default function FinancePage() {
                 <th>PO No.</th><th>Supplier</th><th>Order</th>
                 <th>PI / Ref No.</th><th>Terms</th>
                 <th style={{textAlign:'right'}}>Amount Due</th>
+                <th style={{textAlign:'right'}}>Paid</th>
+                <th style={{textAlign:'right'}}>Balance Due</th>
                 <th>Bank Details</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
@@ -1653,6 +1687,14 @@ export default function FinancePage() {
                   (() => {
                     const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                     const hasBank = isSupplierBankReady(fullEntity);
+                    const paid = parseFloat(r.paid_amount)||0;
+                    const dueNow = r.payment_due_total !== undefined && r.payment_due_total !== null
+                      ? parseFloat(r.payment_due_total)||0
+                      : Math.max(0, (parseFloat(r.amount)||0) - paid);
+                    const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
+                      ? parseFloat(r.full_balance_due)||0
+                      : Math.max(0, (parseFloat(r.amount)||0) - paid);
+                    const canReleaseSupplier = paid > 0 && r.release_ready && dueNow <= 0;
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
@@ -1666,7 +1708,13 @@ export default function FinancePage() {
                       {r.payment_terms||'Advance'}
                     </span></td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:'var(--red)',fontSize:13}}>
-                      {fmtM(r.amount, r.currency)}
+                      {fmtM(dueNow, r.currency)}
+                    </td>
+                    <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,color:paid>0?'var(--green)':'var(--text3)'}}>
+                      {paid > 0 ? fmtM(paid, r.currency) : '—'}
+                    </td>
+                    <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:balance>0?'var(--red)':'var(--green)'}}>
+                      {balance > 0 ? fmtM(balance, r.currency) : '✓ Nil'}
                     </td>
                     <td style={{fontSize:11,color:'var(--text2)'}}>
                       {fullEntity?.bank_name && <div>{fullEntity.bank_name}</div>}
@@ -1677,12 +1725,14 @@ export default function FinancePage() {
                     </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
-                        <button className="btn btn-xs"
-                          onClick={()=>setReturnConfirm({type:'supplier',item:r})}
-                          disabled={returningId===r.id}
-                          style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
-                          {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
-                        </button>
+                        {paid <= 0 && !r.payment_ref && (
+                          <button className="btn btn-xs"
+                            onClick={()=>setReturnConfirm({type:'supplier',item:r})}
+                            disabled={returningId===r.id}
+                            style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
+                            {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
+                          </button>
+                        )}
                         {!hasBank && (
                           <button className="btn btn-xs"
                             onClick={()=>{
@@ -1693,13 +1743,21 @@ export default function FinancePage() {
                             🏦 Add Bank Details
                           </button>
                         )}
-                        <button className="btn btn-xs btn-primary"
-                          onClick={()=>setPayModal({item:{...r, _resolvedName: displayName},type:'supplier-advance'})}
-                          disabled={!hasBank}
-                          style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)',opacity:hasBank?1:0.55,cursor:hasBank?'pointer':'not-allowed'}}
-                          title={hasBank ? '' : 'Add bank details first'}>
-                          💸 Mark Paid
-                        </button>
+                        {canReleaseSupplier ? (
+                          <button className="btn btn-xs"
+                            onClick={()=>setSupplierReleaseConfirm({...r, _resolvedName: displayName})}
+                            style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700}}>
+                            🚀 Release
+                          </button>
+                        ) : (
+                          <button className="btn btn-xs btn-primary"
+                            onClick={()=>setPayModal({item:{...r, _resolvedName: displayName},type:'supplier-advance'})}
+                            disabled={!hasBank || dueNow <= 0}
+                            style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)',opacity:(hasBank && dueNow > 0)?1:0.55,cursor:(hasBank && dueNow > 0)?'pointer':'not-allowed'}}
+                            title={!hasBank ? 'Add bank details first' : dueNow <= 0 ? 'Release this PO to Procurement' : ''}>
+                            💸 Record Payment
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1770,11 +1828,20 @@ export default function FinancePage() {
                       </td>
                       <td><StatusBadge s={r.status||'pending'}/></td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                        <button className="btn btn-xs btn-primary"
-                          onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
-                          style={{fontSize:11}}>
-                          {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
-                        </button>
+                        {r.status === 'net_payment_recorded' ? (
+                          <button className="btn btn-xs"
+                            onClick={()=>setSupplierNetReleaseConfirm({...r, _resolvedName: displayName})}
+                            disabled={supplierNetReleaseMutation.isPending}
+                            style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700}}>
+                            🚀 Release
+                          </button>
+                        ) : balance > 0 ? (
+                          <button className="btn btn-xs btn-primary"
+                            onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
+                            style={{fontSize:11}}>
+                            {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
+                          </button>
+                        ) : null}
                       </td>
                     </tr>
                   );
@@ -1987,6 +2054,75 @@ export default function FinancePage() {
                 disabled={releaseMutation.isPending}
                 onClick={()=>releaseMutation.mutate(releaseConfirm.id)}>
                 {releaseMutation.isPending ? 'Releasing…' : '✅ Yes, Release'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {supplierReleaseConfirm && (
+        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setSupplierReleaseConfirm(null)}>
+          <div className="modal modal-sm">
+            <div className="modal-header">
+              <h2>🚀 Release Supplier PO</h2>
+              <button className="close-x" onClick={()=>setSupplierReleaseConfirm(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:14,marginBottom:10}}>
+                Release supplier PO{' '}
+                <strong style={{color:'var(--accent)'}}>{supplierReleaseConfirm.internal_po_no || supplierReleaseConfirm.supplier_order_id}</strong>
+                {' '}to Procurement?
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',padding:'10px 12px',borderRadius:6,
+                background:'var(--surface2)',border:'1px solid var(--border)'}}>
+                Supplier: <strong>{supplierReleaseConfirm._resolvedName || supplierReleaseConfirm.supplier?.name || supplierReleaseConfirm.supplier_id}</strong><br/>
+                Paid: <strong style={{color:'var(--green)'}}>{fmtM(supplierReleaseConfirm.paid_amount || 0, supplierReleaseConfirm.currency)}</strong><br/>
+                Remaining Balance: <strong>{fmtM(supplierReleaseConfirm.full_balance_due || 0, supplierReleaseConfirm.currency)}</strong>
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',marginTop:10}}>
+                This will unblock the supplier PO. If balance remains, the card will stay pending for the remaining payment.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={()=>setSupplierReleaseConfirm(null)}>Cancel</button>
+              <button className="btn btn-primary"
+                style={{background:'var(--green)',borderColor:'var(--green)'}}
+                disabled={supplierReleaseMutation.isPending}
+                onClick={()=>supplierReleaseMutation.mutate(supplierReleaseConfirm.id)}>
+                {supplierReleaseMutation.isPending ? 'Releasing…' : '✅ Yes, Release'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {supplierNetReleaseConfirm && (
+        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setSupplierNetReleaseConfirm(null)}>
+          <div className="modal modal-sm">
+            <div className="modal-header">
+              <h2>🚀 Release Supplier Net Payment</h2>
+              <button className="close-x" onClick={()=>setSupplierNetReleaseConfirm(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:14,marginBottom:10}}>
+                Release recorded net payment for{' '}
+                <strong style={{color:'var(--accent)'}}>{supplierNetReleaseConfirm.internal_po_no || supplierNetReleaseConfirm.id}</strong>?
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',padding:'10px 12px',borderRadius:6,
+                background:'var(--surface2)',border:'1px solid var(--border)'}}>
+                Supplier: <strong>{supplierNetReleaseConfirm._resolvedName || supplierNetReleaseConfirm.supplier?.name || supplierNetReleaseConfirm.supplier_id}</strong><br/>
+                Paid: <strong style={{color:'var(--green)'}}>{fmtM(supplierNetReleaseConfirm.net_total_paid || 0, supplierNetReleaseConfirm.confirmed_currency)}</strong><br/>
+                Remaining Balance: <strong>{fmtM(Math.max(0, (parseFloat(supplierNetReleaseConfirm.confirmed_price)||0) - (parseFloat(supplierNetReleaseConfirm.net_total_paid)||0)), supplierNetReleaseConfirm.confirmed_currency)}</strong>
+              </div>
+              <div style={{fontSize:12,color:'var(--text3)',marginTop:10}}>
+                This confirms the recorded supplier net payment. If balance remains, the card will stay pending for the remaining payment.
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={()=>setSupplierNetReleaseConfirm(null)}>Cancel</button>
+              <button className="btn btn-primary"
+                style={{background:'var(--green)',borderColor:'var(--green)'}}
+                disabled={supplierNetReleaseMutation.isPending}
+                onClick={()=>supplierNetReleaseMutation.mutate(supplierNetReleaseConfirm.id)}>
+                {supplierNetReleaseMutation.isPending ? 'Releasing…' : '✅ Yes, Release'}
               </button>
             </div>
           </div>
