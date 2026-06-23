@@ -362,6 +362,20 @@ function sectionGateAny(sectionKeys) {
   };
 }
 
+async function updateEnquiryStatusAfterQuoteOrder(enquiryId, quoteId) {
+  if (!enquiryId) return;
+  const pendingSourcing = await getAsync(
+    "SELECT 1 FROM enquiry_sourcing WHERE enquiry_id=? AND COALESCE(item_status,'ready') IN ('ready','checking') LIMIT 1",
+    [enquiryId]
+  );
+  const otherOpenQuote = await getAsync(
+    "SELECT 1 FROM quotes WHERE enquiry_id=? AND id<>? AND status IN ('active','returned_to_sourcing') LIMIT 1",
+    [enquiryId, quoteId || '']
+  );
+  const nextStatus = pendingSourcing ? 'sourcing' : (otherOpenQuote ? 'quoted' : 'ordered');
+  await runAsync('UPDATE enquiries SET status=?, updated_at=? WHERE id=?', [nextStatus, nowStr(), enquiryId]);
+}
+
 // Dept permissions
 const DEPT_PERMS = {
   management:  { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
@@ -1152,9 +1166,11 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   const newExistingOrderId = d.existing_order_id !== undefined ? (d.existing_order_id || null) : (e.existing_order_id || null);
   try { await runAsync('ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
   try { await runAsync('ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL'); } catch(_) {}
-  // If enquiry is being set to 'quoted' but a live order already exists for it, keep it as 'ordered'
+  // If enquiry is being set to 'quoted' outside the split quote send flow, but a
+  // live order already exists for it, keep it as 'ordered'. Split quote sends are
+  // independent: Quote A may already have an order while Quote B is just created.
   let resolvedStatus = d.status || e.status;
-  if (resolvedStatus === 'quoted') {
+  if (resolvedStatus === 'quoted' && d._action !== 'Sent to Quote Bin') {
     const liveOrder = await getAsync("SELECT id FROM orders WHERE enquiry_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
     if (liveOrder) resolvedStatus = 'ordered';
   }
@@ -1228,8 +1244,8 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
         }
         // Full sourcing data UPSERT
         const fieldModes = s.field_modes || (s._fieldModes ? JSON.stringify(s._fieldModes) : null);
-        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,item_status,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
@@ -1243,7 +1259,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
                bank_inr=EXCLUDED.bank_inr, clearance_inr=EXCLUDED.clearance_inr,
                margin_inr=EXCLUDED.margin_inr,
                availability=EXCLUDED.availability, lead_time=EXCLUDED.lead_time,
-               notes=EXCLUDED.notes, sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note,
+               notes=EXCLUDED.notes, item_status=EXCLUDED.item_status, sent_to_enquiry=EXCLUDED.sent_to_enquiry, sent_to_enquiry_note=EXCLUDED.sent_to_enquiry_note,
                quote_price=EXCLUDED.quote_price,
                quote_currency=EXCLUDED.quote_currency, tax_rate=EXCLUDED.tax_rate,
                field_modes=EXCLUDED.field_modes,
@@ -1264,6 +1280,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            toNum(s.freight_inr),   toNum(s.insurance_inr), toNum(s.duty_inr),   toNum(s.cess_inr),
            toNum(s.bank_inr),      toNum(s.clearance_inr), toNum(s.margin_inr),
            s.availability||'', s.lead_time||'', s.notes||'',
+           ['ready','checking','no_bid','quoted'].includes(s.item_status) ? s.item_status : 'ready',
            s.sent_to_enquiry ? 1 : 0, s.sent_to_enquiry_note || null,
            toNum(s.quote_price),
            s.quote_currency||'INR',
@@ -1288,12 +1305,12 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   // quote row, so nothing appeared in the Quote Bin. Doing it here keeps the two
   // writes atomic and consistent with the status change.
   let createdQuoteNo = null;
-  if (resolvedStatus === 'quoted' && d._action === 'Sent to Quote Bin') {
+  if (d._action === 'Sent to Quote Bin' && (resolvedStatus === 'quoted' || d.allow_partial_quote)) {
     const existingActive = await getAsync(
       "SELECT id FROM quotes WHERE enquiry_id=? AND status IN ('active','returned_to_sourcing')",
       [req.params.id]
     );
-    if (!existingActive) {
+    if (!existingActive || d.allow_partial_quote) {
       const fy = financialYear();
       const prefix = `QT-${fy}-`;
       const qrows = await allAsync("SELECT quote_no FROM quotes WHERE quote_no LIKE ?", [prefix + '%']);
@@ -1307,7 +1324,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
       try { await runAsync('ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
       const quoteId = uuid();
       await runAsync('INSERT INTO quotes(id,enquiry_id,customer_id,quote_no,zoho_quote_no,file_ref,status,valid_until,created_by,created_at,notes,existing_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-        [quoteId, req.params.id, e.customer_id, quoteNo, '', '', 'active', '', req.session.user.id, now, d.quote_notes || '', newExistingOrderId]);
+        [quoteId, req.params.id, e.customer_id, quoteNo, '', '', 'active', '', req.session.user.id, now, d.quote_notes || '', null]);
       try {
         await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
           [uuid(), req.params.id, `Quote ${quoteNo} created`, req.session.user.name, now]);
@@ -1333,18 +1350,32 @@ app.get('/api/next-quote-no', auth, asyncRoute(async (req, res) => {
   const next = nums.length ? Math.max(...nums) + 1 : 1;
   res.json({ quote_no: prefix + String(next).padStart(4, '0') });
 }));
-app.get('/api/quotes', auth, asyncRoute(async (req, res) => res.json(await allAsync('SELECT * FROM quotes ORDER BY created_at DESC'))));
+app.get('/api/quotes', auth, asyncRoute(async (req, res) => {
+  const rows = await allAsync(`
+    SELECT q.*,
+      CASE
+        WHEN q.status='order_created' AND o.id IS NULL THEN 'active'
+        ELSE q.status
+      END AS status,
+      CASE
+        WHEN q.parent_quote_id IS NULL AND COALESCE(q.revision,1)=1 AND o.id IS NULL THEN NULL
+        ELSE q.existing_order_id
+      END AS existing_order_id
+    FROM quotes q
+    LEFT JOIN orders o
+      ON o.quote_id=q.id AND o.status NOT IN ('deleted','cancelled')
+    ORDER BY q.created_at DESC
+  `);
+  res.json(rows);
+}));
 app.post('/api/quotes', auth, asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.customer_id || !d.quote_no) return res.status(400).json({ error: 'customer_id and quote_no required' });
   if (await getAsync('SELECT id FROM quotes WHERE quote_no=?', [d.quote_no])) return res.status(409).json({ error: 'Quote number exists' });
   const id = uuid();
-  // Resolve existing_order_id: use provided value, or look up from linked enquiry
+  // Fresh split quotes are independent. Only explicit quote revisions should carry
+  // an existing order link forward.
   let existingOrderId = d.existing_order_id || null;
-  if (!existingOrderId && d.enquiry_id) {
-    const enqRow = await getAsync('SELECT existing_order_id FROM enquiries WHERE id=?', [d.enquiry_id]);
-    if (enqRow?.existing_order_id) existingOrderId = enqRow.existing_order_id;
-  }
   try { await runAsync('ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL'); } catch(_) {}
   await runAsync('INSERT INTO quotes(id,enquiry_id,customer_id,quote_no,zoho_quote_no,file_ref,status,valid_until,created_by,created_at,notes,existing_order_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     [id,d.enquiry_id||null,d.customer_id,d.quote_no,d.zoho_quote_no||'',d.file_ref||'','active',d.valid_until||'',req.session.user.id,nowStr(),d.notes||'',existingOrderId]);
@@ -1369,111 +1400,6 @@ app.post('/api/enquiries/:id/modify-request', auth, asyncRoute(async (req, res) 
       [uuid(), req.params.id, histNote, req.session.user.name, now]);
   } catch(_) {}
   res.json({ ok: true });
-}));
-
-// ── Admin: cascade ENQ item qty change to all sections ──────────────────────
-app.put('/api/enquiries/:id/update-qty', auth, asyncRoute(async (req, res) => {
-  if (req.session.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { item_id, new_qty } = req.body;
-  if (!item_id || new_qty == null || isNaN(Number(new_qty)) || Number(new_qty) < 0)
-    return res.status(400).json({ error: 'item_id and valid new_qty required' });
-
-  const qty = Number(new_qty);
-  const now = nowStr();
-  const enqId = req.params.id;
-
-  // 1. Verify ENQ exists and item belongs to it
-  const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [enqId]);
-  if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
-  const enqItem = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [item_id, enqId]);
-  if (!enqItem) return res.status(404).json({ error: 'Enquiry item not found' });
-  const oldQty = Number(enqItem.quantity);
-
-  // 2. Block if GRN already created for this item (goods physically received)
-  const liveOrders = await allAsync(
-    "SELECT id FROM orders WHERE enquiry_id=? AND status NOT IN ('deleted','cancelled')", [enqId]
-  );
-  for (const ord of liveOrders) {
-    const orderItem = await getAsync(
-      'SELECT oi.id FROM order_items oi WHERE oi.order_id=? AND (oi.component=? OR oi.ipn=?)',
-      [ord.id, enqItem.component, enqItem.ipn || '__none__']
-    );
-    if (orderItem) {
-      const grn = await getAsync(
-        "SELECT id FROM grn_records WHERE order_item_id=? LIMIT 1", [orderItem.id]
-      );
-      if (grn) return res.status(400).json({ error: `Cannot change qty: GRN already recorded for ${enqItem.component}` });
-    }
-  }
-
-  // 3. Update enquiry_items qty
-  await runAsync('UPDATE enquiry_items SET quantity=? WHERE id=?', [qty, item_id]);
-
-  // 4. Update order_items qty + cascade to supplier orders and finance for all live orders
-  for (const ord of liveOrders) {
-    const orderItem = await getAsync(
-      'SELECT oi.id, oi.unit_price, oi.procurement_price, oi.tax_rate FROM order_items oi WHERE oi.order_id=? AND (oi.component=? OR oi.ipn=?)',
-      [ord.id, enqItem.component, enqItem.ipn || '__none__']
-    );
-    if (!orderItem) continue;
-
-    // 4a. Update order_items qty
-    await runAsync('UPDATE order_items SET qty=? WHERE id=?', [qty, orderItem.id]);
-
-    // 4b. Find all supplier POs that contain this order item
-    const soLinks = await allAsync(
-      'SELECT soi.supplier_order_id FROM supplier_order_items soi WHERE soi.item_id=?', [orderItem.id]
-    );
-    for (const link of soLinks) {
-      const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [link.supplier_order_id]);
-      if (!so) continue;
-
-      // 4c. Recalculate supplier PO confirmed_price = sum(qty × source price) across all its items
-      const soItems = await allAsync(
-        `SELECT oi.qty, oi.procurement_price FROM order_items oi
-         JOIN supplier_order_items soi ON soi.item_id=oi.id
-         WHERE soi.supplier_order_id=?`, [so.id]
-      );
-      const newConfirmedPrice = soItems.reduce((s, i) => {
-        const unitSource = Number(i.procurement_price || 0) || Number(so.buying_price_per_unit || 0);
-        return s + (Number(i.qty || 0) * unitSource);
-      }, 0);
-      const newConfirmedPriceRounded = Math.round(newConfirmedPrice * 100) / 100;
-
-      // 4d. Update supplier_orders confirmed_price
-      await runAsync(
-        'UPDATE supplier_orders SET confirmed_price=? WHERE id=?',
-        [newConfirmedPriceRounded, so.id]
-      );
-
-      // 4e. Update finance_queue amount for ALL records (pending and paid) — admin correction
-      await runAsync(
-        'UPDATE finance_queue SET amount=? WHERE supplier_order_id=?',
-        [newConfirmedPriceRounded, so.id]
-      );
-
-      // 4f. Log PO price update in order history
-      try {
-        await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-          [uuid(), ord.id,
-           `PO ${so.internal_po_no || so.id}: price recalculated after qty change (${enqItem.component} ${oldQty}→${qty}) — new total ₹${newConfirmedPriceRounded.toLocaleString('en-IN')}`,
-           req.session.user.name, '', now]);
-      } catch(_) {}
-    }
-
-    // 4g. Log in order history
-    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-      [uuid(), ord.id,
-       `Admin updated ${enqItem.component} qty: ${oldQty} → ${qty} (from ENQ)`,
-       req.session.user.name, '', now]);
-  }
-
-  // 7. Log in enquiry history
-  await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
-    [uuid(), enqId, `Qty of ${enqItem.component} changed: ${oldQty} → ${qty}`, req.session.user.name, now]);
-
-  saveNow();
-  res.json({ ok: true, old_qty: oldQty, new_qty: qty });
 }));
 
 // Returns enquiry line items with quote_price for order creation
@@ -1514,7 +1440,7 @@ app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
        sales_revision_notes,existing_order_id)
        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,NULL,?,?)`,
     [newId, parent.enquiry_id, parent.customer_id, newQuoteNo,
-     parent.zoho_quote_no||'', '', 'active', parent.valid_until||'', req.session.user.id, now,
+     parent.zoho_quote_no||'', '', 'returned_to_sourcing', parent.valid_until||'', req.session.user.id, now,
      parent.notes||'', parent.id, attempt, salesNotes, parentExistingOrderId]);
 
   // Mark the parent as superseded
@@ -1567,15 +1493,26 @@ app.get('/api/quotes/:id/lineitems', auth, asyncRoute(async (req, res) => {
   // Parse quote prices from the notes field as fallback
   // Notes format: "ComponentName: Quote CUR 245 | Src CUR 220 | Qty 10\n..."
   const notePrices = {};
+  const noteItemNames = new Set();
   (q.notes || '').split('\n').forEach(line => {
     // Match: "COMPONENT: Quote INR 245 | ..."  or  "COMPONENT: Quote INR 245.50 | ..."
     const m = line.match(/^([^:]+):\s*Quote\s+([A-Z]+)\s+([\d.]+)/i);
-    if (m) notePrices[m[1].trim().toLowerCase()] = { price: parseFloat(m[3]), currency: m[2] };
+    if (m) {
+      const key = m[1].trim().toLowerCase();
+      notePrices[key] = { price: parseFloat(m[3]), currency: m[2] };
+      noteItemNames.add(key);
+    }
   });
 
-  const lineItems = items.map(item => {
+  const lineItems = items.filter(item => {
     const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
-    const src = srcRows.find(s => s.quote_price) || srcRows[0] || {};
+    const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
+    const key = item.component.toLowerCase();
+    if (noteItemNames.size > 0) return noteItemNames.has(key);
+    return (src.item_status || 'ready') === 'ready';
+  }).map(item => {
+    const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
+    const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
 
     // Use DB quote_price first; fallback to parsed notes
     let qp  = src.quote_price  || null;
@@ -1614,10 +1551,11 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
   const d   = req.body;
   const old = await getAsync('SELECT * FROM quotes WHERE id=?', [req.params.id]);
   if (!old) return res.status(404).json({ error: 'Quote not found' });
-  // If status is being set to 'active' but a live order already exists for this quote's enquiry, use 'order_created' instead
+  // If status is being set to 'active' but a live order already exists for this exact quote, use 'order_created' instead.
+  // Split quotes share an enquiry_id, so enquiry-level order checks would incorrectly lock later split quotes.
   let resolvedQuoteStatus = d.status ?? old.status ?? 'active';
-  if (resolvedQuoteStatus === 'active' && old.enquiry_id) {
-    const liveOrder = await getAsync("SELECT id FROM orders WHERE (quote_id=? OR enquiry_id=?) AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id, old.enquiry_id]);
+  if (resolvedQuoteStatus === 'active') {
+    const liveOrder = await getAsync("SELECT id FROM orders WHERE quote_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
     if (liveOrder) resolvedQuoteStatus = 'order_created';
   }
   await runAsync(`UPDATE quotes SET
@@ -1723,10 +1661,10 @@ app.post('/api/orders', auth, asyncRoute(async (req, res) => {
       await runAsync('UPDATE quotes SET status=? WHERE id=?', ['order_created', d.quote_id]);
     } catch(_) {}
   }
-  // Mark the linked enquiry as ordered
+  // Update the enquiry aggregate without collapsing independent split quotes.
   if (d.enquiry_id) {
     try {
-      await runAsync('UPDATE enquiries SET status=? WHERE id=?', ['ordered', d.enquiry_id]);
+      await updateEnquiryStatusAfterQuoteOrder(d.enquiry_id, d.quote_id || null);
     } catch(_) {}
   }
   saveNow(); res.json({ id: d.id });
@@ -1787,7 +1725,10 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
     if (o.quote_id) {
       await runAsync("UPDATE quotes SET status='closed' WHERE id=?", [o.quote_id]);
     } else if (o.enquiry_id) {
-      await runAsync("UPDATE quotes SET status='closed' WHERE enquiry_id=? AND status NOT IN ('superseded')", [o.enquiry_id]);
+      const relatedQuotes = await allAsync("SELECT id FROM quotes WHERE enquiry_id=? AND status NOT IN ('superseded')", [o.enquiry_id]);
+      if (relatedQuotes.length === 1) {
+        await runAsync("UPDATE quotes SET status='closed' WHERE id=?", [relatedQuotes[0].id]);
+      }
     }
   }
 
@@ -1845,9 +1786,12 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   }
   await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(),oid,d._action||'Order updated',u.name,d._comment||'',nowStr()]);
-  // Mark the linked quote as order_created so it can't be re-ordered
-  if (d.quote_id) {
-    await runAsync("UPDATE quotes SET status='order_created' WHERE id=?", [d.quote_id]);
+  // Mark the linked quote as order_created so it can't be re-ordered, without
+  // marking unrelated split quotes/orders as completed.
+  const linkedQuoteId = d.quote_id || o.quote_id || null;
+  if (linkedQuoteId && d.status !== 'closed') {
+    await runAsync("UPDATE quotes SET status='order_created' WHERE id=?", [linkedQuoteId]);
+    await updateEnquiryStatusAfterQuoteOrder(o.enquiry_id || d.enquiry_id || null, linkedQuoteId);
   }
   saveNow();
   const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
@@ -2059,8 +2003,7 @@ app.post('/api/admin/heal', adminOnly, asyncRoute(async (req, res) => {
   // Fix quotes whose linked order is closed but quote not yet marked closed
   try {
     const r1 = await runAsync(`UPDATE quotes SET status='closed' WHERE id IN (SELECT quote_id FROM orders WHERE status='closed' AND quote_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
-    const r2 = await runAsync(`UPDATE quotes SET status='closed' WHERE enquiry_id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
-    const n = (r1?.rowCount||0) + (r2?.rowCount||0);
+    const n = (r1?.rowCount||0);
     if (n) fixes.push(`${n} quotes marked closed`);
   } catch(e) { fixes.push('quote-close heal failed: ' + e.message); }
   // Fix orders with payments >= total but stuck at payment_approval
@@ -2068,17 +2011,32 @@ app.post('/api/admin/heal', adminOnly, asyncRoute(async (req, res) => {
     const r = await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
     if (r && r.rowCount) fixes.push(`${r.rowCount} orders reverted from paid→payment_recorded`);
   } catch(e) { fixes.push('payment heal failed: ' + e.message); }
-  // Fix enquiries stuck at 'returned_to_sourcing' or 'quoted' when a live order exists → mark 'ordered'
+  // Fix enquiries stuck at 'returned_to_sourcing' or 'quoted' when all split work is done and a live order exists.
   // Note: 'modify_requested' is intentional — do NOT auto-fix it
   try {
-    const r = await runAsync(`UPDATE enquiries SET status='ordered', updated_at=NOW() WHERE status IN ('returned_to_sourcing','quoted') AND id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL)`);
+    const r = await runAsync(`
+      UPDATE enquiries e SET status='ordered', updated_at=NOW()
+      WHERE e.status IN ('returned_to_sourcing','quoted')
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.enquiry_id=e.id AND o.status NOT IN ('deleted','cancelled'))
+        AND NOT EXISTS (SELECT 1 FROM enquiry_sourcing es WHERE es.enquiry_id=e.id AND COALESCE(es.item_status,'ready') IN ('ready','checking'))
+        AND NOT EXISTS (SELECT 1 FROM quotes q WHERE q.enquiry_id=e.id AND q.status IN ('active','returned_to_sourcing'))
+    `);
     if (r && r.rowCount) fixes.push(`${r.rowCount} enquiries fixed: returned_to_sourcing/quoted → ordered`);
   } catch(e) { fixes.push('enquiry revision heal failed: ' + e.message); }
-  // Fix quotes stuck at 'returned_to_sourcing' or 'active' when a live order exists → mark 'order_created'
+  // Fix quotes stuck at 'returned_to_sourcing' or 'active' when a live order exists for that exact quote → mark 'order_created'
   try {
-    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND (id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) OR enquiry_id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL))`);
+    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL)`);
     if (r && r.rowCount) fixes.push(`${r.rowCount} quotes fixed: returned_to_sourcing/active → order_created`);
   } catch(e) { fixes.push('quote revision heal failed: ' + e.message); }
+  // Repair split quotes that were previously marked order_created only because another quote in the same enquiry has an order.
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='active' WHERE status='order_created' AND id NOT IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) AND enquiry_id IN (SELECT enquiry_id FROM quotes WHERE enquiry_id IS NOT NULL GROUP BY enquiry_id HAVING COUNT(*) > 1)`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} split quotes restored: order_created → active`);
+  } catch(e) { fixes.push('split quote status repair failed: ' + e.message); }
+  try {
+    const r = await runAsync(`UPDATE quotes SET existing_order_id=NULL WHERE parent_quote_id IS NULL AND COALESCE(revision,1)=1 AND existing_order_id IS NOT NULL AND id NOT IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL)`);
+    if (r && r.rowCount) fixes.push(`${r.rowCount} split quote order links cleared`);
+  } catch(e) { fixes.push('split quote order-link repair failed: ' + e.message); }
   res.json({ ok: true, fixes });
 }));
 
@@ -2359,20 +2317,31 @@ initDb().then(async () => {
     const r = await runAsync(`UPDATE quotes SET status='closed' WHERE id IN (SELECT quote_id FROM orders WHERE status='closed' AND quote_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
     if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'quotes → closed');
   } catch(e) { console.error('[STARTUP] Quote close backfill failed:', e.message); }
+  // Fix: enquiries stuck at 'returned_to_sourcing' or 'quoted' only when all split work is done and a live order exists.
   try {
-    const r = await runAsync(`UPDATE quotes SET status='closed' WHERE enquiry_id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status NOT IN ('superseded','closed')`);
-    if (r && r.rowCount) console.log('[STARTUP] Backfilled', r.rowCount, 'quotes → closed (via enquiry)');
-  } catch(e) { console.error('[STARTUP] Quote close backfill (enquiry) failed:', e.message); }
-  // Fix: enquiries stuck at 'returned_to_sourcing' or 'quoted' that already have a live order → mark 'ordered'
-  try {
-    const r = await runAsync(`UPDATE enquiries SET status='ordered', updated_at=NOW() WHERE status IN ('returned_to_sourcing','quoted') AND id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL)`);
+    const r = await runAsync(`
+      UPDATE enquiries e SET status='ordered', updated_at=NOW()
+      WHERE e.status IN ('returned_to_sourcing','quoted')
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.enquiry_id=e.id AND o.status NOT IN ('deleted','cancelled'))
+        AND NOT EXISTS (SELECT 1 FROM enquiry_sourcing es WHERE es.enquiry_id=e.id AND COALESCE(es.item_status,'ready') IN ('ready','checking'))
+        AND NOT EXISTS (SELECT 1 FROM quotes q WHERE q.enquiry_id=e.id AND q.status IN ('active','returned_to_sourcing'))
+    `);
     if (r && r.rowCount) console.log('[STARTUP] Fixed', r.rowCount, 'enquiries stuck in returned_to_sourcing/quoted → ordered');
   } catch(e) { console.error('[STARTUP] Enquiry revision heal failed:', e.message); }
-  // Fix: quotes stuck at 'returned_to_sourcing' or 'active' that already have a live order → mark 'order_created'
+  // Fix: quotes stuck at 'returned_to_sourcing' or 'active' that already have a live order for the exact quote → mark 'order_created'
   try {
-    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND (id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) OR enquiry_id IN (SELECT enquiry_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND enquiry_id IS NOT NULL))`);
+    const r = await runAsync(`UPDATE quotes SET status='order_created' WHERE status IN ('returned_to_sourcing','active') AND id IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL)`);
     if (r && r.rowCount) console.log('[STARTUP] Fixed', r.rowCount, 'quotes stuck in returned_to_sourcing/active → order_created');
   } catch(e) { console.error('[STARTUP] Quote revision heal failed:', e.message); }
+  // Repair split quotes that were previously marked order_created only because another quote in the same enquiry has an order.
+  try {
+    const r = await runAsync(`UPDATE quotes SET status='active' WHERE status='order_created' AND id NOT IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL) AND enquiry_id IN (SELECT enquiry_id FROM quotes WHERE enquiry_id IS NOT NULL GROUP BY enquiry_id HAVING COUNT(*) > 1)`);
+    if (r && r.rowCount) console.log('[STARTUP] Restored', r.rowCount, 'split quotes order_created → active');
+  } catch(e) { console.error('[STARTUP] Split quote status repair failed:', e.message); }
+  try {
+    const r = await runAsync(`UPDATE quotes SET existing_order_id=NULL WHERE parent_quote_id IS NULL AND COALESCE(revision,1)=1 AND existing_order_id IS NOT NULL AND id NOT IN (SELECT quote_id FROM orders WHERE status NOT IN ('deleted','cancelled') AND quote_id IS NOT NULL)`);
+    if (r && r.rowCount) console.log('[STARTUP] Cleared', r.rowCount, 'split quote inherited order links');
+  } catch(e) { console.error('[STARTUP] Split quote order-link repair failed:', e.message); }
   // Fix: revert orders incorrectly auto-healed to customer_payment_status='paid' without going through
   // the Release step. A properly released order has status='open' (set by customer-release endpoint).
   // If status is still 'payment_approval', the payment was never formally released — revert to 'payment_recorded'.

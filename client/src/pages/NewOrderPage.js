@@ -357,11 +357,11 @@ function DeliveryAddressPanel({ customer, selectedAddress, onSelect, onCustomerU
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
-export default function NewOrderPage() {
+export default function NewOrderPage({ prefill: embeddedPrefill = null, embedded = false, onCancel = null, onDone = null }) {
   const navigate  = useNavigate();
   const location  = useLocation();
   const qc        = useQueryClient();
-  const prefill   = location.state?.prefill || null;
+  const prefill   = embeddedPrefill || location.state?.prefill || null;
 
   const { data: customers=[] } = useQuery({ queryKey:['customers'],  queryFn:()=>api.get('/customers').then(r=>r.data) });
   const { data: suppliers=[] } = useQuery({ queryKey:['suppliers'],  queryFn:()=>api.get('/suppliers').then(r=>r.data) });
@@ -433,7 +433,11 @@ export default function NewOrderPage() {
       setShowModifyModal(false);
       setShowModifyConfirm(false);
       setModifyReason('');
-      navigate('/orders');
+      if (embedded) {
+        onDone?.({ type: 'modify_requested' });
+      } else {
+        navigate('/orders');
+      }
     } catch(e) {
       toast.error(e.response?.data?.error || 'Failed');
     } finally {
@@ -521,7 +525,11 @@ export default function NewOrderPage() {
       } else {
         toast.success('Order ' + r.data.id + ' created!');
       }
-      navigate('/orders');
+      if (embedded) {
+        onDone?.({ type: existingOrderId ? 'order_updated' : 'order_created', orderId: existingOrderId || r.data.id });
+      } else {
+        navigate('/orders');
+      }
     },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
@@ -832,6 +840,9 @@ export default function NewOrderPage() {
         {/* ── Line Items — read-only from enquiry/quote ── */}
         <div className="section-divider" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <span>Line Items <span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:6}}>Read-only · sourced from enquiry/quote</span></span>
+          {/*
+          Modify via Enquiry is hidden during order creation for now.
+          Keep the code here so the action can be restored without rebuilding the flow.
           {form.enquiry_id && !showModifyConfirm && (
             <button className="btn btn-sm"
               onClick={() => setShowModifyConfirm(true)}
@@ -839,6 +850,7 @@ export default function NewOrderPage() {
               ✏ Modify via Enquiry
             </button>
           )}
+          */}
           {form.enquiry_id && showModifyConfirm && (
             <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 12px',
               borderRadius:'var(--r-sm)',background:'var(--amber-lt,#fffbeb)',
@@ -947,7 +959,7 @@ export default function NewOrderPage() {
 
         {/* ── Actions ── */}
         <div style={{ display:'flex', justifyContent:'flex-end', alignItems:'center', gap:10, borderTop:'1px solid var(--border)', paddingTop:16 }}>
-          <button className="btn" onClick={()=>navigate('/orders')} disabled={busy}>Cancel</button>
+          <button className="btn" onClick={()=>embedded ? onCancel?.() : navigate('/orders')} disabled={busy}>Cancel</button>
           <button className="btn btn-primary" onClick={handleCreate} disabled={busy}>
             {busy ? (existingOrderId ? 'Updating…' : 'Creating…') : (existingOrderId ? '✅ Update Order' : '📋 Create Order')}
           </button>

@@ -5,15 +5,42 @@ import api from '../utils/api';
 import { fmt, fmtCur, StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
 import { printDoc, generateQuotePDF } from '../utils/pdfUtils';
 import { toast } from 'react-hot-toast';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import NewOrderPage from './NewOrderPage';
 
 const STATUS_FILTERS = ['all', 'active', 'superseded', 'order_created', 'returned_to_sourcing', 'closed'];
 const STATUS_PRIORITY = ['active', 'returned_to_sourcing', 'order_created', 'superseded', 'closed'];
 
+const quoteItemKeys = q => {
+  const keys = new Set();
+  (q?.notes || '').split('\n').forEach(line => {
+    const m = line.match(/^([^:]+):\s*Quote\s+/i);
+    if (m) keys.add(m[1].trim().toLowerCase());
+  });
+  return keys;
+};
+
+const setsOverlap = (a, b) => {
+  if (!a.size || !b.size) return false;
+  for (const key of a) if (b.has(key)) return true;
+  return false;
+};
+
+const isQuoteRevisionActiveForEnquiry = (quote, enquiry, allQuotes) => {
+  if (!quote?.enquiry_id || !['returned_to_sourcing', 'sourcing'].includes(enquiry?.status)) return false;
+  if (quote.status === 'returned_to_sourcing') return true;
+  if (enquiry?.status === 'returned_to_sourcing' && quote.status === 'active' && (quote.revision || 1) > 1) return true;
+  const keys = quoteItemKeys(quote);
+  return (allQuotes || []).some(q => {
+    if (q.enquiry_id !== quote.enquiry_id) return false;
+    if (q.status !== 'returned_to_sourcing') return false;
+    if (q.id === quote.id || q.parent_quote_id === quote.id) return true;
+    return setsOverlap(keys, quoteItemKeys(q));
+  });
+};
+
 function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const qc = useQueryClient();
-  const navigate = useNavigate();
   // Tab index: 0=Line Items, 1=Details, 2=Customer Response
   const [tabIdx, setTabIdx] = useState(0);
   // Details tab — editable fields
@@ -29,6 +56,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const [detailsSavedOnce, setDetailsSavedOnce] = useState(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
   const [confirmRevision, setConfirmRevision] = useState(false);
   const [confirmCreateOrder, setConfirmCreateOrder] = useState(false);
+  const [orderPrefill, setOrderPrefill] = useState(null);
 
   // Sync editable fields when parent passes updated quote data (after save+refresh)
   useEffect(() => {
@@ -40,17 +68,17 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     setDetailsSavedOnce(!!(quote.zoho_quote_no && quote.valid_until && quote.sent_to_customer));
   }, [quote.id, quote.zoho_quote_no, quote.valid_until, quote.sent_to_customer, quote.customer_response, quote.customer_response_notes]);
 
-  // Linked enquiry — tells us if source is still re-pricing or awaiting modify
-  const linkedEnq = (enquiries||[]).find(e => e.id === quote.enquiry_id) || null;
-  const enquiryAwaitingRevision = linkedEnq?.status === 'returned_to_sourcing';
-  const enquiryModifyRequested  = linkedEnq?.status === 'modify_requested';
-
   // Parent quote — for showing previous customer response context in V2+
   const { data: allQuotes=[] } = useQuery({
     queryKey: ['quotes'],
     queryFn: () => api.get('/quotes').then(r => r.data),
     staleTime: 30000,
   });
+
+  // Linked enquiry — tells us if this exact quote is still re-pricing or awaiting modify
+  const linkedEnq = (enquiries||[]).find(e => e.id === quote.enquiry_id) || null;
+  const quoteAwaitingRevision = isQuoteRevisionActiveForEnquiry(quote, linkedEnq, allQuotes);
+  const enquiryModifyRequested  = linkedEnq?.status === 'modify_requested';
   const parentQuote = quote.parent_quote_id
     ? allQuotes.find(q => q.id === quote.parent_quote_id)
     : null;
@@ -135,13 +163,20 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           lineItems,
         };
       }
-      navigate('/orders/new', { state: { prefill } });
+      return prefill;
     },
+    onSuccess: prefill => setOrderPrefill(prefill),
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
+  const quoteStatus = String(quote.status || '').toLowerCase();
+
   // Cannot create order if ENQ is still being re-priced or has a pending modify request
-  const canCreateOrder = savedResponse === 'accepted' && quote.status === 'active' && !enquiryAwaitingRevision && !enquiryModifyRequested;
+  const canCreateOrder = savedResponse === 'accepted' && quoteStatus === 'active' && !quoteAwaitingRevision && !enquiryModifyRequested;
+  const canSendToRevision = savedResponse === 'negotiating'
+    && quoteStatus === 'active'
+    && !quoteAwaitingRevision
+    && !enquiryModifyRequested;
 
   const items = lineData?.items || [];
 
@@ -152,7 +187,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     { k: 'response', l: '💬 Customer Response' },
   ];
 
-  const detailsAllFilled = quote.status === 'active' && !!zohoQuote.trim() && !!validUntil &&
+  const detailsAllFilled = quoteStatus === 'active' && !!zohoQuote.trim() && !!validUntil &&
     (savedResponse === 'negotiating' || sentToCustomer);
 
   // Confirm → save details → create order
@@ -182,7 +217,9 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
   return (
     <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal" style={{maxWidth:1110,width:'94vw'}}>
+      <div className="modal" style={orderPrefill
+        ? {maxWidth:'none',width:'98.5vw',height:'97vh',display:'flex',flexDirection:'column'}
+        : {maxWidth:1110,width:'94vw'}}>
         <div className="modal-header" style={{padding:'12px 18px',borderBottom:'1px solid var(--border)'}}>
           <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
             <span style={{fontFamily:'monospace',fontWeight:700,fontSize:15,color:'var(--accent)'}}>{quote.quote_no}</span>
@@ -198,6 +235,23 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           </div>
         </div>
 
+        {orderPrefill ? (
+          <div className="modal-body" style={{flex:1,overflow:'auto',padding:'10px 14px 16px'}}>
+            <NewOrderPage
+              embedded
+              prefill={orderPrefill}
+              onCancel={() => setOrderPrefill(null)}
+              onDone={() => {
+                qc.invalidateQueries(['quotes']);
+                qc.invalidateQueries(['orders']);
+                qc.invalidateQueries(['enquiries']);
+                onRefresh();
+                setOrderPrefill(null);
+                onClose();
+              }}
+            />
+          </div>
+        ) : <>
         {/* Tab step indicators — NOT clickable; use Next/Back buttons to navigate */}
         <div style={{display:'flex',gap:0,borderBottom:'1px solid var(--border)',padding:'0 20px'}}>
           {tabs.map((t, i) => (
@@ -307,7 +361,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           {tabIdx === 1 && (
             <div>
               {/* ── Sent-to-revision lock banner ── */}
-              {enquiryAwaitingRevision && (
+              {quoteAwaitingRevision && (
                 <div style={{marginBottom:16,padding:'12px 16px',borderRadius:10,
                   border:'2px solid var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)',
                   display:'flex',alignItems:'center',gap:12}}>
@@ -346,19 +400,19 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                   <input className="input" value={zohoQuote}
                     onChange={e => setZohoQuote(e.target.value)}
                     placeholder="e.g. ZQ-2024-001"
-                    disabled={quote.status !== 'active' || enquiryAwaitingRevision}
-                    style={{fontFamily:'monospace',outline:(!zohoQuote.trim()&&!enquiryAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||enquiryAwaitingRevision)?0.6:1}}/>
+                    disabled={quote.status !== 'active' || quoteAwaitingRevision}
+                    style={{fontFamily:'monospace',outline:(!zohoQuote.trim()&&!quoteAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||quoteAwaitingRevision)?0.6:1}}/>
                 </div>
                 <div className="form-group" style={{marginBottom:0}}>
                   <label className="label">Valid Until (Delivery) <span className="req">*</span></label>
                   <input className="input" type="date" value={validUntil}
                     onChange={e => setValidUntil(e.target.value)}
-                    disabled={quote.status !== 'active' || enquiryAwaitingRevision}
-                    style={{outline:(!validUntil&&!enquiryAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||enquiryAwaitingRevision)?0.6:1}}/>
+                    disabled={quote.status !== 'active' || quoteAwaitingRevision}
+                    style={{outline:(!validUntil&&!quoteAwaitingRevision)?'1.5px solid var(--red)':'',opacity:(quote.status!=='active'||quoteAwaitingRevision)?0.6:1}}/>
                 </div>
               </div>
               {/* Sent to customer tick — hidden while awaiting revision */}
-              {savedResponse !== 'negotiating' && !enquiryAwaitingRevision && (
+              {savedResponse !== 'negotiating' && !quoteAwaitingRevision && (
               <div style={{marginBottom:16}}>
                 <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8,letterSpacing:.5}}>
                   SEND TO CUSTOMER <span style={{color:'var(--red)',marginLeft:2}}>*</span>
@@ -396,7 +450,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                   <div style={{whiteSpace:'pre-wrap',color:'var(--text)'}}>{quote.notes}</div>
                 </div>
               )}
-              {quote.status !== 'active' && !enquiryAwaitingRevision && (
+              {quote.status !== 'active' && !quoteAwaitingRevision && (
                 <div style={{marginTop:10,fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>
                   Only active quotes can be updated.
                 </div>
@@ -408,7 +462,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           {tabIdx === 2 && (
             <div>
               {/* ── Sourcing re-pricing warning — blocks all response actions ── */}
-              {enquiryAwaitingRevision && (
+              {quoteAwaitingRevision && (
                 <div style={{marginBottom:16,padding:'14px 16px',borderRadius:10,
                   border:'2px solid var(--amber,#d97706)',background:'var(--amber-lt,#fffbeb)',
                   display:'flex',alignItems:'flex-start',gap:12}}>
@@ -470,7 +524,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 </div>
               ) : (
                 /* ── Editable view — choose response (starts blank each time modal opens) ── */
-                <div style={{opacity: enquiryAwaitingRevision ? 0.4 : 1, pointerEvents: enquiryAwaitingRevision ? 'none' : 'auto'}}>
+                <div style={{opacity: quoteAwaitingRevision ? 0.4 : 1, pointerEvents: quoteAwaitingRevision ? 'none' : 'auto'}}>
                   <div style={{marginBottom:14}}>
                     <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:10,letterSpacing:.5}}>
                       SELECT CUSTOMER RESPONSE <span style={{color:'var(--red)',marginLeft:2}}>*</span>
@@ -550,7 +604,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             {/* Centre: action buttons */}
 
             {/* Details tab (tab 1) — Save Details + Send to Revision */}
-            {tabIdx === 1 && !canCreateOrder && detailsAllFilled && !enquiryAwaitingRevision && (
+            {tabIdx === 1 && !canCreateOrder && detailsAllFilled && !quoteAwaitingRevision && (
               <button className="btn btn-primary"
                 disabled={saveMutation.isPending}
                 style={{fontWeight:600}}
@@ -561,7 +615,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 {saveMutation.isPending ? 'Saving…' : 'Save Details'}
               </button>
             )}
-            {tabIdx === 1 && quote.status === 'active' && savedResponse === 'negotiating' && !enquiryAwaitingRevision && (
+            {tabIdx === 1 && canSendToRevision && (
               <button className="btn"
                 style={{background:'var(--amber,#d97706)',color:'#fff',
                   borderColor:'var(--amber,#d97706)',fontWeight:600}}
@@ -572,6 +626,15 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             )}
 
             {/* Customer Response tab (tab 2) — Create Order button appears after response saved */}
+            {tabIdx === 2 && canSendToRevision && (
+              <button className="btn"
+                style={{background:'var(--amber,#d97706)',color:'#fff',
+                  borderColor:'var(--amber,#d97706)',fontWeight:600}}
+                disabled={reviseMutation.isPending}
+                onClick={() => setConfirmRevision(true)}>
+                {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
+              </button>
+            )}
             {tabIdx === 2 && canCreateOrder && (
               <button className="btn btn-primary"
                 style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
@@ -602,10 +665,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             )}
             {tabIdx === 1 && (
               <button className="btn btn-primary"
-                disabled={!detailsSavedOnce || enquiryAwaitingRevision}
-                title={enquiryAwaitingRevision ? 'Waiting for Sourcing to return revised quote' : !detailsSavedOnce ? 'Save Details first before proceeding' : ''}
+                disabled={!detailsSavedOnce || quoteAwaitingRevision}
+                title={quoteAwaitingRevision ? 'Waiting for Sourcing to return revised quote' : !detailsSavedOnce ? 'Save Details first before proceeding' : ''}
                 onClick={() => setTabIdx(2)}
-                style={{fontWeight:600, opacity: (detailsSavedOnce && !enquiryAwaitingRevision) ? 1 : 0.45, cursor: (detailsSavedOnce && !enquiryAwaitingRevision) ? 'pointer' : 'not-allowed'}}>
+                style={{fontWeight:600, opacity: (detailsSavedOnce && !quoteAwaitingRevision) ? 1 : 0.45, cursor: (detailsSavedOnce && !quoteAwaitingRevision) ? 'pointer' : 'not-allowed'}}>
                 Next → Customer Response
               </button>
             )}
@@ -618,7 +681,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                   )
                 : (() => {
                     const notesRequired = ['negotiating','rejected'].includes(pendingResponse) && !responseNotes.trim();
-                    const btnDisabled = !pendingResponse || saveMutation.isPending || enquiryAwaitingRevision || notesRequired;
+                    const btnDisabled = !pendingResponse || saveMutation.isPending || quoteAwaitingRevision || notesRequired;
                     return (
                       <button className="btn btn-primary"
                         disabled={btnDisabled}
@@ -633,9 +696,9 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           </div>
 
         </div>
-      </div>
+        </>}
 
-      {/* Create Order confirm modal */}
+        {/* Create Order confirm modal */}
       {confirmCreateOrder && (
         <div className="overlay" style={{zIndex:600}} onClick={() => setConfirmCreateOrder(false)}>
           <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
@@ -687,6 +750,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
       )}
 
     </div>
+    </div>
   );
 }
 
@@ -713,11 +777,13 @@ export default function QuotesPage() {
 
   const custName = id => customers.find(c => c.id === id)?.name || id;
 
-  // Group all quotes by enquiry_id — show one row per enquiry (the current/latest quote)
+  // Group quote revisions together, but keep split quotes separate.
+  // Split quotes share enquiry_id but are independent root quotes, so grouping only by
+  // enquiry_id hides already-sent Quote A when Quote B is created later.
   const enquiryGroups = useMemo(() => {
     const groups = {};
     quotes.forEach(q => {
-      const key = q.enquiry_id || String(q.id);
+      const key = q.parent_quote_id || q.id;
       if (!groups[key]) groups[key] = [];
       groups[key].push(q);
     });
@@ -814,7 +880,7 @@ export default function QuotesPage() {
                   const isUnseen = q.status === 'active' && !seenQuotes.has(q.id);
                   const rowLinkedEnq = enquiries.find(e => e.id === q.enquiry_id) || null;
                   const rowEnqInEnq  = rowLinkedEnq?.status === 'modify_requested';
-                  const rowEnqInSrc  = rowLinkedEnq?.status === 'sourcing';
+                  const rowQuoteInSrc = isQuoteRevisionActiveForEnquiry(q, rowLinkedEnq, quotes);
                   return (
                   <tr key={q.id} style={{cursor:'pointer',background:isUnseen?'var(--accent-lt)':undefined}} onClick={() => { setSelected(q); markSeen(q.id); }}>
                     <td className="mono bold" style={{color:'var(--accent)'}}>
@@ -829,7 +895,7 @@ export default function QuotesPage() {
                             background:'#fffbeb',color:'#d97706',border:'1px solid #d97706'}}>
                             📨 In ENQ
                           </span>
-                        : rowEnqInSrc && q.status === 'active'
+                        : rowQuoteInSrc && q.status === 'active'
                           ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,fontWeight:600,
                               background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)'}}>
                               🔍 In Sourcing

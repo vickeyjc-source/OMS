@@ -185,9 +185,9 @@ export default function DeletedBinPage() {
                     ) : masterBatches.map(b=>(
                       <div key={b.id} style={{marginBottom:10}}>
                         <div style={{fontSize:12,color:'var(--text2)',marginBottom:8}}>{Number(b.row_count)} rows · {fmt(b.deleted_at)}{b.deleted_by?(' · by '+b.deleted_by):''}</div>
-                        <div style={{display:'flex',gap:8}}>
-                          <button className="btn btn-sm btn-primary" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod:{label:'Master Delete'}})}>↩ Restore Everything</button>
-                          <button className="btn btn-sm btn-danger" style={{flex:1}} disabled={busy} onClick={()=>setConfirm({mode:'purge',batch:b,mod:{label:'Master Delete'}})}>🗑 Delete Permanently</button>
+                        <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                          <button className="btn btn-sm btn-primary" style={{minWidth:190}} disabled={busy} onClick={()=>setConfirm({mode:'restore',batch:b,mod:{label:'Master Delete'}})}>↩ Restore Everything</button>
+                          <button className="btn btn-sm btn-danger" style={{minWidth:190}} disabled={busy} onClick={()=>setConfirm({mode:'purge',batch:b,mod:{label:'Master Delete'}})}>🗑 Delete Permanently</button>
                         </div>
                       </div>
                     ))}
