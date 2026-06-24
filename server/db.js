@@ -133,11 +133,28 @@ async function assembleOrder(order) {
     ? await allAsync("SELECT supplier_order_id FROM finance_queue WHERE status='returned_to_procurement' AND supplier_order_id IN (" + soIds.map(()=>'?').join(',') + ')', soIds)
     : [];
   const returnedPoIds = new Set(returnedFinance.map(r => r.supplier_order_id));
-  o.supplierOrders = sos.map(so => ({
-    ...so,
-    finance_returned: returnedPoIds.has(so.id),
-    items: soItems.filter(i => i.supplier_order_id === so.id).map(i => i.item_id)
-  }));
+  // Advance-payment additional charges live on finance_queue; surface them per supplier order
+  let fqCharges = [];
+  try {
+    fqCharges = soIds.length
+      ? await allAsync('SELECT supplier_order_id, additional_charges, actual_amount, amount_change_note, paid_amount FROM finance_queue WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
+      : [];
+  } catch(_) { fqCharges = []; }
+  const fqBySo = {};
+  fqCharges.forEach(r => { fqBySo[r.supplier_order_id] = r; });
+  o.supplierOrders = sos.map(so => {
+    const fq = fqBySo[so.id] || {};
+    return {
+      ...so,
+      finance_returned: returnedPoIds.has(so.id),
+      // advance charges (finance_queue) — fall back to net charges already on the row
+      advance_additional_charges: fq.additional_charges || null,
+      advance_actual_amount: fq.actual_amount ?? null,
+      advance_amount_change_note: fq.amount_change_note || null,
+      advance_paid_amount: fq.paid_amount ?? null,
+      items: soItems.filter(i => i.supplier_order_id === so.id).map(i => i.item_id)
+    };
+  });
   o.customerShipping = (await getAsync('SELECT * FROM customer_shipping WHERE order_id=?', [o.id]))
     || { status:'pending', shipper_id:'', tracking_no:'', delivery_date:'', comments:'' };
   o.documents = (await getAsync('SELECT * FROM order_documents WHERE order_id=?', [o.id]))

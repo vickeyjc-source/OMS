@@ -894,6 +894,15 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     if (Number.isFinite(bpu) && bpu > 0) return bpu * totalQty;
     return 0;
   })();
+  // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
+  const poCharges = (() => {
+    const parse = (raw) => { try { if (!raw) return []; const p = typeof raw==='string'?JSON.parse(raw):raw; return Array.isArray(p)?p:[]; } catch(_) { return []; } };
+    const c = parse(po.advance_additional_charges).length ? parse(po.advance_additional_charges) : parse(po.net_additional_charges);
+    return c;
+  })();
+  const poChargesTotal = poCharges.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+  const poChargeNote = po.advance_amount_change_note || po.net_amount_change_note || '';
+  const grandPurchasePrice = totalPurchasePrice + poChargesTotal;
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
   const markFinanceSent = () => {
     setFinanceSent(true);
@@ -1136,9 +1145,18 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Total Purchase Price</label>
               <input className="input"
-                value={fmtM(totalPurchasePrice)}
+                value={fmtM(grandPurchasePrice)}
                 disabled
                 style={{background:'var(--surface2)',color:'var(--text)',fontWeight:700}}/>
+              {poChargesTotal > 0 && (
+                <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
+                  Base {fmtM(totalPurchasePrice)}
+                  {poCharges.map((c,i)=>(
+                    <span key={i} style={{color:'var(--amber,#d97706)',fontWeight:600}}> + {c.name} {fmtM(c.amount)}</span>
+                  ))}
+                  {poChargeNote && <span style={{color:'var(--red)',fontStyle:'italic'}}> · {poChargeNote}</span>}
+                </div>
+              )}
               {form.promised_delivery_date && (
                 <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
                   Expected delivery by {form.promised_delivery_date}
@@ -1460,11 +1478,29 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       };
     });
     const sourceTotal = itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0);
+    // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
+    const parseCharges = (raw) => {
+      try {
+        if (!raw) return [];
+        const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return Array.isArray(p) ? p : [];
+      } catch(_) { return []; }
+    };
+    const charges = parseCharges(so.advance_additional_charges).length
+      ? parseCharges(so.advance_additional_charges)
+      : parseCharges(so.net_additional_charges);
+    const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+    const amountChangeNote = so.advance_amount_change_note || so.net_amount_change_note || '';
+    const actualAmountRaw = so.advance_actual_amount ?? so.net_actual_amount ?? null;
     return {
       id: so.id,
       supplierName: supName(so.supplier_id),
       sourceTotal,
       items: itemBreakdown,
+      charges,
+      chargesTotal,
+      amountChangeNote,
+      actualAmount: actualAmountRaw !== null ? parseFloat(actualAmountRaw) : null,
     };
   });
   const markFinanceSent = () => {
@@ -1568,14 +1604,32 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                     <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>SUPPLIER PAYABLE</div>
                     <div style={{display:'grid',gap:6,fontSize:12}}>
                       {supplierSummaries.map(summary=>(
-                        <div key={summary.id} style={{display:'flex',justifyContent:'space-between',gap:12}}>
-                          <span>{summary.supplierName}</span>
-                          <strong>{fmtM(summary.sourceTotal)}</strong>
-                        </div>
+                        <React.Fragment key={summary.id}>
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                            <span>{summary.supplierName}</span>
+                            <strong>{fmtM(summary.sourceTotal)}</strong>
+                          </div>
+                          {summary.charges.map((c,i)=>(
+                            <div key={summary.id+'_c'+i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
+                              <span>+ {c.name}</span>
+                              <span style={{fontFamily:'monospace'}}>{fmtM(c.amount)}</span>
+                            </div>
+                          ))}
+                          {summary.amountChangeNote && (
+                            <div style={{fontSize:11,color:'var(--red)',fontStyle:'italic'}}>Note: {summary.amountChangeNote}</div>
+                          )}
+                        </React.Fragment>
                       ))}
-                      <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
-                        <span>Total source cost</span><strong style={{color:'var(--accent)'}}>{fmtM(supplierSummaries.reduce((sum, s)=>sum+s.sourceTotal,0))}</strong>
-                      </div>
+                      {(() => {
+                        const baseTotal = supplierSummaries.reduce((sum, s)=>sum+s.sourceTotal,0);
+                        const allChargesTotal = supplierSummaries.reduce((sum, s)=>sum+s.chargesTotal,0);
+                        return (
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                            <span>{allChargesTotal > 0 ? 'Grand total (incl. charges)' : 'Total source cost'}</span>
+                            <strong style={{color:'var(--accent)'}}>{fmtM(baseTotal + allChargesTotal)}</strong>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -1595,6 +1649,27 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                             <span>Supplier total</span>
                             <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</strong>
                           </div>
+                          {summary.charges.map((c,i)=>(
+                            <div key={'detc'+i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
+                              <span>+ {c.name}</span>
+                              <span style={{fontFamily:'monospace'}}>{fmtM(c.amount)}</span>
+                            </div>
+                          ))}
+                          {summary.chargesTotal > 0 && (
+                            <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
+                              <span style={{fontWeight:700}}>Grand total (incl. charges)</span>
+                              <strong style={{color:'var(--green)'}}>{fmtM(summary.sourceTotal + summary.chargesTotal)}</strong>
+                            </div>
+                          )}
+                          {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.sourceTotal + summary.chargesTotal)) > 0.009 && (
+                            <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                              <span style={{color:'var(--green)'}}>Actual paid</span>
+                              <strong style={{color:'var(--green)'}}>{fmtM(summary.actualAmount)}</strong>
+                            </div>
+                          )}
+                          {summary.amountChangeNote && (
+                            <div style={{fontSize:11,color:'var(--red)',fontStyle:'italic'}}>Note: {summary.amountChangeNote}</div>
+                          )}
                         </div>
                       </div>
                     ))}
@@ -1848,8 +1923,17 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                   <div style={{display:'flex',gap:16,flexWrap:'wrap',fontSize:12}}>
                     <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>COMPONENTS</div>
                       <div style={{fontWeight:600}}>{soItems.map(li=>li.component).join(', ')||'—'}</div></div>
-                    {so.confirmed_price&&<div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PRICE</div>
-                      <div style={{fontWeight:700,color:cfg.color}}>{fmtM(so.confirmed_price,so.confirmed_currency)}</div></div>}
+                    {so.confirmed_price&&(() => {
+                      // PRICE shows the final grand total (base + additional charges). Breakdown lives in the top summary.
+                      const parseCharges = (raw) => { try { if (!raw) return []; const p = typeof raw==='string'?JSON.parse(raw):raw; return Array.isArray(p)?p:[]; } catch(_) { return []; } };
+                      const charges = parseCharges(so.advance_additional_charges).length ? parseCharges(so.advance_additional_charges) : parseCharges(so.net_additional_charges);
+                      const chargesTotal = charges.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+                      const grand = (parseFloat(so.confirmed_price)||0) + chargesTotal;
+                      return (
+                        <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>PRICE</div>
+                          <div style={{fontWeight:700,color:cfg.color}}>{fmtM(grand,so.confirmed_currency)}</div></div>
+                      );
+                    })()}
                     {/* Promised Delivery Date */}
                     {so.promised_delivery_date ? (
                       <div>

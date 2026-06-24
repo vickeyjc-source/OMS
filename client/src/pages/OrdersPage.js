@@ -102,6 +102,37 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
     refetchOnMount: true,
   });
 
+  // Customer payments recorded in Finance — used to surface additional charges + grand total
+  const { data: customerPayments=[] } = useQuery({
+    queryKey: ['customer-pay', order.id],
+    queryFn: () => api.get('/finance/customer-pay/' + order.id).then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
+    staleTime: 0,
+  });
+  const paymentCharges = (() => {
+    const out = [];
+    for (const p of (customerPayments || [])) {
+      let charges = [];
+      try {
+        const raw = p.additional_charges;
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);
+        if (Array.isArray(parsed)) charges = parsed;
+      } catch(_) {}
+      if (charges.length || p.amount_change_note) {
+        out.push({
+          paymentId: p.id,
+          amount: parseFloat(p.amount) || 0,
+          currency: p.currency || 'INR',
+          charges,
+          chargesTotal: charges.reduce((s,c)=>s+(parseFloat(c.amount)||0),0),
+          actualAmount: (p.actual_amount !== undefined && p.actual_amount !== null) ? parseFloat(p.actual_amount) : null,
+          note: p.amount_change_note || '',
+          ref: p.payment_ref || '',
+        });
+      }
+    }
+    return out;
+  })();
+
   const [infoForm, setInfoForm] = useState({ enquiry_no:order.enquiry_no||'', quote_no:order.quote_no||'', tentative_date:order.tentative_date||'', po_number:order.po_number||'', notes:order.notes||'', delivery_address:order.delivery_address||'', allow_partial_shipment:order.allow_partial_shipment||0 });
   const [statusVal, setStatusVal] = useState(order.status);
   const [comment, setComment]     = useState('');
@@ -485,6 +516,49 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
               </table>
             </div>
           </div>
+
+          {/* ── Additional Charges (recorded with customer payment in Finance) ── */}
+          {paymentCharges.length > 0 && (
+            <div className="card card-sm">
+              <div className="card-title">
+                <span>💰 Additional Charges &amp; Grand Total</span>
+              </div>
+              <div style={{display:'grid',gap:10}}>
+                {paymentCharges.map((pc,idx)=>(
+                  <div key={pc.paymentId||idx} style={{padding:'10px 12px',border:'1px solid var(--border)',
+                    borderRadius:'var(--r-sm)',background:'var(--surface2)',fontSize:12}}>
+                    {pc.ref && <div style={{fontSize:11,color:'var(--text3)',marginBottom:6}}>Payment Ref: {pc.ref}</div>}
+                    <div style={{display:'flex',justifyContent:'space-between',gap:12,marginBottom:4}}>
+                      <span>Base amount</span>
+                      <strong style={{fontFamily:'monospace'}}>{fmtAmt(pc.amount - pc.chargesTotal, pc.currency)}</strong>
+                    </div>
+                    {pc.charges.map((c,i)=>(
+                      <div key={i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600,marginBottom:2}}>
+                        <span>+ {c.name}</span>
+                        <span style={{fontFamily:'monospace'}}>{fmtAmt(c.amount, pc.currency)}</span>
+                      </div>
+                    ))}
+                    <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,marginTop:4,
+                      borderTop:'1px solid var(--border)',fontSize:13}}>
+                      <span style={{fontWeight:700}}>{pc.chargesTotal > 0 ? 'Grand total (incl. charges)' : 'Total'}</span>
+                      <strong style={{color:'var(--green)',fontFamily:'monospace'}}>{fmtAmt(pc.amount, pc.currency)}</strong>
+                    </div>
+                    {pc.actualAmount !== null && Math.abs(pc.actualAmount - pc.amount) > 0.009 && (
+                      <div style={{display:'flex',justifyContent:'space-between',gap:12,marginTop:4}}>
+                        <span style={{color:'var(--green)'}}>Actual received</span>
+                        <strong style={{color:'var(--green)',fontFamily:'monospace'}}>{fmtAmt(pc.actualAmount, pc.currency)}</strong>
+                      </div>
+                    )}
+                    {pc.note && (
+                      <div style={{marginTop:4,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
+                        Note: {pc.note}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* ── Order Info — single horizontal strip ── */}
           <div className="card card-sm" style={{marginBottom:14}}>

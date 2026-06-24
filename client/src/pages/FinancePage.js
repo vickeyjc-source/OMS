@@ -291,6 +291,10 @@ function HistoryDetailModal({ detail, onClose }) {
         ['Customer PO Number', item.po_number || '—'],
         ['PI Number', item.pi_no || '—'],
         ['Amount', fmtM(item.amount, item.currency)],
+        ...(additionalCharges.length > 0 ? additionalCharges.map(c=>['+ '+c.name, fmtM(c.amount, item.currency)]) : []),
+        ...(additionalCharges.length > 0 ? [['Grand Total (incl. charges)', fmtM(item.amount, item.currency)]] : []),
+        ...(item.actual_amount !== undefined && item.actual_amount !== null ? [['Actual Payment Amount', fmtM(item.actual_amount, item.currency)]] : []),
+        ...(item.amount_change_note ? [['Amount Change Reason', item.amount_change_note]] : []),
         ['Method', item.payment_method || '—'],
         ['Reference', item.payment_ref || '—'],
         ['Payment Date', fmtDate(item.payment_date)],
@@ -620,13 +624,15 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   // pureBase tracks what user typed before charges (never mutated by charge additions)
   const [pureBase, setPureBase] = useState(parseFloat(defaultAmt) || 0);
 
+  // Additional charges + reason-note flow applies to both supplier and customer payments
+  const showCharges = true;
   const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
-  // grandTotal = pureBase + all charges — shown in the Base Amount field
+  // grandTotal = pureBase + all charges — shown in the Amount field
   const grandTotal = pureBase + chargesTotal;
   const originalNum = parseFloat(defaultAmt) || 0;
 
   // Reason needed only when final amount differs from original
-  const anyAmountChanged = isSupplier && Math.abs(grandTotal - originalNum) > 0.009;
+  const anyAmountChanged = showCharges && Math.abs(grandTotal - originalNum) > 0.009;
 
   const addCharge = () => {
     const n = chargeInput.name.trim();
@@ -658,27 +664,25 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const refNo = type === 'customer' ? item.id : (item.internal_po_no||item.supplier_order_id||item.id);
 
   const canSubmit = !mutation.isPending
-    && !!form.payment_method && !!form.payment_ref && !!form.amount
+    && !!form.payment_method && !!form.payment_ref && grandTotal > 0
     && (type === 'customer' || (form.zoho_po_number?.trim() && form.supplier_ref?.trim()))
     && (!anyAmountChanged || !!amountChangeNote.trim());
 
   const handleSubmit = () => {
     const payload = {
       ...form,
-      amount: isSupplier ? grandTotal : (parseFloat(form.amount) || 0),
+      amount: grandTotal,
       finance_po_no: '',
-      ...(isSupplier ? {
-        additional_charges: charges,
-        actual_amount: grandTotal,
-        amount_change_note: amountChangeNote.trim() || '',
-      } : {}),
+      additional_charges: charges,
+      actual_amount: grandTotal,
+      amount_change_note: amountChangeNote.trim() || '',
     };
     mutation.mutate(payload);
   };
 
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal" style={{maxWidth: isSupplier ? 620 : 520, width:'96vw'}}>
+      <div className="modal" style={{maxWidth: 620, width:'96vw'}}>
         <div className="modal-header">
           <h2>💳 Record Payment</h2>
           <button className="close-x" onClick={onClose}>×</button>
@@ -748,18 +752,14 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">{isSupplier ? 'Amount (INR)' : 'Amount'} <span className="req">*</span></label>
               <input className="input" type="number" step="0.01"
-                value={isSupplier ? (grandTotal > 0 ? grandTotal : '') : form.amount}
+                value={grandTotal > 0 ? grandTotal : ''}
                 onChange={e=>{
-                  if (isSupplier) {
-                    const v = parseFloat(e.target.value) || 0;
-                    setPureBase(v - chargesTotal); // keep charges, adjust pureBase
-                    set('amount', e.target.value);
-                  } else {
-                    set('amount', e.target.value);
-                  }
+                  const v = parseFloat(e.target.value) || 0;
+                  setPureBase(v - chargesTotal); // keep charges, adjust pureBase
+                  set('amount', e.target.value);
                 }}
                 placeholder="0.00"/>
-              {isSupplier && originalNum > 0 && (
+              {originalNum > 0 && (
                 <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
                   Original: <strong style={{fontFamily:'monospace'}}>{fmtM(originalNum)}</strong>
                   {anyAmountChanged && (
@@ -801,8 +801,8 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
             </div>
           </div>
 
-          {/* ── Supplier-only: Additional Charges section ── */}
-          {isSupplier && (
+          {/* ── Additional Charges section (supplier + customer) ── */}
+          {showCharges && (
             <div style={{marginTop:18,borderTop:'1px solid var(--border)',paddingTop:14}}>
               {/* Ask if there are additional charges */}
               {hasAdditional === null && (
@@ -1342,12 +1342,30 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
         lineSourceTotal,
       };
     });
+    // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
+    const parseCharges = (raw) => {
+      try {
+        if (!raw) return [];
+        const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return Array.isArray(p) ? p : [];
+      } catch(_) { return []; }
+    };
+    const charges = parseCharges(so.advance_additional_charges).length
+      ? parseCharges(so.advance_additional_charges)
+      : parseCharges(so.net_additional_charges);
+    const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+    const amountChangeNote = so.advance_amount_change_note || so.net_amount_change_note || '';
+    const actualAmount = so.advance_actual_amount ?? so.net_actual_amount ?? null;
     return {
       id: so.id,
       supplierOrderId: so.id,
       supplierName: supName(so.supplier_id),
       sourceTotal: itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0),
       items: itemBreakdown,
+      charges,
+      chargesTotal,
+      amountChangeNote,
+      actualAmount: actualAmount !== null ? parseFloat(actualAmount) : null,
     };
   });
   const selectedSupplierSummary = supplierOrderId
@@ -1428,10 +1446,28 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                           <span>{summary.supplierName}</span>
                           <strong>{fmtM(summary.sourceTotal)}</strong>
                         </div>
+                        {/* Additional charges (freight, duty, bank fees, etc.) added at payment time */}
+                        {summary.charges.map((c,i)=>(
+                          <div key={i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
+                            <span>+ {c.name}</span>
+                            <span style={{fontFamily:'monospace'}}>{fmtM(c.amount)}</span>
+                          </div>
+                        ))}
                         <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
-                          <span>Total supplier payable</span>
-                          <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</strong>
+                          <span>{summary.chargesTotal > 0 ? 'Grand total (incl. charges)' : 'Total supplier payable'}</span>
+                          <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal + summary.chargesTotal)}</strong>
                         </div>
+                        {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.sourceTotal + summary.chargesTotal)) > 0.009 && (
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,fontSize:12}}>
+                            <span style={{color:'var(--green)'}}>Actual paid</span>
+                            <strong style={{color:'var(--green)'}}>{fmtM(summary.actualAmount)}</strong>
+                          </div>
+                        )}
+                        {summary.amountChangeNote && (
+                          <div style={{marginTop:2,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
+                            Note: {summary.amountChangeNote}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div style={{padding:'10px 12px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface)'}}>
@@ -2136,6 +2172,22 @@ export default function FinancePage() {
                       </div>
                       {p.po_number && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Customer PO: {p.po_number}</div>}
                       {p.pi_no && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>PI: {p.pi_no}</div>}
+                      {(() => {
+                        try {
+                          const charges = typeof p.additional_charges === 'string' ? JSON.parse(p.additional_charges) : (p.additional_charges || []);
+                          if (!Array.isArray(charges) || charges.length === 0) return null;
+                          return (
+                            <div style={{marginTop:4,fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>
+                              + Charges: {charges.map(c=>c.name+' '+fmtM(c.amount, p.currency)).join(' | ')}
+                            </div>
+                          );
+                        } catch(_) { return null; }
+                      })()}
+                      {p.amount_change_note && (
+                        <div style={{marginTop:3,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
+                          Note: {p.amount_change_note}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2156,7 +2208,11 @@ export default function FinancePage() {
                       onClick={()=>setHistoryDetail({ type:'supplier', item:p })}>
                       {(() => {
                         const cur       = p.confirmed_currency || p.currency || 'INR';
-                        const thisAmt   = parseFloat(p.amount) || 0;
+                        // Headline = amount actually paid incl. additional charges.
+                        // advance: actual_amount/paid_amount carry charges; net: amount already incl. charges.
+                        const thisAmt   = p.payment_kind === 'net'
+                          ? (parseFloat(p.amount) || 0)
+                          : (parseFloat(p.actual_amount) || parseFloat(p.paid_amount) || parseFloat(p.amount) || 0);
                         const grandTotal= parseFloat(p.grand_total) || 0;
                         const remaining = parseFloat(p.remaining_snapshot) ?? Math.max(0, grandTotal - thisAmt);
                         const isPartial = p.payment_kind === 'net' && remaining > 0;

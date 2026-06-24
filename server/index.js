@@ -2953,7 +2953,27 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
     prevRows = await allAsync("SELECT amount FROM customer_payments WHERE order_id=? AND status='paid'", [req.params.order_id]);
     prevPaid = prevRows.reduce((s,p)=>s+(parseFloat(p.amount)||0),0);
   } catch(_) {}
+  // Ensure additional-charges columns exist (parity with supplier flow)
+  try { await runAsync("ALTER TABLE customer_payments ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await runAsync("ALTER TABLE customer_payments ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE customer_payments ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+
+  // Additional charges (freight, duty, bank fees, etc.)
+  const additionalCharges = Array.isArray(d.additional_charges) ? d.additional_charges : [];
+  const chargesTotal = additionalCharges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
   const incomingAmount = parseFloat(d.amount)||0;
+  const grandTotal = incomingAmount;
+
+  // Actual amount (what we actually receive now) — may differ from grand total
+  const actualAmount = d.actual_amount !== undefined && d.actual_amount !== '' && d.actual_amount !== null
+    ? parseFloat(d.actual_amount) || grandTotal
+    : grandTotal;
+
+  // If actual amount differs from grand total, change note is mandatory
+  if (Math.abs(actualAmount - grandTotal) > 0.009 && !((d.amount_change_note || '').trim())) {
+    return res.status(400).json({ error: 'Please provide a reason note when the actual amount differs from the total amount' });
+  }
+
   const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
   const fullBalance  = parseFloat(Math.max(0, total-newPaid).toFixed(2));
@@ -2966,17 +2986,21 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   await runAsync(`INSERT INTO customer_payments(
         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
         payment_type, amount, currency, payment_method, payment_ref,
-        payment_date, advance_pct, balance_due, status, recorded_by, recorded_at, notes
-      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        payment_date, advance_pct, balance_due, status, recorded_by, recorded_at, notes,
+        additional_charges, actual_amount, amount_change_note
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [uuid(), req.params.order_id, d.customer_po_no||o.po_number||'', d.finance_po_no||o.finance_po_no||'',
      d.pi_no||o.pi_no||'', d.pi_sent_at||'',
      d.payment_type||'advance', parseFloat(d.amount)||0, d.currency||'INR',
      d.payment_method||'', d.payment_ref||'', d.payment_date||now.slice(0,10),
      parseFloat(d.advance_pct)||0, fullBalance, 'paid',
-     req.session.user.id, now, d.notes||'']);
+     req.session.user.id, now, d.notes||'',
+     JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null]);
   await runAsync('UPDATE orders SET customer_payment_status=? WHERE id=?', [paymentStatus, req.params.order_id]);
+  const chargesDesc = additionalCharges.length > 0 ? ' | Charges: ' + additionalCharges.map(c => `${c.name} ${parseFloat(c.amount).toFixed(2)}`).join(', ') : '';
+  const amtNote = (d.amount_change_note||'').trim() ? ' | Amount note: ' + d.amount_change_note.trim() : '';
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-    [uuid(), req.params.order_id, 'Customer payment recorded: '+(d.currency||'INR')+' '+d.amount, req.session.user.name, '', now]); } catch(_) {}
+    [uuid(), req.params.order_id, 'Customer payment recorded: '+(d.currency||'INR')+' '+d.amount+chargesDesc+amtNote, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
   res.json({ ok: true, balance_due: fullBalance, status: paymentStatus });
 }));
@@ -3789,7 +3813,8 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
   try {
     custPmts = await allAsync(`SELECT cp.*, COALESCE(cp.customer_po_no, o.po_number) AS po_number,
                            COALESCE(cp.finance_po_no, o.finance_po_no) AS finance_po_no,
-                           o.customer_id, c.name AS customer_name
+                           o.customer_id, c.name AS customer_name,
+                           cp.additional_charges, cp.actual_amount, cp.amount_change_note
                     FROM customer_payments cp
                     LEFT JOIN orders o ON o.id=cp.order_id
                     LEFT JOIN customers c ON c.id=o.customer_id
