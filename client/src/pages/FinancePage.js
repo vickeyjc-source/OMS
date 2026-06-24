@@ -270,6 +270,20 @@ function HistoryDetailModal({ detail, onClose }) {
     }
   };
 
+  // Parse additional charges safely
+  const additionalCharges = (() => {
+    try {
+      const raw = item.additional_charges;
+      if (!raw) return [];
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch(_) { return []; }
+  })();
+  const chargesTotal = additionalCharges.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+  const baseAmt = parseFloat(item.paid_amount || item.amount) || 0;
+  const grandTotal = type === 'supplier' ? (baseAmt) : 0;
+  const actualAmt = parseFloat(item.actual_amount) || 0;
+
   const rows = type === 'customer'
     ? [
         ['Order', item.order_id || '—'],
@@ -290,12 +304,18 @@ function HistoryDetailModal({ detail, onClose }) {
         ['Internal PO', item.internal_po_no || item.supplier_order_id || '—'],
         ['Customer PO Ref', item.po_no || '—'],
         ['Supplier PI / Ref', item.supplier_ref || '—'],
-        ['Amount', fmtM(item.paid_amount || item.amount, item.confirmed_currency || item.currency || 'INR')],
-        ['Reference', item.payment_ref || '—'],
+        ['Zoho PO', item.zoho_po_number || '—'],
+        ['Payment Method', item.payment_method || '—'],
+        ['Amount Paid', fmtM(item.paid_amount || item.amount, item.confirmed_currency || item.currency || 'INR')],
+        ...(additionalCharges.length > 0 ? additionalCharges.map(c=>['+ '+c.name, fmtM(c.amount)]) : []),
+        ...(additionalCharges.length > 0 ? [['Grand Total (incl. charges)', fmtM(item.grand_total || (baseAmt))]] : []),
+        ...(item.actual_amount !== undefined && item.actual_amount !== null ? [['Actual Payment Amount', fmtM(item.actual_amount, item.confirmed_currency || item.currency || 'INR')]] : []),
+        ...(item.amount_change_note ? [['Amount Change Reason', item.amount_change_note]] : []),
+        ['Reference / UTR', item.payment_ref || '—'],
         ['Payment Date', fmtDate(item.payment_date)],
         ['Paid At', fmtDate(item.paid_at)],
-        ['Status', item.status || '—'],
         ['Notes', item.notes || '—'],
+        ['Status', item.status || '—'],
       ];
 
   return (
@@ -308,8 +328,8 @@ function HistoryDetailModal({ detail, onClose }) {
         <div className="modal-body" style={{display:'grid',gap:8}}>
           {rows.map(([k, v]) => (
             <div key={k} style={{display:'flex',justifyContent:'space-between',gap:12,padding:'7px 0',borderBottom:'1px solid var(--border)'}}>
-              <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{k}</span>
-              {k === 'Amount' && isAdmin ? (
+              <span style={{fontSize:12,color: k.startsWith('+') ? 'var(--amber,#d97706)' : k === 'Amount Change Reason' ? 'var(--red)' : 'var(--text3)',fontWeight:600}}>{k}</span>
+              {k === 'Amount Paid' && isAdmin ? (
                 editingAmount ? (
                   <span style={{display:'flex',alignItems:'center',gap:6}}>
                     <input
@@ -339,8 +359,38 @@ function HistoryDetailModal({ detail, onClose }) {
                     </button>
                   </span>
                 )
+              ) : k === 'Amount' && isAdmin && type === 'customer' ? (
+                editingAmount ? (
+                  <span style={{display:'flex',alignItems:'center',gap:6}}>
+                    <input type="number" min="0" step="0.01" className="input"
+                      style={{width:120,padding:'2px 8px',fontSize:12,height:26}}
+                      value={newAmount} autoFocus
+                      onChange={e=>setNewAmount(e.target.value)}
+                      onKeyDown={e=>{if(e.key==='Enter')saveAmount();if(e.key==='Escape')setEditingAmount(false);}}/>
+                    <button className="btn btn-sm btn-primary" disabled={saving} onClick={saveAmount}
+                      style={{fontSize:11,padding:'2px 8px',height:26,fontWeight:700}}>{saving?'…':'✓ Save'}</button>
+                    <button className="btn btn-sm" onClick={()=>setEditingAmount(false)}
+                      style={{fontSize:11,padding:'2px 6px',height:26}}>✕</button>
+                  </span>
+                ) : (
+                  <span style={{display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:12,fontWeight:600}}>{v}</span>
+                    <button className="btn btn-xs"
+                      onClick={()=>{setNewAmount(String(currentAmount));setEditingAmount(true);}}
+                      style={{fontSize:10,padding:'1px 8px',color:'var(--accent)',border:'1px solid var(--accent)',borderRadius:4}}>
+                      ✎ Edit
+                    </button>
+                  </span>
+                )
               ) : (
-                <span style={{fontSize:12,fontWeight:600,textAlign:'right'}}>{v}</span>
+                <span style={{
+                  fontSize:12, fontWeight: k==='Grand Total (incl. charges)'||k==='Actual Payment Amount' ? 700 : 600,
+                  textAlign:'right',
+                  color: k==='Grand Total (incl. charges)' ? 'var(--accent)'
+                    : k==='Actual Payment Amount' ? 'var(--green)'
+                    : k==='Amount Change Reason' ? 'var(--red)'
+                    : undefined
+                }}>{v}</span>
               )}
             </div>
           ))}
@@ -534,6 +584,8 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
 function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const qc = useQueryClient();
   const { user } = useAuth();
+  const isSupplier = type === 'supplier-advance' || type === 'supplier-net';
+
   const netAmount = type === 'supplier-net'
     ? String(Math.max(0, (parseFloat(item.confirmed_price)||0) - (parseFloat(item.net_total_paid)||0)) || item.confirmed_price || '')
     : '';
@@ -543,8 +595,14 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const custDefaultAmt = type === 'customer'
     ? String(parseFloat(item.payment_due_total)||parseFloat(item.balance_due)||parseFloat(item.order_total)||'')
     : '';
+
+  const defaultAmt = type === 'customer' ? custDefaultAmt
+    : type === 'supplier-net' ? netAmount
+    : type === 'supplier-advance' ? supplierAdvanceAmount
+    : String(item.amount||'');
+
   const [form, setForm] = useState({
-    amount: type === 'customer' ? custDefaultAmt : type === 'supplier-net' ? netAmount : type === 'supplier-advance' ? supplierAdvanceAmount : String(item.amount||''),
+    amount: defaultAmt,
     currency: 'INR',
     payment_method: 'Bank Transfer', payment_ref: '', payment_date: today(), notes: '',
     customer_po_no: type === 'customer' ? (item.po_number || '') : '',
@@ -553,6 +611,31 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
     payment_type: isPartialAdvance(item.payment_terms) ? 'partial_advance' : 'advance',
   });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  // Additional charges state
+  const [hasAdditional, setHasAdditional] = useState(null);
+  const [charges, setCharges] = useState([]);
+  const [chargeInput, setChargeInput] = useState({ name: '', amount: '' });
+  const [amountChangeNote, setAmountChangeNote] = useState('');
+  // pureBase tracks what user typed before charges (never mutated by charge additions)
+  const [pureBase, setPureBase] = useState(parseFloat(defaultAmt) || 0);
+
+  const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+  // grandTotal = pureBase + all charges — shown in the Base Amount field
+  const grandTotal = pureBase + chargesTotal;
+  const originalNum = parseFloat(defaultAmt) || 0;
+
+  // Reason needed only when final amount differs from original
+  const anyAmountChanged = isSupplier && Math.abs(grandTotal - originalNum) > 0.009;
+
+  const addCharge = () => {
+    const n = chargeInput.name.trim();
+    const a = parseFloat(chargeInput.amount);
+    if (!n || isNaN(a) || a <= 0) { toast.error('Enter charge name and a valid amount'); return; }
+    setCharges(prev => [...prev, { name: n, amount: a }]);
+    setChargeInput({ name: '', amount: '' });
+  };
+  const removeCharge = (i) => setCharges(prev => prev.filter((_,idx) => idx !== i));
 
   const mutation = useMutation({
     mutationFn: d => type === 'customer'
@@ -574,9 +657,28 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const label = type === 'customer' ? (item.customer?.name||item.customer_id) : (item._resolvedName || item.supplier?.name || item.supplier_id);
   const refNo = type === 'customer' ? item.id : (item.internal_po_no||item.supplier_order_id||item.id);
 
+  const canSubmit = !mutation.isPending
+    && !!form.payment_method && !!form.payment_ref && !!form.amount
+    && (type === 'customer' || (form.zoho_po_number?.trim() && form.supplier_ref?.trim()))
+    && (!anyAmountChanged || !!amountChangeNote.trim());
+
+  const handleSubmit = () => {
+    const payload = {
+      ...form,
+      amount: isSupplier ? grandTotal : (parseFloat(form.amount) || 0),
+      finance_po_no: '',
+      ...(isSupplier ? {
+        additional_charges: charges,
+        actual_amount: grandTotal,
+        amount_change_note: amountChangeNote.trim() || '',
+      } : {}),
+    };
+    mutation.mutate(payload);
+  };
+
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-sm">
+      <div className="modal" style={{maxWidth: isSupplier ? 620 : 520, width:'96vw'}}>
         <div className="modal-header">
           <h2>💳 Record Payment</h2>
           <button className="close-x" onClick={onClose}>×</button>
@@ -607,7 +709,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
             </div>
           )}
 
-          {type !== 'customer' && (
+          {isSupplier && (
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:12}}>
               <div className="form-group" style={{marginBottom:0}}>
                 <label className="label">Zoho PO Number <span className="req">*</span></label>
@@ -635,7 +737,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                 border:'1px solid var(--border)',fontSize:13}}>
                 {item.pi_no
                   ? <><span style={{fontFamily:'DM Mono,monospace',fontWeight:700,color:'var(--green)',letterSpacing:'0.02em'}}>{item.pi_no}</span>
-                      <span style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✅ PI Generated</span></>                  
+                      <span style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✅ PI Generated</span></>
                   : <span style={{color:'var(--amber,#d97706)',fontWeight:600,fontSize:12}}>⚠ PI not yet generated — generate PI before recording payment</span>
                 }
               </div>
@@ -644,9 +746,29 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
 
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">Amount <span className="req">*</span></label>
-              <input className="input" type="number" step="0.01" value={form.amount}
-                onChange={e=>set('amount',e.target.value)} placeholder="0.00"/>
+              <label className="label">{isSupplier ? 'Amount (INR)' : 'Amount'} <span className="req">*</span></label>
+              <input className="input" type="number" step="0.01"
+                value={isSupplier ? (grandTotal > 0 ? grandTotal : '') : form.amount}
+                onChange={e=>{
+                  if (isSupplier) {
+                    const v = parseFloat(e.target.value) || 0;
+                    setPureBase(v - chargesTotal); // keep charges, adjust pureBase
+                    set('amount', e.target.value);
+                  } else {
+                    set('amount', e.target.value);
+                  }
+                }}
+                placeholder="0.00"/>
+              {isSupplier && originalNum > 0 && (
+                <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
+                  Original: <strong style={{fontFamily:'monospace'}}>{fmtM(originalNum)}</strong>
+                  {anyAmountChanged && (
+                    <span style={{marginLeft:8,fontWeight:700,color: grandTotal > originalNum ? 'var(--green)' : 'var(--red)'}}>
+                      {grandTotal > originalNum ? '▲' : '▼'} {fmtM(Math.abs(grandTotal - originalNum))}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Currency</label>
@@ -678,15 +800,129 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                 placeholder="e.g. NEFT confirmation received"/>
             </div>
           </div>
+
+          {/* ── Supplier-only: Additional Charges section ── */}
+          {isSupplier && (
+            <div style={{marginTop:18,borderTop:'1px solid var(--border)',paddingTop:14}}>
+              {/* Ask if there are additional charges */}
+              {hasAdditional === null && (
+                <div style={{display:'flex',alignItems:'center',gap:14,padding:'12px 14px',
+                  borderRadius:'var(--r-sm)',background:'var(--surface2)',border:'1px solid var(--border)'}}>
+                  <span style={{fontSize:13,fontWeight:600,flex:1}}>Are there any additional charges? (freight, duty, bank fees, etc.)</span>
+                  <button className="btn btn-sm btn-primary" onClick={()=>setHasAdditional(true)} style={{fontSize:12}}>
+                    + Yes, Add Charges
+                  </button>
+                  <button className="btn btn-sm" onClick={()=>setHasAdditional(false)} style={{fontSize:12}}>
+                    No
+                  </button>
+                </div>
+              )}
+
+              {hasAdditional === false && (
+                <div style={{display:'flex',alignItems:'center',gap:10,padding:'8px 12px',
+                  borderRadius:'var(--r-sm)',background:'var(--green-lt)',border:'1px solid var(--green)33',
+                  fontSize:12,color:'var(--green)',fontWeight:600}}>
+                  ✓ No additional charges
+                  <button className="btn btn-xs" style={{marginLeft:'auto',fontSize:11}}
+                    onClick={()=>setHasAdditional(null)}>Change</button>
+                </div>
+              )}
+
+              {hasAdditional === true && (
+                <div>
+                  <div style={{fontWeight:700,fontSize:13,marginBottom:10,display:'flex',alignItems:'center',gap:8}}>
+                    Additional Charges
+                    <span style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>Add each charge separately</span>
+                  </div>
+
+                  {/* Existing charges */}
+                  {charges.length > 0 && (
+                    <div style={{display:'grid',gap:6,marginBottom:10}}>
+                      {charges.map((c,i) => (
+                        <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'7px 12px',
+                          borderRadius:'var(--r-sm)',background:'var(--surface2)',border:'1px solid var(--border)'}}>
+                          <span style={{flex:1,fontSize:13,fontWeight:600}}>{c.name}</span>
+                          <span style={{fontFamily:'monospace',fontWeight:700,color:'var(--accent)'}}>
+                            + {fmtM(c.amount)}
+                          </span>
+                          <button style={{background:'none',border:'none',color:'var(--red)',cursor:'pointer',fontSize:16,padding:'0 4px'}}
+                            onClick={()=>removeCharge(i)}>×</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Add new charge input */}
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:8,alignItems:'flex-end'}}>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Charge Name</label>
+                      <input className="input" value={chargeInput.name}
+                        onChange={e=>setChargeInput(p=>({...p,name:e.target.value}))}
+                        placeholder="e.g. Freight, Duty, Bank Charges"
+                        onKeyDown={e=>e.key==='Enter'&&addCharge()}/>
+                    </div>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Amount (INR)</label>
+                      <input className="input" type="number" step="0.01" min="0"
+                        value={chargeInput.amount}
+                        onChange={e=>setChargeInput(p=>({...p,amount:e.target.value}))}
+                        placeholder="0.00"
+                        onKeyDown={e=>e.key==='Enter'&&addCharge()}/>
+                    </div>
+                    <button className="btn btn-sm btn-primary" onClick={addCharge}
+                      style={{height:36,fontSize:13,padding:'0 14px',lineHeight:1,marginTop:20}}>✓</button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Charges breakdown (read-only summary) ── */}
+              {hasAdditional === true && charges.length > 0 && (
+                <div style={{marginTop:12,padding:'8px 12px',borderRadius:'var(--r-sm)',
+                  background:'var(--surface2)',border:'1px solid var(--border)',fontSize:12}}>
+                  <div style={{display:'flex',justifyContent:'space-between',color:'var(--text3)',marginBottom:4}}>
+                    <span>Base</span><span style={{fontFamily:'monospace'}}>{fmtM(pureBase)}</span>
+                  </div>
+                  {charges.map((c,i) => (
+                    <div key={i} style={{display:'flex',justifyContent:'space-between',color:'var(--amber,#d97706)',fontWeight:600}}>
+                      <span>{c.name}</span><span style={{fontFamily:'monospace'}}>+ {fmtM(c.amount)}</span>
+                    </div>
+                  ))}
+                  <div style={{display:'flex',justifyContent:'space-between',paddingTop:5,marginTop:4,borderTop:'1px solid var(--border)',fontWeight:700,fontSize:13}}>
+                    <span>Total → Amount field updated</span>
+                    <span style={{fontFamily:'monospace',color:'var(--accent)'}}>{fmtM(grandTotal)}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Reason note — only when total differs from original ── */}
+              {anyAmountChanged && (
+                <div style={{marginTop:14,padding:'12px 14px',borderRadius:'var(--r-sm)',
+                  background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)33'}}>
+                  <label className="label" style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+                    <span style={{color:'var(--red)',fontWeight:700}}>Reason for Amount Change</span>
+                    <span className="req">*</span>
+                  </label>
+                  <input className="input" value={amountChangeNote}
+                    onChange={e=>setAmountChangeNote(e.target.value)}
+                    placeholder="e.g. Exchange rate difference, freight added, bank charges deducted…"
+                    style={{background:'#fff',
+                      borderColor: !amountChangeNote.trim() ? 'var(--red)' : 'var(--green)'}}
+                  />
+                  {!amountChangeNote.trim() && (
+                    <div style={{marginTop:5,fontSize:11,color:'var(--red)',fontWeight:600}}>
+                      Required — explain why the amount changed from {fmtM(originalNum)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={mutation.isPending||!form.payment_method||!form.payment_ref||!form.amount||(type!=='customer'&&(!form.zoho_po_number?.trim()||!form.supplier_ref?.trim()))}
-            onClick={()=>mutation.mutate({
-              ...form,
-              finance_po_no: '',
-            })}>
+            disabled={!canSubmit}
+            onClick={handleSubmit}>
             {mutation.isPending ? 'Saving…' : '✅ Record Payment'}
           </button>
         </div>
@@ -1694,7 +1930,7 @@ export default function FinancePage() {
                     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
                       ? parseFloat(r.full_balance_due)||0
                       : Math.max(0, (parseFloat(r.amount)||0) - paid);
-                    const canReleaseSupplier = paid > 0 && r.release_ready && dueNow <= 0;
+                    const canReleaseSupplier = paid > 0; // Finance can always release once any payment is recorded
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
@@ -1953,7 +2189,23 @@ export default function FinancePage() {
                               }
                             </div>
                           )}
-                          {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>PI: {p.supplier_ref}{p.zoho_po_number ? ` · Zoho: ${p.zoho_po_number}` : ''}</div>}
+                              {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>PI: {p.supplier_ref}{p.zoho_po_number ? ` · Zoho: ${p.zoho_po_number}` : ''}</div>}
+                          {(() => {
+                            try {
+                              const charges = typeof p.additional_charges === 'string' ? JSON.parse(p.additional_charges) : (p.additional_charges || []);
+                              if (!Array.isArray(charges) || charges.length === 0) return null;
+                              return (
+                                <div style={{marginTop:4,fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>
+                                  + Charges: {charges.map(c=>c.name+' '+fmtM(c.amount)).join(' | ')}
+                                </div>
+                              );
+                            } catch(_) { return null; }
+                          })()}
+                          {p.amount_change_note && (
+                            <div style={{marginTop:3,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
+                              Note: {p.amount_change_note}
+                            </div>
+                          )}
                         </>);
                       })()}
                     </div>

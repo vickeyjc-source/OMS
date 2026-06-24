@@ -3224,21 +3224,48 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
   const supplierRef = (d.supplier_ref || '').trim();
   if (!zohoPo || !supplierRef) return res.status(400).json({ error: 'Zoho PO Number and Supplier PI Number are required' });
 
+  // Add new columns if they don't exist
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN payment_method TEXT DEFAULT ''"); } catch(_) {}
+
   const now = nowStr();
   const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
-  const total = parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0;
+  const baseTotal = parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0;
+
+  // Additional charges
+  const additionalCharges = Array.isArray(d.additional_charges) ? d.additional_charges : [];
+  const chargesTotal = additionalCharges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+  const grandTotal = baseTotal + chargesTotal;
+
+  // Actual amount (what we actually pay now) — may differ from grand total
+  const actualAmount = d.actual_amount !== undefined && d.actual_amount !== '' && d.actual_amount !== null
+    ? parseFloat(d.actual_amount) || grandTotal
+    : grandTotal;
+
+  // If actual amount differs from grand total, change note is mandatory
+  if (Math.abs(actualAmount - grandTotal) > 0.009 && !((d.amount_change_note || '').trim())) {
+    return res.status(400).json({ error: 'Please provide a reason note when the actual amount differs from the total amount' });
+  }
+
   const previousPaid = parseFloat(fq.paid_amount) || 0;
-  const thisPayment = parseFloat(d.amount ?? d.paid_amount ?? 0) || 0;
-  const totalPaid = previousPaid + thisPayment;
-  const fullBalance = Math.max(0, total - totalPaid);
+  const totalPaid = previousPaid + actualAmount;
+  const fullBalance = Math.max(0, grandTotal - totalPaid);
   const queueStatus = 'pending';
-  await runAsync('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_amount=?,paid_by=?,paid_at=?,notes=? WHERE id=?',
-    [queueStatus, d.payment_ref||'', d.payment_date||now.slice(0,10), totalPaid, req.session.user.id, now, d.notes||'', req.params.fq_id]);
+
+  await runAsync('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_amount=?,paid_by=?,paid_at=?,notes=?,additional_charges=?,actual_amount=?,amount_change_note=?,payment_method=? WHERE id=?',
+    [queueStatus, d.payment_ref||'', d.payment_date||now.slice(0,10), totalPaid, req.session.user.id, now, d.notes||'',
+     JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null, d.payment_method||'',
+     req.params.fq_id]);
   await runAsync('UPDATE supplier_orders SET zoho_po_number=?, supplier_ref=? WHERE id=?', [zohoPo, supplierRef, fq.supplier_order_id]);
+
+  const chargesDesc = additionalCharges.length > 0 ? ' | Charges: ' + additionalCharges.map(c => `${c.name} ${parseFloat(c.amount).toFixed(2)}`).join(', ') : '';
+  const amtNote = (d.amount_change_note||'').trim() ? ' | Amount note: ' + d.amount_change_note.trim() : '';
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
-    [uuid(), fq.order_id, 'Supplier payment recorded | Ref: '+(d.payment_ref||'—')+(queueStatus==='paid'?' | fully paid':' | release/balance pending'), req.session.user.name, '', now]); } catch(_) {}
+    [uuid(), fq.order_id, `Supplier advance payment recorded ₹${actualAmount.toFixed(2)} | Ref: ${d.payment_ref||'—'}${chargesDesc}${amtNote} | release/balance pending`, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, paid_amount: totalPaid, balance_due: fullBalance, status: queueStatus });
+  res.json({ ok: true, paid_amount: totalPaid, balance_due: fullBalance, status: queueStatus, grand_total: grandTotal });
 }));
 
 // POST /api/finance/supplier-release/:fq_id — release supplier PO after required advance is paid
@@ -3250,11 +3277,10 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
 
   const total = parseFloat(fq.amount) || parseFloat(so.confirmed_price) || 0;
   const paid = parseFloat(fq.paid_amount) || 0;
-  const releaseDueTotal = requiredSupplierReleaseTotal(total, so || fq);
-  if (paid < releaseDueTotal) {
-    return res.status(400).json({ error: `Required advance not fully paid. Need ${releaseDueTotal.toFixed(2)}, paid ${paid.toFixed(2)}.` });
+  if (paid <= 0) {
+    return res.status(400).json({ error: 'Record supplier payment before releasing' });
   }
-
+  // Finance is always allowed to release once payment is recorded — amount changes are permitted
   const fullBalance = Math.max(0, total - paid);
   const nextQueueStatus = fullBalance <= 0 ? 'paid' : 'pending';
   const now = nowStr();
@@ -3299,6 +3325,9 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
   try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_notes TEXT DEFAULT ''"); } catch(_) {}
   try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_payment_amount NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_total_paid NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_orders ADD COLUMN net_amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
   // Log table — one row per payment installment
   try { await runAsync(`CREATE TABLE IF NOT EXISTS supplier_net_payment_logs (
     id TEXT PRIMARY KEY, supplier_order_id TEXT, order_id TEXT,
@@ -3310,42 +3339,66 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
   try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN total_paid_snapshot NUMERIC DEFAULT 0"); } catch(_) {}
   try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN remaining_snapshot NUMERIC DEFAULT 0"); } catch(_) {}
   try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN grand_total NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await runAsync("ALTER TABLE supplier_net_payment_logs ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
 
-  const thisPayment  = parseFloat(d.amount) || 0;
+  // Additional charges
+  const additionalCharges = Array.isArray(d.additional_charges) ? d.additional_charges : [];
+  const chargesTotal = additionalCharges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+  const baseTotal = parseFloat(so.confirmed_price) || 0;
+  const grandTotal = baseTotal + chargesTotal;
+
+  // Actual amount paid now — may differ from computed total
+  const actualAmount = d.actual_amount !== undefined && d.actual_amount !== '' && d.actual_amount !== null
+    ? parseFloat(d.actual_amount) || (parseFloat(d.amount) || 0)
+    : (parseFloat(d.amount) || 0);
+
+  // Note is mandatory if actual amount differs from (base amount input + charges)
+  const inputBase = parseFloat(d.amount) || 0;
+  const expectedActual = inputBase + chargesTotal;
+  if (Math.abs(actualAmount - expectedActual) > 0.009 && !((d.amount_change_note || '').trim())) {
+    return res.status(400).json({ error: 'Please provide a reason note when the actual payment amount differs from the total' });
+  }
+
   const prevPaid     = parseFloat(so.net_total_paid) || 0;
-  const newTotalPaid = prevPaid + thisPayment;
-  const total        = parseFloat(so.confirmed_price) || 0;
-  const isFullyPaid  = total > 0 ? newTotalPaid >= total : true;
+  const newTotalPaid = prevPaid + actualAmount;
+  const isFullyPaid  = grandTotal > 0 ? newTotalPaid >= grandTotal : true;
   const newStatus    = 'net_payment_recorded';
-  const remaining    = Math.max(0, total - newTotalPaid);
+  const remaining    = Math.max(0, grandTotal - newTotalPaid);
   const now = nowStr();
 
   // Save this installment to the log — snapshots capture exact state at time of payment
   await runAsync(
-    `INSERT INTO supplier_net_payment_logs(id,supplier_order_id,order_id,amount,currency,payment_ref,payment_date,payment_method,zoho_po_number,supplier_ref,notes,paid_by,paid_at,total_paid_snapshot,remaining_snapshot,grand_total)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    [uuid(), so.id, so.order_id, thisPayment, so.confirmed_currency||'INR',
+    `INSERT INTO supplier_net_payment_logs(id,supplier_order_id,order_id,amount,currency,payment_ref,payment_date,payment_method,zoho_po_number,supplier_ref,notes,paid_by,paid_at,total_paid_snapshot,remaining_snapshot,grand_total,additional_charges,actual_amount,amount_change_note)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [uuid(), so.id, so.order_id, actualAmount, so.confirmed_currency||'INR',
      d.payment_ref||'', d.payment_date||now.slice(0,10), d.payment_method||'',
      zohoPo, supplierRef, d.notes||'', req.session.user.id, now,
-     newTotalPaid, remaining, total]
+     newTotalPaid, remaining, grandTotal,
+     JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null]
   );
 
   // Update supplier order with latest payment info + cumulative total
   await runAsync(
     `UPDATE supplier_orders SET status=?, zoho_po_number=?, supplier_ref=?,
        net_payment_ref=?, net_payment_date=?, net_payment_method=?,
-       net_paid_by=?, net_paid_at=?, net_payment_notes=?, net_payment_amount=?, net_total_paid=? WHERE id=?`,
+       net_paid_by=?, net_paid_at=?, net_payment_notes=?, net_payment_amount=?, net_total_paid=?,
+       net_additional_charges=?, net_actual_amount=?, net_amount_change_note=? WHERE id=?`,
     [newStatus, zohoPo, supplierRef, d.payment_ref||'', d.payment_date||now.slice(0,10),
-     d.payment_method||'', req.session.user.id, now, d.notes||'', thisPayment, newTotalPaid, so.id]
+     d.payment_method||'', req.session.user.id, now, d.notes||'', actualAmount, newTotalPaid,
+     JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null, so.id]
   );
 
+  const chargesDesc = additionalCharges.length > 0 ? ' | Charges: ' + additionalCharges.map(c => `${c.name} ${parseFloat(c.amount).toFixed(2)}`).join(', ') : '';
+  const amtNote = (d.amount_change_note||'').trim() ? ' | Amount note: ' + d.amount_change_note.trim() : '';
   const histMsg = isFullyPaid
-    ? `Supplier net payment FULLY settled (${newTotalPaid.toFixed(2)}) | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}`
-    : `Partial payment ${thisPayment.toFixed(2)} recorded — ${remaining.toFixed(2)} still remaining | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}`;
+    ? `Supplier net payment FULLY settled ₹${newTotalPaid.toFixed(2)} | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}${chargesDesc}${amtNote}`
+    : `Partial payment ₹${actualAmount.toFixed(2)} recorded — ₹${remaining.toFixed(2)} still remaining | Ref: ${d.payment_ref||'—'} | PO: ${zohoPo}${chargesDesc}${amtNote}`;
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), so.order_id, histMsg, req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true, total_paid: newTotalPaid, remaining, status: newStatus });
+  res.json({ ok: true, total_paid: newTotalPaid, remaining, status: newStatus, grand_total: grandTotal });
 }));
 
 // POST /api/finance/supplier-net-release/:so_id — release recorded supplier net settlement
@@ -3748,11 +3801,12 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
     supPmts  = await allAsync(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
                            so.confirmed_currency, so.confirmed_price,
                            so.order_id AS linked_order_id, s.name AS supplier_name,
-                           'advance' AS payment_kind
+                           'advance' AS payment_kind,
+                           fq.additional_charges, fq.actual_amount, fq.amount_change_note
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
                     LEFT JOIN suppliers s ON s.id=so.supplier_id
-                    WHERE fq.status='paid'
+                    WHERE fq.status IN ('paid','pending') AND fq.paid_at IS NOT NULL AND fq.paid_at != ''
                     ORDER BY fq.paid_at DESC`);
   } catch(_) {}
 
@@ -3763,6 +3817,7 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           l.payment_ref, l.payment_date, l.payment_method, l.notes,
                           l.zoho_po_number, l.supplier_ref,
                           l.total_paid_snapshot, l.remaining_snapshot, l.grand_total,
+                          l.additional_charges, l.actual_amount, l.amount_change_note,
                           so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
                           so.supplier_id, so.confirmed_currency,
                           s.name AS supplier_name,
