@@ -843,6 +843,29 @@ async function initDb() {
   try { await pool.query("ALTER TABLE orders ADD COLUMN po_generated_at TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE customer_payments ADD COLUMN customer_po_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE customer_payments ADD COLUMN finance_po_no TEXT DEFAULT ''"); } catch(_) {}
+  // ── Finance: additional-charges columns (must exist at startup so /finance/history never breaks) ──
+  try { await pool.query("ALTER TABLE customer_payments ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customer_payments ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customer_payments ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE finance_queue ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE finance_queue ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE finance_queue ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE finance_queue ADD COLUMN payment_method TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE finance_queue ADD COLUMN release_pending INTEGER DEFAULT 0"); } catch(_) {}
+  // Per-installment log for supplier ADVANCE payments (so History shows every payment, not just the latest)
+  try { await pool.query(`CREATE TABLE IF NOT EXISTS supplier_advance_payment_logs (
+    id TEXT PRIMARY KEY, finance_queue_id TEXT, supplier_order_id TEXT, order_id TEXT,
+    amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT, payment_method TEXT,
+    zoho_po_number TEXT, supplier_ref TEXT, notes TEXT, paid_by TEXT, paid_at TEXT,
+    total_paid_snapshot NUMERIC, remaining_snapshot NUMERIC, grand_total NUMERIC,
+    additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT
+  )`); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN payment_due_date TEXT DEFAULT ''"); } catch(_) {}
   // ── Finance: supplier_orders Phase 2 fields ──────────────────────────────────

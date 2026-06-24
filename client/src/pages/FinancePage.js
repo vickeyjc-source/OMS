@@ -1966,7 +1966,15 @@ export default function FinancePage() {
                     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
                       ? parseFloat(r.full_balance_due)||0
                       : Math.max(0, (parseFloat(r.amount)||0) - paid);
-                    const canReleaseSupplier = paid > 0; // Finance can always release once any payment is recorded
+                    // Mirror customer-advance flow:
+                    //  • payment recorded but NOT yet released (still blocked) → show Release
+                    //  • already released but balance remains → show Record Payment for the rest
+                    //  • (fully paid rows leave the queue entirely)
+                    // A just-recorded payment awaits release (release_pending=1) → show Release.
+                    // After release it's cleared → show Record Payment for any remaining balance.
+                    // Uses a Finance-only flag, NOT payment_blocked (which gates Procurement).
+                    const releasePending = r.release_pending === 1 || r.release_pending === true;
+                    const canReleaseSupplier = paid > 0 && releasePending;
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
                     <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>

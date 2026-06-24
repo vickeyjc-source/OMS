@@ -3017,8 +3017,20 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
     [req.params.order_id]
   );
   const fullPaid = total > 0 && (parseFloat(paid?.total)||0) >= total;
-  await runAsync("UPDATE orders SET status='open', customer_payment_status=? WHERE id=?",
-    [fullPaid ? 'paid' : 'pending', req.params.order_id]);
+  // Only the FIRST release moves the order from its payment-stage into 'open' (so it can be sent
+  // to Procurement). Once it has already progressed to procurement or beyond, a later installment
+  // must NOT drag it back to 'open' — that would re-show "Send to Procurement" on an order that's
+  // already in procurement. In that case we only update the payment status.
+  const preProcurementStatuses = ['payment_approval','waiting_for_payment','cust_payment_update','payment_pending','draft'];
+  const newPaymentStatus = fullPaid ? 'paid' : 'pending';
+  if (preProcurementStatuses.includes(o.status)) {
+    await runAsync("UPDATE orders SET status='open', customer_payment_status=? WHERE id=?",
+      [newPaymentStatus, req.params.order_id]);
+  } else {
+    // Already 'open' or further along (procurement, shipped, …) — keep status, just record payment.
+    await runAsync("UPDATE orders SET customer_payment_status=? WHERE id=?",
+      [newPaymentStatus, req.params.order_id]);
+  }
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
@@ -3164,7 +3176,7 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 // GET /api/finance/supplier-queue
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
-  try { advRows = await allAsync("SELECT fq.*, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
+  try { advRows = await allAsync("SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
   const netRows = await allAsync("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('paid','cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
@@ -3256,33 +3268,64 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
 
   const now = nowStr();
   const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
-  const baseTotal = parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0;
 
   // Additional charges
   const additionalCharges = Array.isArray(d.additional_charges) ? d.additional_charges : [];
   const chargesTotal = additionalCharges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
-  const grandTotal = baseTotal + chargesTotal;
 
-  // Actual amount (what we actually pay now) — may differ from grand total
+  // The amount the user is paying now (already includes any additional charges they entered).
+  const submittedAmount = parseFloat(d.amount) || 0;
+  // Actual amount actually disbursed — defaults to the submitted amount.
   const actualAmount = d.actual_amount !== undefined && d.actual_amount !== '' && d.actual_amount !== null
-    ? parseFloat(d.actual_amount) || grandTotal
-    : grandTotal;
+    ? (parseFloat(d.actual_amount) || submittedAmount)
+    : submittedAmount;
 
-  // If actual amount differs from grand total, change note is mandatory
-  if (Math.abs(actualAmount - grandTotal) > 0.009 && !((d.amount_change_note || '').trim())) {
+  // Reason note is only required when the disbursed amount differs from the entered amount
+  // (base + charges). Paying a partial/split advance is NOT a mismatch.
+  if (Math.abs(actualAmount - submittedAmount) > 0.009 && !((d.amount_change_note || '').trim())) {
     return res.status(400).json({ error: 'Please provide a reason note when the actual amount differs from the total amount' });
   }
 
+  // Full PO amount (for balance tracking) — the confirmed total, never the partial advance.
+  const grandTotal = (parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0) + chargesTotal;
   const previousPaid = parseFloat(fq.paid_amount) || 0;
   const totalPaid = previousPaid + actualAmount;
   const fullBalance = Math.max(0, grandTotal - totalPaid);
+  // Mirror customer-advance flow: every recorded payment must be RELEASED in Finance before the
+  // row leaves the queue. We track that with `release_pending` on the finance_queue row — NOT with
+  // supplier_orders.payment_blocked, which gates Procurement. Touching payment_blocked here would
+  // wrongly drag the PO back into a blocked/un-managed state in Procurement on the 2nd payment.
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN release_pending INTEGER DEFAULT 0"); } catch(_) {}
   const queueStatus = 'pending';
 
-  await runAsync('UPDATE finance_queue SET status=?,payment_ref=?,payment_date=?,paid_amount=?,paid_by=?,paid_at=?,notes=?,additional_charges=?,actual_amount=?,amount_change_note=?,payment_method=? WHERE id=?',
+  await runAsync('UPDATE finance_queue SET status=?,release_pending=1,payment_ref=?,payment_date=?,paid_amount=?,paid_by=?,paid_at=?,notes=?,additional_charges=?,actual_amount=?,amount_change_note=?,payment_method=? WHERE id=?',
     [queueStatus, d.payment_ref||'', d.payment_date||now.slice(0,10), totalPaid, req.session.user.id, now, d.notes||'',
      JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null, d.payment_method||'',
      req.params.fq_id]);
+  // Save PI/PO refs only — do NOT change payment_blocked here (that is Procurement's gate).
   await runAsync('UPDATE supplier_orders SET zoho_po_number=?, supplier_ref=? WHERE id=?', [zohoPo, supplierRef, fq.supplier_order_id]);
+
+  // Log THIS installment so History shows every advance payment (not just the latest). The
+  // finance_queue row only keeps the running total, so without this log earlier installments
+  // would be invisible in History.
+  try {
+    await runAsync(`CREATE TABLE IF NOT EXISTS supplier_advance_payment_logs (
+      id TEXT PRIMARY KEY, finance_queue_id TEXT, supplier_order_id TEXT, order_id TEXT,
+      amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT, payment_method TEXT,
+      zoho_po_number TEXT, supplier_ref TEXT, notes TEXT, paid_by TEXT, paid_at TEXT,
+      total_paid_snapshot NUMERIC, remaining_snapshot NUMERIC, grand_total NUMERIC,
+      additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT
+    )`);
+    await runAsync(
+      `INSERT INTO supplier_advance_payment_logs(id,finance_queue_id,supplier_order_id,order_id,amount,currency,payment_ref,payment_date,payment_method,zoho_po_number,supplier_ref,notes,paid_by,paid_at,total_paid_snapshot,remaining_snapshot,grand_total,additional_charges,actual_amount,amount_change_note)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [uuid(), req.params.fq_id, fq.supplier_order_id, fq.order_id, actualAmount,
+       so?.confirmed_currency||'INR', d.payment_ref||'', d.payment_date||now.slice(0,10), d.payment_method||'',
+       zohoPo, supplierRef, d.notes||'', req.session.user.id, now,
+       totalPaid, fullBalance, grandTotal,
+       JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null]
+    );
+  } catch(e) { console.error('[supplier-pay] advance log failed:', e.message); }
 
   const chargesDesc = additionalCharges.length > 0 ? ' | Charges: ' + additionalCharges.map(c => `${c.name} ${parseFloat(c.amount).toFixed(2)}`).join(', ') : '';
   const amtNote = (d.amount_change_note||'').trim() ? ' | Amount note: ' + d.amount_change_note.trim() : '';
@@ -3299,17 +3342,35 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
   const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [fq.supplier_order_id]);
   if (!so) return res.status(404).json({ error: 'Supplier PO not found' });
 
-  const total = parseFloat(fq.amount) || parseFloat(so.confirmed_price) || 0;
+  // Grand total includes any additional charges recorded with the payment.
+  let chargesTotal = 0;
+  try {
+    const raw = fq.additional_charges;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : (raw || []);
+    if (Array.isArray(parsed)) chargesTotal = parsed.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
+  } catch(_) {}
+  const total = (parseFloat(fq.amount) || parseFloat(so.confirmed_price) || 0) + chargesTotal;
   const paid = parseFloat(fq.paid_amount) || 0;
   if (paid <= 0) {
     return res.status(400).json({ error: 'Record supplier payment before releasing' });
   }
   // Finance is always allowed to release once payment is recorded — amount changes are permitted
   const fullBalance = Math.max(0, total - paid);
-  const nextQueueStatus = fullBalance <= 0 ? 'paid' : 'pending';
+  // Mirror customer-advance flow: clear the block on release. If a balance remains, keep it
+  // 'pending' so the next installment can be recorded (then released again). Only mark 'paid'
+  // — removing it from the queue — once the PO is fully paid.
+  const nextQueueStatus = fullBalance <= 0.009 ? 'paid' : 'pending';
   const now = nowStr();
-  await runAsync('UPDATE supplier_orders SET payment_blocked=0, status=? WHERE id=?', ['po_issued', fq.supplier_order_id]);
-  await runAsync('UPDATE finance_queue SET status=?, paid_at=COALESCE(paid_at, ?), notes=? WHERE id=?',
+  // First release moves a blocked PO into 'po_issued' so Procurement can manage it. A LATER
+  // installment release must NOT reset the PO status — that would drag the PO back from
+  // confirmed/in-transit/etc. to 'po_issued'. Only update status while still blocked.
+  const wasBlocked = so.payment_blocked === 1 || so.payment_blocked === true;
+  if (wasBlocked) {
+    await runAsync("UPDATE supplier_orders SET payment_blocked=0, status='po_issued' WHERE id=?", [fq.supplier_order_id]);
+  }
+  // Clear the Finance "awaiting release" flag; set 'paid' only when fully paid (removes from queue).
+  try { await runAsync("ALTER TABLE finance_queue ADD COLUMN release_pending INTEGER DEFAULT 0"); } catch(_) {}
+  await runAsync('UPDATE finance_queue SET status=?, release_pending=0, paid_at=COALESCE(paid_at, ?), notes=? WHERE id=?',
     [nextQueueStatus, now, fullBalance > 0 ? 'Advance released; balance pending' : 'Payment released and fully paid', fq.id]);
 
   const remainingBlocked = await getAsync(
@@ -3803,6 +3864,9 @@ app.delete('/api/finance/history', auth, asyncRoute(async (req, res) => {
     return res.status(403).json({ error: 'Manager access required' });
   try { await runAsync("DELETE FROM customer_payments"); } catch(_) {}
   try { await runAsync("DELETE FROM finance_queue WHERE status='paid'"); } catch(_) {}
+  // Also clear the per-installment supplier payment logs so History is fully emptied.
+  try { await runAsync("DELETE FROM supplier_advance_payment_logs"); } catch(_) {}
+  try { await runAsync("DELETE FROM supplier_net_payment_logs"); } catch(_) {}
   saveNow();
   res.json({ ok: true });
 }));
@@ -3813,26 +3877,45 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
   try {
     custPmts = await allAsync(`SELECT cp.*, COALESCE(cp.customer_po_no, o.po_number) AS po_number,
                            COALESCE(cp.finance_po_no, o.finance_po_no) AS finance_po_no,
-                           o.customer_id, c.name AS customer_name,
-                           cp.additional_charges, cp.actual_amount, cp.amount_change_note
+                           o.customer_id, c.name AS customer_name
                     FROM customer_payments cp
                     LEFT JOIN orders o ON o.id=cp.order_id
                     LEFT JOIN customers c ON c.id=o.customer_id
                     ORDER BY cp.recorded_at DESC`);
   } catch(_) {}
 
+  // Supplier ADVANCE history — one row per installment, from the per-payment log table.
   let supPmts  = [];
   try {
-    supPmts  = await allAsync(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
+    supPmts = await allAsync(`SELECT
+                          l.id, l.paid_at, l.paid_by, l.amount, l.currency,
+                          l.payment_ref, l.payment_date, l.payment_method, l.notes,
+                          l.zoho_po_number, l.supplier_ref,
+                          l.total_paid_snapshot, l.remaining_snapshot, l.grand_total,
+                          l.additional_charges, l.actual_amount, l.amount_change_note,
+                          l.amount AS paid_amount,
+                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          so.confirmed_currency, so.confirmed_price,
+                          s.name AS supplier_name,
+                          'advance' AS payment_kind
+                   FROM supplier_advance_payment_logs l
+                   LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
+                   LEFT JOIN suppliers s ON s.id=so.supplier_id
+                   ORDER BY l.paid_at DESC`);
+  } catch(_) { supPmts = []; }
+  // Legacy fallback: finance_queue rows paid BEFORE the per-installment log existed.
+  try {
+    const legacy = await allAsync(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
                            so.confirmed_currency, so.confirmed_price,
                            so.order_id AS linked_order_id, s.name AS supplier_name,
-                           'advance' AS payment_kind,
-                           fq.additional_charges, fq.actual_amount, fq.amount_change_note
+                           'advance' AS payment_kind
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
                     LEFT JOIN suppliers s ON s.id=so.supplier_id
                     WHERE fq.status IN ('paid','pending') AND fq.paid_at IS NOT NULL AND fq.paid_at != ''
+                      AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id=fq.id)
                     ORDER BY fq.paid_at DESC`);
+    supPmts = [...supPmts, ...legacy];
   } catch(_) {}
 
   let netPmts = [];

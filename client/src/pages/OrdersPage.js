@@ -167,12 +167,17 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
   const paymentTermsDirty = orderTerms !== savedOrderTerms;
   const termsChanged   = orderTerms && orderTerms !== custTerms;
   const hasAdvanceTerms = isFullAdvance(savedEffectiveTerms) || isPartialAdvance(savedEffectiveTerms);
+  // Once the order has progressed to procurement or beyond, the advance-collection workflow is over.
+  // It must NOT be possible to "Send to Finance" again (that would pull the order back out of
+  // procurement). Anything that is not a pre-procurement payment stage counts as "past order stage".
+  const preOrderStatuses = ['draft','open','payment_approval','waiting_for_payment','cust_payment_update','payment_pending'];
+  const isPastOrderStage = !preOrderStatuses.includes(order.status);
   const customerAdvanceReleased = hasAdvanceTerms &&
     order.status === 'open' &&
     !!order.pi_no &&
     order.customer_payment_status === 'pending';
   const customerAdvanceComplete = order.customer_payment_status === 'paid';
-  const customerAdvanceFinanceLocked = order.status === 'payment_approval' || customerAdvanceReleased || customerAdvanceComplete;
+  const customerAdvanceFinanceLocked = order.status === 'payment_approval' || customerAdvanceReleased || customerAdvanceComplete || isPastOrderStage;
 
   const mutation = useMutation({
     mutationFn: d => api.put(`/orders/${order.id}`, d).then(r=>r.data),
