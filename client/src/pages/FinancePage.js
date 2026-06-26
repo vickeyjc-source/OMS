@@ -323,7 +323,7 @@ function HistoryDetailModal({ detail, onClose }) {
       ];
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header">
           <h2>{type === 'customer' ? '🧾 Customer Receipt Details' : '💸 Supplier Payment Details'}</h2>
@@ -441,7 +441,7 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   });
 
   if (!pmt) return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header"><h2>Payment Details</h2><button className="close-x" onClick={onClose}>×</button></div>
         <div className="modal-body" style={{padding:24,textAlign:'center',color:'var(--text3)'}}>No payment recorded yet.</div>
@@ -463,7 +463,7 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   ];
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header">
           <h2>{editMode ? '✏ Edit Payment' : '💳 Payment Details'}</h2>
@@ -616,6 +616,16 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
+  // Fetch PI file uploaded by Procurement for this supplier order
+  const [piFile, setPiFile] = useState(null);
+  useEffect(() => {
+    const soId = item.supplier_order_id || item.id;
+    if (!soId || !isSupplier) return;
+    api.get('/files', { params: { entity_type: 'supplier_order', entity_id: soId, field_name: 'supplier_pi' } })
+      .then(r => { if (r.data?.[0]) setPiFile(r.data[0]); })
+      .catch(() => {});
+  }, [item.supplier_order_id, item.id, isSupplier]);
+
   // Additional charges state
   const [hasAdditional, setHasAdditional] = useState(null);
   const [charges, setCharges] = useState([]);
@@ -681,7 +691,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   };
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal" style={{maxWidth: 620, width:'96vw'}}>
         <div className="modal-header">
           <h2>💳 Record Payment</h2>
@@ -723,11 +733,25 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                   style={{borderColor:!form.zoho_po_number?.trim()?'var(--amber,#d97706)':undefined}}/>
               </div>
               <div className="form-group" style={{marginBottom:0}}>
-                <label className="label">Supplier PI Number <span className="req">*</span></label>
+                <label className="label">Supplier PI Number <span className="req">*</span>
+                  {item.supplier_ref && <span style={{marginLeft:6,fontSize:10,color:'var(--green)',fontWeight:600}}>✅ entered by Procurement</span>}
+                </label>
                 <input className="input" value={form.supplier_ref}
                   onChange={e=>set('supplier_ref', e.target.value)}
                   placeholder="Enter supplier PI / reference"
-                  style={{borderColor:!form.supplier_ref?.trim()?'var(--amber,#d97706)':undefined}}/>
+                  readOnly={!!item.supplier_ref}
+                  style={{
+                    borderColor:!form.supplier_ref?.trim()?'var(--amber,#d97706)':'var(--green)',
+                    background: item.supplier_ref ? 'var(--surface2)' : undefined,
+                    cursor: item.supplier_ref ? 'not-allowed' : undefined,
+                  }}/>
+                {piFile && (
+                  <a href={piFile.download_url} target="_blank" rel="noreferrer"
+                    style={{display:'inline-flex',alignItems:'center',gap:4,marginTop:4,
+                      fontSize:11,color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                    📥 Download PI ({piFile.original_name})
+                  </a>
+                )}
               </div>
             </div>
           )}
@@ -968,7 +992,7 @@ function CustomerBankDetailsModal({ customer, onClose, onSaved }) {
   const missingRequired = !form.bank_account_name?.trim() || !form.bank_account_no?.trim() || (!intl && !form.bank_ifsc?.trim());
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal" style={{maxWidth:920,width:'96vw'}}>
         <div className="modal-header">
           <h2>🏦 Bank Details — {customer?.name || 'Customer'}</h2>
@@ -1056,7 +1080,7 @@ function SupplierBankDetailsModal({ supplier, onClose, onSaved }) {
   const missingRequired = !form.bank_account_name?.trim() || !form.bank_account_no?.trim() || (!intl && !form.bank_ifsc?.trim()) || (intl && !form.bank_swift?.trim());
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal" style={{maxWidth:920,width:'96vw'}}>
         <div className="modal-header">
           <h2>🏦 Add Bank Details</h2>
@@ -1214,20 +1238,29 @@ function PORequestsTab({ requests, onRefresh }) {
 
 function FulfillPORequestModal({ request, onClose, onSaved }) {
   const isAdvance = (request.payment_terms_type==='advance'||request.payment_terms_type==='split');
-  const [form, setForm] = useState({ supplier_ref: '', zoho_po_number: '' });
+  const procurementPi = request.supplier_ref || ''; // PI entered by Procurement
+  const [form, setForm] = useState({ supplier_ref: procurementPi, zoho_po_number: '' });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  // Fetch PI file uploaded by Procurement
+  const [piFile, setPiFile] = useState(null);
+  useEffect(() => {
+    if (!request.supplier_order_id) return;
+    api.get('/files', { params: { entity_type: 'supplier_order', entity_id: request.supplier_order_id, field_name: 'supplier_pi' } })
+      .then(r => { if (r.data?.[0]) setPiFile(r.data[0]); })
+      .catch(() => {});
+  }, [request.supplier_order_id]);
+
   const mutation = useMutation({
     mutationFn: d => api.put('/po-requests/' + request.id, d),
     onSuccess: () => { toast.success('✅ Details saved — Procurement will see them automatically!'); onSaved(); },
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
-  const canSubmit = isAdvance
-    ? !mutation.isPending && form.supplier_ref.trim() && form.zoho_po_number.trim()
-    : !mutation.isPending && form.zoho_po_number.trim();
+  const canSubmit = !mutation.isPending && form.supplier_ref.trim() && form.zoho_po_number.trim();
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-sm">
         <div className="modal-header">
           <h2>📋 Fill PO Details</h2>
@@ -1241,18 +1274,28 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
               Requested by {request.requested_by} on {fmtDate(request.requested_at)}
             </div>
           </div>
-          {isAdvance && (
-            <div className="form-group">
-              <label className="label">Supplier PI Number <span className="req">*</span></label>
-              <input className="input" value={form.supplier_ref}
-                onChange={e=>set('supplier_ref',e.target.value)}
-                placeholder="e.g. PI-2026-00123"
-                style={{borderColor:!form.supplier_ref?'var(--amber,#d97706)':undefined}}/>
-              <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
-                The Proforma Invoice number provided by the supplier
-              </div>
-            </div>
-          )}
+          <div className="form-group">
+            <label className="label">Supplier PI Number <span className="req">*</span>
+              {procurementPi && <span style={{marginLeft:6,fontSize:10,color:'var(--green)',fontWeight:600}}>✅ entered by Procurement</span>}
+            </label>
+            <input className="input" value={form.supplier_ref}
+              onChange={e=>set('supplier_ref',e.target.value)}
+              readOnly={!!procurementPi}
+              placeholder="e.g. PI-2026-00123"
+              style={{
+                borderColor:!form.supplier_ref?'var(--amber,#d97706)':'var(--green)',
+                background: procurementPi ? 'var(--surface2)' : undefined,
+                cursor: procurementPi ? 'not-allowed' : undefined,
+              }}/>
+            {piFile && (
+              <a href={piFile.download_url} target="_blank" rel="noreferrer"
+                style={{display:'inline-flex',alignItems:'center',gap:4,marginTop:4,
+                  fontSize:11,color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                📥 Download PI ({piFile.original_name})
+              </a>
+            )}
+            {!procurementPi && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>The Proforma Invoice number provided by the supplier</div>}
+          </div>
           <div className="form-group" style={{marginBottom:0}}>
             <label className="label">Zoho PO Number <span className="req">*</span></label>
             <input className="input" value={form.zoho_po_number}
@@ -1376,7 +1419,7 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
     : selectedSupplierSummary ? [selectedSupplierSummary] : supplierSummaries.slice(0, 1);
 
   return (
-    <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+    <div className="overlay">
       <div className="modal modal-lg">
         <div className="modal-header">
           <div>
@@ -1646,7 +1689,8 @@ export default function FinancePage() {
   const custAdvance = custQueue.filter(o =>
     (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
     (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
-    o.customer_payment_status !== 'paid'
+    o.customer_payment_status !== 'paid' &&
+    (o.customer_payment_status === 'payment_recorded' || o.status === 'payment_approval' || (Number(o.balance_due) || 0) > 0.009)
   );
   const custNet     = custQueue.filter(o =>
     o.status !== 'payment_approval' &&
@@ -2343,7 +2387,7 @@ export default function FinancePage() {
       })()}
       {/* Release Payment Confirmation */}
       {releaseConfirm && (
-        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setReleaseConfirm(null)}>
+        <div className="overlay">
           <div className="modal modal-sm">
             <div className="modal-header">
               <h2>🚀 Release</h2>
@@ -2376,7 +2420,7 @@ export default function FinancePage() {
         </div>
       )}
       {supplierReleaseConfirm && (
-        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setSupplierReleaseConfirm(null)}>
+        <div className="overlay">
           <div className="modal modal-sm">
             <div className="modal-header">
               <h2>🚀 Release Supplier PO</h2>
@@ -2411,7 +2455,7 @@ export default function FinancePage() {
         </div>
       )}
       {supplierNetReleaseConfirm && (
-        <div className="overlay" onClick={e=>e.target===e.currentTarget&&setSupplierNetReleaseConfirm(null)}>
+        <div className="overlay">
           <div className="modal modal-sm">
             <div className="modal-header">
               <h2>🚀 Release Supplier Net Payment</h2>

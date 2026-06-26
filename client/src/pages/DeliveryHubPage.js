@@ -1293,13 +1293,15 @@ export default function DeliveryHubPage() {
                   return soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status));
                 });
                 const LINE_ICON = {
-                  delivered_hub:   {ic:'📦',l:'At Hub',       c:'var(--teal,#0d9488)'},
-                  ready_to_ship:   {ic:'✅',l:'Ready',         c:'var(--green)'},
-                  grn_partial:     {ic:'⚠', l:'Partial GRN',  c:'var(--amber,#d97706)'},
-                  grn_rejected:    {ic:'❌',l:'Rejected',      c:'var(--red)'},
-                  partial_shipped: {ic:'🔄',l:'Bal. Pending',  c:'var(--purple,#7c3aed)'},
-                  shipped:         {ic:'🚚',l:'Shipped Out',   c:'var(--text3)'},
-                  procurement:     {ic:'🛒',l:'Procurement',   c:'var(--text3)'},
+                  delivered_hub:   {ic:'📦',l:'At Hub',        c:'var(--teal,#0d9488)'},
+                  ready_to_ship:   {ic:'✅',l:'Ready',          c:'var(--green)'},
+                  grn_partial:     {ic:'⚠', l:'Partial GRN',   c:'var(--amber,#d97706)'},
+                  grn_rejected:    {ic:'❌',l:'Rejected',       c:'var(--red)'},
+                  partial_shipped: {ic:'🔄',l:'Bal. Pending',   c:'var(--purple,#7c3aed)'},
+                  shipped:         {ic:'🚚',l:'Shipped Out',    c:'var(--text3)'},
+                  procurement:     {ic:'🛒',l:'Procurement',    c:'var(--text3)'},
+                  negotiating:     {ic:'🚚',l:'In Transit',     c:'var(--accent)'},
+                  in_transit:      {ic:'🚚',l:'In Transit',     c:'var(--accent)'},
                 };
 
                 // Only show standalone items that have actually reached hub-side statuses.
@@ -1336,8 +1338,8 @@ export default function DeliveryHubPage() {
                               <span className="mono" style={{fontSize:11,color:'var(--text3)'}}>
                                 {so.internal_po_no||so.id}
                               </span>
-                              {so.shipper_id&&<span style={{fontSize:11,color:'var(--accent)',fontWeight:600}}>🚚 {shipperNameFor(so.shipper_id)}</span>}
-                              {so.tracking_no&&<span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>AWB {so.tracking_no}</span>}
+                              {so.shipper_id&&<span style={{fontSize:13,color:'var(--accent)',fontWeight:800,letterSpacing:'0.03em',textTransform:'uppercase',padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',border:'1px solid var(--accent)44'}}>🚚 {shipperNameFor(so.shipper_id)}</span>}
+                              {so.tracking_no&&<span style={{fontSize:13,color:'var(--teal,#0d9488)',fontWeight:800,fontFamily:'monospace',padding:'2px 8px',borderRadius:6,background:'var(--teal-lt,#f0fdfa)',border:'1px solid var(--teal,#0d9488)44'}}>AWB {so.tracking_no}</span>}
                               {so.ship_load_date&&<span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>Load {so.ship_load_date}</span>}
                             </div>
                             <div style={{display:'flex',gap:5,flexWrap:'wrap',alignItems:'center'}}>

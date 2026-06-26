@@ -151,6 +151,8 @@ const inputStyle = {
 function AllocationModal({ order, suppliers, inventoryItems, customers=[], enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
   const [poRequests, setPoRequests] = React.useState({}); // lineItemId → 'idle'|'sending'|'sent'
+  const [supplierPiInputs, setSupplierPiInputs] = React.useState({}); // supplierId → PI string entered by procurement
+  const [supplierPiFiles, setSupplierPiFiles] = React.useState({}); // supplierId → File object for PI upload
   const allocRef = React.useRef({});
   // Fulfilled PO requests for this order — fetched on mount so defaultAlloc can pre-fill
   const [fulfilledPOReqs, setFulfilledPOReqs] = React.useState([]);
@@ -394,31 +396,65 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       toast.error('No supplier items selected');
       return;
     }
+    const piNumber = (supplierPiInputs[data.supplier_id] || '').trim();
+    if (!piNumber) {
+      toast.error('Please enter the Supplier PI Number before sending');
+      return;
+    }
+    const piFile = supplierPiFiles[data.supplier_id] || null;
     setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sending'}), r));
     try {
       const poNotes = supplierPayload.payment_terms_change_reason
         ? `[Payment terms changed: ${supplierPayload.payment_terms_change_reason}]${supplierPayload.notes ? '\n' + supplierPayload.notes : ''}`
         : supplierPayload.notes || '';
+      const isAdvance = supplierPayload.payment_terms_type==='advance'||supplierPayload.payment_terms_type==='split';
       const po = await api.post('/orders/'+order.id+'/po', {
         ...supplierPayload,
         supplier_name: supName(data.supplier_id),
         notes: poNotes,
+        supplier_ref: piNumber,
       });
-      await api.post('/po-requests', {
-        order_id: order.id,
-        supplier_id: data.supplier_id,
-        supplier_order_id: po.data?.id || data._existing_po_id || '',
-        supplier_name: supName(data.supplier_id),
-        order_ref: order.po_number || order.id,
-        payment_terms_type: supplierPayload.payment_terms_type||'net',
+      const poId = po.data?.id || data._existing_po_id || '';
+
+      // Upload PI file if provided
+      if (piFile && poId) {
+        try {
+          const fd = new FormData();
+          fd.append('file', piFile);
+          fd.append('entity_type', 'supplier_order');
+          fd.append('entity_id', poId);
+          fd.append('field_name', 'supplier_pi');
+          await api.post('/files', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        } catch(_) {}
+      }
+
+      if (!isAdvance) {
+        // Net terms → send to Finance PO Requests tab as before
+        await api.post('/po-requests', {
+          order_id: order.id,
+          supplier_id: data.supplier_id,
+          supplier_order_id: poId,
+          supplier_name: supName(data.supplier_id),
+          order_ref: order.po_number || order.id,
+          payment_terms_type: supplierPayload.payment_terms_type||'net',
+          supplier_ref: piNumber,
+        });
+        toast.success('PO Request sent to Finance.');
+      } else {
+        // Advance/split → PI saved directly on supplier order; Finance sees it in Supplier Advance tab
+        toast.success('PO raised with Supplier PI — Finance will pay from Supplier Advance tab.');
+      }
+
+      // Update alloc state so supplier_ref is reflected (clears missingPI gate)
+      setAlloc(prev => {
+        const next = { ...prev };
+        supplierItemIds.forEach(id => {
+          if (next[id]) next[id] = { ...next[id], supplier_ref: piNumber };
+        });
+        return next;
       });
       setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sent'}), r));
       qc.invalidateQueries(['orders']);
-      toast.success(
-        supplierPayload.payment_terms_type==='advance'||supplierPayload.payment_terms_type==='split'
-          ? 'PO Request and Supplier Advance sent to Finance.'
-          : 'PO Request sent to Finance.'
-      );
     } catch(e) {
       setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'idle'}), r));
       toast.error(e.response?.data?.error||'Failed to send request');
@@ -468,8 +504,11 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
         <div className="modal-header">
           <div><h2>{readOnly ? '👁 PO Allocation (View) — ' : '📋 PO Allocation — '}{order.id}</h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              Assign each component to a supplier. One PO will be raised per supplier automatically.
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:4}}>
+              {order.enquiry_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {order.enquiry_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              {order.quote_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>QT: {order.quote_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>Order: {order.id}</span>
+              {order.po_number && <><span style={{fontSize:11,color:'var(--text3)'}}>· PO:</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,color:'var(--text2)'}}>{order.po_number}</span></>}
             </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
@@ -514,7 +553,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                   <th style={{color:'var(--teal,#0d9488)'}}>★ Sourced From</th>
                   <th style={{color:'var(--teal,#0d9488)'}}>Sourced Price</th>
                   <th>Assign Supplier <span style={{color:'var(--red)'}}>*</span></th>
-                  <th>Supplier PI / Zoho PO</th>
+                  <th>Supplier PI / Send PO</th>
                   <th>Payment Terms</th>
                 </tr>
               </thead>
@@ -607,44 +646,59 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                           </div>
                         )}
                       </td>
-                      {/* Supplier PI (advance) / Zoho PO (net/split) */}
-                      <td style={{minWidth:160}}>
-                        <div>
-                          {(a.payment_terms_type==='advance'||a.payment_terms_type==='split') ? (
-                            <>
-                              <input className="input" value={a.supplier_ref||''} readOnly
+                      {/* Supplier PI + Send PO Request */}
+                      <td style={{minWidth:200}}>
+                        {a.supplier_id && (() => {
+                          const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
+                          const alreadySent = poRequests[li.id]==='sent';
+                          const sending = poRequests[li.id]==='sending';
+                          const suppId = a.supplier_id;
+                          // After sent: show PI and status
+                          if (alreadySent) {
+                            return (
+                              <div style={{fontSize:10,fontWeight:600}}>
+                                {isAdv
+                                  ? <span style={{color:'var(--green)'}}>✅ PI saved — Finance pays from Advance tab</span>
+                                  : <span style={{color:'var(--green)'}}>✅ PO Request sent</span>}
+                                {a.supplier_ref && <div className="mono" style={{marginTop:2,color:'var(--green)',fontWeight:700}}>{a.supplier_ref}</div>}
+                              </div>
+                            );
+                          }
+                          const piVal = supplierPiInputs[suppId] !== undefined ? supplierPiInputs[suppId] : (a.supplier_ref || '');
+                          const piFile = supplierPiFiles[suppId] || null;
+                          return (
+                            <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                              <input className="input" value={piVal}
+                                onChange={e=>setSupplierPiInputs(p=>({...p,[suppId]:e.target.value}))}
                                 placeholder="Supplier PI No. *"
-                                style={{fontSize:11,borderColor:!a.supplier_ref?'var(--amber,#d97706)':'var(--green)',background:'var(--surface2)',cursor:'not-allowed'}}/>
-                              {!a.supplier_ref&&<div style={{fontSize:10,color:'var(--amber,#d97706)',marginTop:2}}>⚠ Supplier PI required</div>}
-                              {a.supplier_id && !a.supplier_ref && (
-                                poRequests[li.id]==='sent'
-                                  ? <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600}}>⏳ Waiting for Finance…</div>
-                                  : <button className="btn btn-xs"
-                                      style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                      disabled={poRequests[li.id]==='sending'}
-                                      onClick={()=>sendFinanceRequest(li.id, a)}>
-                                      {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Send PO Request'}
-                                    </button>
+                                style={{fontSize:11,borderColor:!piVal?'var(--amber,#d97706)':undefined}}/>
+                              <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:10,color:'var(--text2)'}}>
+                                <input type="file" accept="application/pdf,image/*"
+                                  style={{display:'none'}}
+                                  onChange={e=>{
+                                    const f = e.target.files?.[0];
+                                    if(f) setSupplierPiFiles(p=>({...p,[suppId]:f}));
+                                  }}/>
+                                <span style={{padding:'3px 8px',borderRadius:4,border:'1px solid var(--border)',background:'var(--surface2)',fontSize:11}}>
+                                  📎 {piFile ? piFile.name : 'Upload PI'}
+                                </span>
+                              </label>
+                              {!isAdv && a.zoho_po_number && (
+                                <span className="mono" style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✓ {a.zoho_po_number}</span>
                               )}
-                            </>
-                          ) : (
-                            <>
-                              {a.zoho_po_number
-                                ? <span className="mono" style={{fontSize:11,color:'var(--green)',fontWeight:600}}>✓ {a.zoho_po_number}</span>
-                                : <span style={{fontSize:10,color:'var(--text3)'}}>Zoho PO via Finance</span>}
-                              {a.supplier_id && !a.zoho_po_number && (
-                                poRequests[li.id]==='sent'
-                                  ? <div style={{marginTop:4,fontSize:10,color:'var(--accent)',fontWeight:600}}>⏳ Waiting for Finance…</div>
-                                  : <button className="btn btn-xs"
-                                      style={{marginTop:4,fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                      disabled={poRequests[li.id]==='sending'}
-                                      onClick={()=>sendFinanceRequest(li.id, a)}>
-                                      {poRequests[li.id]==='sending' ? '⏳ Sending…' : '📋 Send PO Request'}
-                                    </button>
-                              )}
-                            </>
-                          )}
-                        </div>
+                              {(!isAdv && !a.zoho_po_number) || isAdv ? (
+                                <button className="btn btn-xs"
+                                  style={{fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
+                                  disabled={sending || !piVal.trim() || !piFile}
+                                  title={!piVal.trim() ? 'Enter Supplier PI number' : !piFile ? 'Upload PI file first' : ''}
+                                  onClick={()=>sendFinanceRequest(li.id, a)}>
+                                  {sending ? '⏳ Sending…' : '📋 Send PO Request'}
+                                </button>
+                              ) : null}
+                            </div>
+                          );
+                        })()}
+                        {!a.supplier_id && <span style={{fontSize:10,color:'var(--text3)'}}>—</span>}
                       </td>
                       {/* Payment terms — read-only display */}
                       <td style={{minWidth:140}}>
@@ -696,16 +750,20 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
             </button>
             {/* Removed: Go to Finance before save was misleading — auto-navigates after Save */}
             {!readOnly && (() => {
-              const missingPI = (order.lineItems||[]).some(li => {
+              // Block save if any assigned supplier is missing PI number or PI file
+              const missingPiEntry = (order.lineItems||[]).some(li => {
                 const a = alloc[li.id];
                 if (!a?.supplier_id) return false;
-                const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
-                return isAdv && !a.supplier_ref;
+                const piVal = supplierPiInputs[a.supplier_id] !== undefined
+                  ? supplierPiInputs[a.supplier_id]
+                  : (a.supplier_ref || '');
+                const piFile = supplierPiFiles[a.supplier_id] || null;
+                return !piVal.trim() || !piFile;
               });
               return (
                 <button className="btn btn-primary"
-                  disabled={saving || Object.keys(grouped).length === 0 || missingPI}
-                  title={missingPI ? 'Supplier PI required for all assigned rows — send PO request to Finance' : undefined}
+                  disabled={saving || Object.keys(grouped).length === 0 || missingPiEntry}
+                  title={missingPiEntry ? 'Enter Supplier PI number and upload PI file for all suppliers' : ''}
                   onClick={handleSave}>
                   {saving ? 'Saving POs…' : `📤 ${Object.keys(grouped).length > 0 ? 'Save' : 'Generate'} PO Allocation`}
                 </button>
@@ -859,10 +917,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     paid_amount:po.confirmed_price||'', notes:''
   });
   const [submitting, setSubmitting] = useState(false);
-  const [paymentConfirmed, setPaymentConfirmed] = useState(
-    // Pre-set confirmed if payment was already recorded (payment_blocked cleared)
-    (po.payment_blocked===0||po.payment_blocked===false) && (po.payment_terms_type==='advance'||po.payment_terms_type==='split')
-  );
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const inventoryById = React.useMemo(() => {
     const map = {};
@@ -910,6 +964,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     toast('💰 Finance team has been notified. Check Finance tab for payment status.');
   };
   const canEditPaymentTerms = !readOnly && po.finance_returned === true && po.status === 'draft' && !isBlocked;
+  const needsFinanceResend = canEditPaymentTerms;
   const carrierOptions = (shippers && shippers.length)
     ? shippers
     : [
@@ -919,18 +974,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
         { id:'bluedart', name:'Blue Dart' },
         { id:'delhivery', name:'Delhivery' },
       ];
-  useEffect(() => {
-    if (!form.promised_delivery_date) return;
-    setForm(prev => {
-      if (prev.ship_load_date) return prev;
-      const d = new Date(prev.promised_delivery_date);
-      if (Number.isNaN(d.getTime())) return prev;
-      d.setDate(d.getDate() - 14);
-      const autoDate = d.toISOString().slice(0,10);
-      return { ...prev, ship_load_date: autoDate };
-    });
-  }, [form.promised_delivery_date]);
-
   const setStatusAndSave = async (nextStatus) => {
     const prevStatus = form.status;
     const nextForm = { ...form, status: nextStatus, confirmed_price: totalPurchasePrice || form.confirmed_price };
@@ -963,7 +1006,18 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     setSaving(true);
     try{
       await api.put('/supplier-orders/'+po.id,{...form, confirmed_price: totalPurchasePrice || form.confirmed_price});
-      toast.success('PO updated');
+      if (canEditPaymentTerms && form.payment_terms_type === 'net') {
+        await api.post('/po-requests', {
+          order_id: order.id,
+          supplier_id: po.supplier_id,
+          supplier_order_id: po.id,
+          supplier_name: supName(po.supplier_id),
+          order_ref: order.po_number || order.id,
+          payment_terms_type: 'net',
+          supplier_ref: form.supplier_ref || '',
+        });
+      }
+      toast.success(canEditPaymentTerms ? 'Sent back to Finance' : 'PO updated');
       qc.invalidateQueries(['orders']);
       onSaved();
     }catch(e){toast.error(e.response?.data?.error||'Failed');}
@@ -983,7 +1037,13 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
       <div className="modal modal-lg">
         <div className="modal-header">
           <div><h2>🛒 {po.internal_po_no||po.id}</h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>{supName(po.supplier_id)} · {order.id}</div>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:4}}>
+              {order.enquiry_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {order.enquiry_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              {order.quote_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>QT: {order.quote_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>Order: {order.id}</span>
+              {order.po_number && <><span style={{fontSize:11,color:'var(--text3)'}}>· PO:</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,color:'var(--text2)'}}>{order.po_number}</span></>}
+            </div>
+            <div style={{fontSize:12,color:'var(--text3)',marginTop:3}}>{supName(po.supplier_id)}</div>
           </div>
           <div style={{display:'flex',gap:8,alignItems:'center'}}>
             {readOnly&&<span style={{fontSize:11,fontWeight:700,color:'var(--accent)',
@@ -1007,16 +1067,11 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
         </div>
         <div className="modal-body">
           <fieldset disabled={readOnly || effectivePoStatus === 'received'} style={{border:'none',margin:0,padding:0,minWidth:0}}>
-          {(isBlocked||paymentConfirmed)&&(
+          {isBlocked&&(
             <div style={{padding:'12px 14px',borderRadius:'var(--r)',
-              background: paymentConfirmed ? 'var(--green-lt)' : 'var(--red-lt,#fef2f2)',
-              border: paymentConfirmed ? '2px solid var(--green)' : '2px solid var(--red)',
+              background:'var(--red-lt,#fef2f2)',
+              border:'2px solid var(--red)',
               marginBottom:14}}>
-              {paymentConfirmed ? (
-                <div style={{display:'flex',alignItems:'center',gap:10}}>
-                  <span style={{fontSize:13,fontWeight:700,color:'var(--green)'}}>✅ Advance Payment Confirmed</span>
-                </div>
-              ) : (
               <><div style={{fontSize:12,color:'var(--red)',fontWeight:600,marginBottom:10}}>
                 🔒 Advance payment required before supplier can be notified
               </div>
@@ -1080,7 +1135,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                         try{
                           await api.put('/supplier-orders/'+po.id,{status:'sent',payment_blocked:0});
                           toast.success('✅ Payment recorded — PO released!');
-                          setPaymentConfirmed(true);
                           setShowPayForm(false);
                           qc.invalidateQueries(['orders']);
                           onSaved();
@@ -1094,7 +1148,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                 </div>
               )}
               </>
-            )}
             </div>
           )}
           {/* PO Status — progress tracker only, action buttons moved to footer */}
@@ -1112,15 +1165,20 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             {poMode==='external'?(
               <div className="form-group" style={{marginBottom:0}}>
                 <label className="label">
-                  Zoho PO Number <span className="req">*</span>
-                  {form.zoho_po_number && <span style={{marginLeft:6,fontSize:10,color:'var(--green)',fontWeight:700}}>✓ Saved</span>}
+                  Zoho PO Number
+                  {form.zoho_po_number
+                    ? <span style={{marginLeft:6,fontSize:10,color:'var(--green)',fontWeight:700}}>✓ Filled by Finance</span>
+                    : <span style={{marginLeft:6,fontSize:10,color:'var(--amber,#d97706)',fontWeight:600}}>⏳ Awaiting Finance</span>}
                 </label>
-                <input className="input" value={form.zoho_po_number}
-                  onChange={e=>set('zoho_po_number',e.target.value)}
-                  placeholder="e.g. PO-20001"
+                <input className="input" value={form.zoho_po_number||''}
+                  readOnly
+                  placeholder="Filled by Finance"
                   style={{
-                    borderColor: form.zoho_po_number ? 'var(--green)' : 'var(--amber,#d97706)',
-                    background:  form.zoho_po_number ? 'var(--green-lt)' : undefined,
+                    borderColor: form.zoho_po_number ? 'var(--green)' : 'var(--border)',
+                    background: 'var(--surface2)',
+                    cursor: 'not-allowed',
+                    color: form.zoho_po_number ? undefined : 'var(--text3)',
+                    fontWeight: form.zoho_po_number ? 700 : undefined,
                   }}/>
               </div>
             ):(
@@ -1165,14 +1223,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Expected Delivery Date</label>
-              {(() => {
-                const todayStr = new Date().toISOString().slice(0,10);
-                return (
-                  <input className="input" type="date" value={form.promised_delivery_date}
-                    min={todayStr}
-                    onChange={e=>set('promised_delivery_date',e.target.value)}/>
-                );
-              })()}
+              <input className="input" type="date" value={form.promised_delivery_date}
+                onChange={e=>set('promised_delivery_date',e.target.value)}/>
             </div>
             {/* Payment Terms — show live supplier default for reference */}
             <div className="form-group" style={{marginBottom:0}}>
@@ -1191,7 +1243,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               })()}
               {canEditPaymentTerms && (
                 <div style={{fontSize:10,color:'var(--amber,#d97706)',fontWeight:700,marginBottom:4}}>
-                  Returned by Finance: update terms and save. Advance/split terms will be sent back to Finance automatically.
+                  Returned by Finance: update terms and send back to Finance.
                 </div>
               )}
               <select className="input" value={form.payment_terms_type} disabled={!canEditPaymentTerms}
@@ -1253,16 +1305,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                     <CarrierCombo value={form.shipper_id} carrierOptions={carrierOptions} onChange={v=>set('shipper_id',v)}/>
                     <div className="form-group" style={{marginBottom:0}}>
                       <label className="label">Ship Load Date <span style={{fontSize:10,color:'var(--text3)',fontWeight:400}}>(date supplier dispatched)</span></label>
-                      {(() => {
-                        const todayStr2 = new Date().toISOString().slice(0,10);
-                        const maxDate = form.promised_delivery_date || undefined;
-                        return (
-                          <input className="input" type="date" value={form.ship_load_date}
-                            min={todayStr2 > (form.ship_load_date || todayStr2) ? todayStr2 : undefined}
-                            max={maxDate}
-                            onChange={e=>set('ship_load_date',e.target.value)}/>
-                        );
-                      })()}
+                      <input className="input" type="date" value={form.ship_load_date}
+                        onChange={e=>set('ship_load_date',e.target.value)}/>
                     </div>
                   </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr',gap:10,marginTop:8}}>
@@ -1307,8 +1351,19 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             <button className="btn" onClick={onClose}>Cancel</button>
 
             {/* Status action buttons — one at a time based on current status */}
-            {!readOnly && form.status==='draft' && (
-              <button type="button" className="btn btn-primary" disabled={saving}
+            {!readOnly && needsFinanceResend && (
+              <button type="button" className="btn btn-primary"
+                disabled={saving || !form.supplier_ref?.trim()}
+                title={!form.supplier_ref?.trim() ? 'Supplier reference is required' : ''}
+                style={{fontSize:12,fontWeight:700}}
+                onClick={save}>
+                💰 Send to Finance
+              </button>
+            )}
+            {!readOnly && !needsFinanceResend && form.status==='draft' && (
+              <button type="button" className="btn btn-primary"
+                disabled={saving || !form.zoho_po_number?.trim()}
+                title={!form.zoho_po_number?.trim() ? 'Enter Zoho PO Number first' : ''}
                 style={{fontSize:12,
                   background: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,
                   borderColor: isAdvanceOrSplit && form.supplier_ref?.trim() ? 'var(--green)' : undefined,

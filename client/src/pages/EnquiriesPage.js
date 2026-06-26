@@ -26,10 +26,13 @@ function EnquiryDetailModal({ enq, onClose, customers, suppliers, linecards, use
         <div className="modal-header">
           <div>
             <h2>{enq.id} — {custName(enq.customer_id)}</h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:4}}>
+              <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>ENQ: {enq.id}</span>
+              {enq.sourcing_no && <><span style={{fontSize:11,color:'var(--text3)'}}>→</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>SRC: {enq.sourcing_no}</span></>}
+            </div>
+            <div style={{fontSize:12,color:'var(--text3)',marginTop:4}}>
               Created {fmtDateTime(enq.created_at)} · Priority: <strong>{enq.priority}</strong>
               {enq.buying_type && <> · Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></>}
-              {enq.sourcing_no && <> · Sourcing: <span className="mono" style={{color:'var(--accent)'}}>{enq.sourcing_no}</span></>}
             </div>
           </div>
           <div className="flex gap-8"><StatusBadge s={enq.status} /><button className="close-x" onClick={onClose}>×</button></div>

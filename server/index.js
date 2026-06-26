@@ -1554,7 +1554,9 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
   // If status is being set to 'active' but a live order already exists for this exact quote, use 'order_created' instead.
   // Split quotes share an enquiry_id, so enquiry-level order checks would incorrectly lock later split quotes.
   let resolvedQuoteStatus = d.status ?? old.status ?? 'active';
-  if (resolvedQuoteStatus === 'active') {
+  // Auto-close quote when customer rejects it
+  if (d.customer_response === 'rejected') resolvedQuoteStatus = 'closed';
+  else if (resolvedQuoteStatus === 'active') {
     const liveOrder = await getAsync("SELECT id FROM orders WHERE quote_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
     if (liveOrder) resolvedQuoteStatus = 'order_created';
   }
@@ -1580,6 +1582,10 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
       nowStr(),
       req.params.id,
     ]);
+  // When quote is rejected → also close the linked enquiry
+  if (d.customer_response === 'rejected' && old.enquiry_id) {
+    await runAsync("UPDATE enquiries SET status='closed', updated_at=? WHERE id=? AND status NOT IN ('closed','cancelled')", [nowStr(), old.enquiry_id]);
+  }
   saveNow(); res.json({ ok: true });
 }));
 
@@ -2798,9 +2804,12 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   customers.forEach(c => { custMap[c.id] = c; });
   const filtered = orders.filter(o => {
     if (o.customer_payment_status === 'paid') return false;
+    // Returned from Finance: keep it visible/editable in Orders only until the
+    // order team explicitly sends it back with status='payment_approval'.
+    if (o.status === 'cust_payment_update') return false;
     const SUPPLIER_ONLY_STATUSES = ['sourcing', 'enquiry', 'quote'];
     if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
-    if (o.status === 'payment_approval' || o.status === 'waiting_for_payment' || o.status === 'cust_payment_update') return true;
+    if (o.status === 'payment_approval' || o.status === 'waiting_for_payment') return true;
     return (o.payment_terms || '').length > 0;
   });
   // Fetch all order items in one query then group by order_id
@@ -2854,19 +2863,28 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const healPromises = [];
   for (const o of enriched) {
     const releaseDueTotal = requiredCustomerPaymentTotal(o._computed_total, o.payment_terms);
-    if (releaseDueTotal > 0 && o._computed_paid >= releaseDueTotal && o.customer_payment_status === 'payment_approval') {
+    const releasePaid = releaseDueTotal > 0 && (o._computed_paid + 0.01) >= releaseDueTotal;
+    const fullPaid = o._computed_total > 0 && (o._computed_paid + 0.01) >= o._computed_total;
+    if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
       healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
+    } else if (fullPaid && !isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'paid') {
+      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='paid' WHERE id=?", [o.id]).catch(()=>{}));
     }
   }
   if (healPromises.length) await Promise.all(healPromises);
   const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => {
     // Reflect healed status in response immediately without waiting for next request
     const releaseDueTotal = requiredCustomerPaymentTotal(_computed_total, o.payment_terms);
-    if (releaseDueTotal > 0 && _computed_paid >= releaseDueTotal && o.customer_payment_status === 'payment_approval') {
+    const releasePaid = releaseDueTotal > 0 && (_computed_paid + 0.01) >= releaseDueTotal;
+    const fullPaid = _computed_total > 0 && (_computed_paid + 0.01) >= _computed_total;
+    if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
       return { ...o, customer_payment_status: 'payment_recorded' };
     }
+    if (fullPaid && !isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'paid') {
+      return { ...o, customer_payment_status: 'paid' };
+    }
     return o;
-  });
+  }).filter(o => o.customer_payment_status !== 'paid');
   res.json(result);
 }));
 
@@ -3016,7 +3034,8 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
     "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
     [req.params.order_id]
   );
-  const fullPaid = total > 0 && (parseFloat(paid?.total)||0) >= total;
+  const paidTotal = parseFloat(paid?.total) || 0;
+  const fullPaid = total > 0 && (paidTotal + 0.01) >= total;
   // Only the FIRST release moves the order from its payment-stage into 'open' (so it can be sent
   // to Procurement). Once it has already progressed to procurement or beyond, a later installment
   // must NOT drag it back to 'open' — that would re-show "Send to Procurement" on an order that's
@@ -3078,8 +3097,8 @@ app.post('/api/po-requests', auth, asyncRoute(async (req, res) => {
     const existing = await getAsync("SELECT id FROM po_requests WHERE order_id=? AND supplier_id=? AND status='pending'",
       [d.order_id, d.supplier_id]);
     if (existing) {
-      await runAsync(`UPDATE po_requests SET supplier_order_id=?,supplier_name=?,order_ref=?,payment_terms_type=? WHERE id=?`,
-        [d.supplier_order_id||'', d.supplier_name||'', d.order_ref||'', d.payment_terms_type||'net', existing.id]);
+      await runAsync(`UPDATE po_requests SET supplier_order_id=?,supplier_name=?,order_ref=?,payment_terms_type=?,supplier_ref=COALESCE(NULLIF(?,\'\'),supplier_ref) WHERE id=?`,
+        [d.supplier_order_id||'', d.supplier_name||'', d.order_ref||'', d.payment_terms_type||'net', d.supplier_ref||'', existing.id]);
       return res.json({ ok: true, id: existing.id, already_exists: true });
     }
   } catch(_) {}
@@ -3092,7 +3111,7 @@ app.post('/api/po-requests', auth, asyncRoute(async (req, res) => {
     [id, d.order_id, d.supplier_order_id||'', d.supplier_id,
      d.supplier_name||'', d.order_ref||'',
      'pending', req.session.user.name, now,
-     d.notes||'', '', '', '', '', d.payment_terms_type||'net']);
+     d.notes||'', '', '', d.supplier_ref||'', '', d.payment_terms_type||'net']);
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), d.order_id, 'PO request sent to Finance for supplier: '+(d.supplier_name||d.supplier_id),
      req.session.user.name, '', now]); } catch(_) {}
@@ -3108,10 +3127,12 @@ app.put('/api/po-requests/:id', auth, asyncRoute(async (req, res) => {
   const isAdvance = (pr.payment_terms_type==='advance'||pr.payment_terms_type==='split');
   if (!d.zoho_po_number?.trim())
     return res.status(400).json({ error: 'Zoho PO number is required' });
-  if (isAdvance && !d.supplier_ref?.trim())
-    return res.status(400).json({ error: 'Supplier PI number is required for advance payment terms' });
+  // supplier_ref required: either supplied now or already on the po_request (entered by Procurement)
+  const resolvedRef = d.supplier_ref?.trim() || pr.supplier_ref?.trim() || '';
+  if (!resolvedRef)
+    return res.status(400).json({ error: 'Supplier PI number is required' });
   const now = nowStr();
-  const supplierRef = d.supplier_ref?.trim() || '';
+  const supplierRef = resolvedRef;
   await runAsync(`UPDATE po_requests SET status='fulfilled', fulfilled_by=?, fulfilled_at=?,
        supplier_ref=?, zoho_po_number=? WHERE id=?`,
     [req.session.user.name, now, supplierRef, d.zoho_po_number.trim(), req.params.id]);
@@ -3361,12 +3382,11 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
   // — removing it from the queue — once the PO is fully paid.
   const nextQueueStatus = fullBalance <= 0.009 ? 'paid' : 'pending';
   const now = nowStr();
-  // First release moves a blocked PO into 'po_issued' so Procurement can manage it. A LATER
-  // installment release must NOT reset the PO status — that would drag the PO back from
-  // confirmed/in-transit/etc. to 'po_issued'. Only update status while still blocked.
+  // Finance release only unlocks the PO. Procurement still marks the PO as issued, so the
+  // "PI Received — Mark PO Issued" action appears only after payment has been released.
   const wasBlocked = so.payment_blocked === 1 || so.payment_blocked === true;
   if (wasBlocked) {
-    await runAsync("UPDATE supplier_orders SET payment_blocked=0, status='po_issued' WHERE id=?", [fq.supplier_order_id]);
+    await runAsync("UPDATE supplier_orders SET payment_blocked=0 WHERE id=?", [fq.supplier_order_id]);
   }
   // Clear the Finance "awaiting release" flag; set 'paid' only when fully paid (removes from queue).
   try { await runAsync("ALTER TABLE finance_queue ADD COLUMN release_pending INTEGER DEFAULT 0"); } catch(_) {}

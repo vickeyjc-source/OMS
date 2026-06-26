@@ -249,8 +249,10 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
         {/* Header */}
         <div className="id-header">
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 3 }}>
-              Item #{itemIdx + 1} — {enq.id}
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginBottom:4}}>
+              <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {enq.id}</span>
+              {enq.sourcing_no && <><span style={{fontSize:11,color:'var(--text3)'}}>→</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>SRC: {enq.sourcing_no}</span></>}
+              <span style={{fontSize:10,color:'var(--text3)'}}>· Item #{itemIdx + 1}</span>
             </div>
             <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', letterSpacing: '-.02em', marginBottom: 4 }}>
               {item.component}
@@ -640,7 +642,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           duty_pct:            hasData ? (ex.duty_pct     ?? '') : '',
           cess_pct:            hasData ? (ex.cess_pct     ?? '') : '',
           clearance_fixed_inr: hasData ? (ex.clearance_fixed_inr ?? '') : '',
-          margin_pct:          hasValue(ex.margin_pct) ? ex.margin_pct : DEFAULT_MARGIN_PCT,
+          margin_pct:          hasValue(ex.margin_pct) ? ex.margin_pct : '',
           bank_fixed_foreign:  isIntl  ? (ex.bank_fixed_usd ?? '') : '',
           bank_fixed_inr:     !isIntl  ? (ex.bank_fixed_usd ?? '') : '',
           // ALWAYS preserve sent_to_enquiry flag regardless of supplier
@@ -655,7 +657,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         };
       }
       // No sourcing row in DB yet — blank slate
-      return { id: null, enquiry_item_id: item.id, supplier_id: '', sourced_price: '', sourced_currency: 'INR', src_price_foreign: '', exchange_rate: '', hsn_code: '', availability: '', lead_time: '', notes: '', item_status: 'ready', freight_pct: '', insurance_pct: '', duty_pct: '', cess_pct: '', bank_fixed_foreign: '', bank_fixed_inr: '', clearance_fixed_inr: '', margin_pct: DEFAULT_MARGIN_PCT, preferred_delivery_date: item.preferred_delivery_date || '', _transport: '', _packaging: '', _buffer: '', _gst_pct: '', src_dc: '', delivery_promise_date: '', sent_to_enquiry: 0, sent_to_enquiry_note: '' };
+      return { id: null, enquiry_item_id: item.id, supplier_id: '', sourced_price: '', sourced_currency: 'INR', src_price_foreign: '', exchange_rate: '', hsn_code: '', availability: '', lead_time: '', notes: '', item_status: 'ready', freight_pct: '', insurance_pct: '', duty_pct: '', cess_pct: '', bank_fixed_foreign: '', bank_fixed_inr: '', clearance_fixed_inr: '', margin_pct: '', preferred_delivery_date: item.preferred_delivery_date || '', _transport: '', _packaging: '', _buffer: '', _gst_pct: '', src_dc: '', delivery_promise_date: '', sent_to_enquiry: 0, sent_to_enquiry_note: '' };
     })
   );
 
@@ -1164,9 +1166,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                   const isStockIntl = stCur !== 'INR';
                   const price = hit?.target_price ? String(hit.target_price) : '';
                   if (isStockIntl) {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:stCur, src_price_foreign:price, exchange_rate:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   } else {
-                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                    setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', sourced_price:price, src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                   }
                   setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
                   setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });
@@ -1175,9 +1177,9 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 const sup = suppliers.find(s => s.id === supId);
                 const st  = sup?.type || 'domestic';
                 if (st === 'international') {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:sup?.currency&&sup.currency!=='INR'?sup.currency:'USD', sourced_price:'', src_price_foreign:'', exchange_rate:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 } else {
-                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', sourced_price:'', margin_pct:DEFAULT_MARGIN_PCT, freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
+                  setSrcRows(p => p.map((r,i) => i===idx ? {...r, supplier_id:supId, sourced_currency:'INR', src_price_foreign:'', exchange_rate:'', insurance_pct:'', duty_pct:'', cess_pct:'', bank_fixed_foreign:'', bank_fixed_inr:'', clearance_fixed_inr:'', sourced_price:'', margin_pct:'', freight_pct:'', lead_time:'', hsn_code:'', notes:''} : r));
                 }
                 setQuoteRows(p => p.map((r,i) => i===idx ? {...r, quote_currency:'INR', quote_price:'', tax_rate:''} : r));
                 setDomesticMarginMode(p => { const n={...p}; delete n[idx]; return n; });

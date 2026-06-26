@@ -271,6 +271,12 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
             <div style={{display:'flex',alignItems:'baseline',gap:10,flexWrap:'wrap'}}>
               <h2 style={{marginBottom:0}}>{order.id}</h2>
             </div>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:4}}>
+              {order.enquiry_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {order.enquiry_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              {order.quote_no && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>QT: {order.quote_no}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+              <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>Order: {order.id}</span>
+              {order.po_number && <><span style={{fontSize:11,color:'var(--text3)'}}>· PO:</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,color:'var(--text2)'}}>{order.po_number}</span></>}
+            </div>
             {perms.canSeeCustomer!==false && (
               <div style={{marginTop:4,display:'flex',alignItems:'baseline',gap:8}}>
                 <span style={{fontSize:18,fontWeight:800,color:'var(--text)'}}>{custName(order.customer_id)}</span>

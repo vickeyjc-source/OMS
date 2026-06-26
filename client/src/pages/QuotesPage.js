@@ -210,7 +210,16 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     if (pendingResponse === savedResponse) { toast.success('Response already saved'); return; }
     saveMutation.mutate(
       { customer_response: pendingResponse, customer_response_notes: responseNotes },
-      { onSuccess: () => { setSavedResponse(pendingResponse); toast.success('Response saved'); } }
+      { onSuccess: () => {
+          setSavedResponse(pendingResponse);
+          if (pendingResponse === 'rejected') {
+            toast.success('Quote rejected — moved to Closed');
+            onClose();
+          } else {
+            toast.success('Response saved');
+          }
+        }
+      }
     );
   };
 
@@ -226,6 +235,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             {quote.revision > 1 && <span style={{fontSize:11,padding:'1px 7px',borderRadius:99,background:'var(--accent-lt)',color:'var(--accent)',fontWeight:600}}>Rev {quote.revision}</span>}
             <StatusBadge s={quote.status}/>
             {sentToCustomer && <span style={{fontSize:11,padding:'1px 8px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:600}}>✓ Sent to customer</span>}
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:6}}>
+            {quote.enquiry_id && <><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {quote.enquiry_id}</span><span style={{fontSize:11,color:'var(--text3)'}}>→</span></>}
+            <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>QT: {quote.quote_no}</span>
           </div>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <span style={{fontSize:12,color:'var(--text2)'}}>{custObj?.name || quote.customer_id}</span>
