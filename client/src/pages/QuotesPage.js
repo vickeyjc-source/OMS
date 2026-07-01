@@ -85,7 +85,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
 
   const custObj = customers.find(c => c.id === quote.customer_id);
 
-  const { data: lineData } = useQuery({
+  const { data: lineData, isLoading: linesLoading, isError: linesErrored } = useQuery({
     queryKey: ['quote-lines', quote.id],
     queryFn: () => api.get('/quotes/' + quote.id + '/lineitems').then(r => r.data),
   });
@@ -315,8 +315,12 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
           {/* Tab 0: Line Items */}
           {tabIdx === 0 && (
             <div>
-              {items.length === 0
+              {linesLoading
                 ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>Loading items…</div>
+                : linesErrored
+                ? <div style={{padding:30,textAlign:'center',color:'var(--danger, #dc2626)'}}>Failed to load items. Please try again.</div>
+                : items.length === 0
+                ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>No items found for this quote.</div>
                 : <div style={{overflowX:'auto'}}>
                     <table className="table">
                       <thead><tr>

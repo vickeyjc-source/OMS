@@ -1490,26 +1490,24 @@ app.get('/api/quotes/:id/lineitems', auth, asyncRoute(async (req, res) => {
   const items   = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [q.enquiry_id]);
   const sourcing= await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [q.enquiry_id]);
 
-  // Parse quote prices from the notes field as fallback
+  // Parse quote prices from the notes field as a fallback only (never used to decide
+  // which items belong to the quote — component names/notes can contain colons, e.g.
+  // URLs in LINE NOTE text, which broke the old name-matching filter and dropped items).
   // Notes format: "ComponentName: Quote CUR 245 | Src CUR 220 | Qty 10\n..."
   const notePrices = {};
-  const noteItemNames = new Set();
   (q.notes || '').split('\n').forEach(line => {
     // Match: "COMPONENT: Quote INR 245 | ..."  or  "COMPONENT: Quote INR 245.50 | ..."
     const m = line.match(/^([^:]+):\s*Quote\s+([A-Z]+)\s+([\d.]+)/i);
     if (m) {
       const key = m[1].trim().toLowerCase();
       notePrices[key] = { price: parseFloat(m[3]), currency: m[2] };
-      noteItemNames.add(key);
     }
   });
 
   const lineItems = items.filter(item => {
     const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
-    const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
-    const key = item.component.toLowerCase();
-    if (noteItemNames.size > 0) return noteItemNames.has(key);
-    return (src.item_status || 'ready') === 'ready';
+    if (srcRows.length === 0) return true;
+    return srcRows.some(s => ['ready','quoted'].includes(s.item_status || 'ready'));
   }).map(item => {
     const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
     const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
