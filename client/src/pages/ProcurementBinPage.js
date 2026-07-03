@@ -150,9 +150,15 @@ const inputStyle = {
 // ── Allocation Matrix Modal ───────────────────────────────────────────────────
 function AllocationModal({ order, suppliers, inventoryItems, customers=[], enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
+  const { data: supplierPiDocs=[] } = useQuery({
+    queryKey:['supplier-pi-files', order.id],
+    queryFn:()=>api.get('/files', { params:{ entity_type:'supplier_order', field_name:'supplier_pi' } })
+      .then(r=>(r.data||[]).filter(f=>(order.supplierOrders||[]).some(so=>so.id===f.entity_id)))
+      .catch(()=>[]),
+  });
   const [poRequests, setPoRequests] = React.useState({}); // lineItemId → 'idle'|'sending'|'sent'
-  const [supplierPiInputs, setSupplierPiInputs] = React.useState({}); // supplierId → PI string entered by procurement
-  const [supplierPiFiles, setSupplierPiFiles] = React.useState({}); // supplierId → File object for PI upload
+  const [supplierPiInputs, setSupplierPiInputs] = React.useState({}); // lineItemId → PI string entered by procurement
+  const [supplierPiFiles, setSupplierPiFiles] = React.useState({}); // lineItemId → File object for PI upload
   const allocRef = React.useRef({});
   // Fulfilled PO requests for this order — fetched on mount so defaultAlloc can pre-fill
   const [fulfilledPOReqs, setFulfilledPOReqs] = React.useState([]);
@@ -163,9 +169,10 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       const forOrder = rows.filter(r => r.order_id === order.id);
       // Pre-fill fulfilled PI values
       setFulfilledPOReqs(forOrder.filter(r => r.status === 'fulfilled'));
-      // Restore "waiting" state for requests that were already sent but not yet fulfilled
-      const pending = forOrder.filter(r => r.status === 'pending');
-      if (pending.length) {
+      // Restore sent state for pending and fulfilled requests. A sent row's
+      // supplier stays locked even while another supplier group is incomplete.
+      const sentRequests = forOrder.filter(r => ['pending','fulfilled'].includes(r.status));
+      if (sentRequests.length) {
         // We need alloc to map supplier_id → itemId — defer until alloc initialises
         setTimeout(() => {
           setAlloc(prev => {
@@ -173,10 +180,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               const next = { ...prq };
               Object.entries(prev).forEach(([itemId, a]) => {
                 if (!a.supplier_id) return;
-                const hasPending = pending.some(r => r.supplier_id === a.supplier_id);
-                const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
-                const missingField = isAdv ? !a.supplier_ref : !a.zoho_po_number;
-                if (hasPending && missingField) next[itemId] = 'sent';
+                const hasSentRequest = sentRequests.some(r =>
+                  r.supplier_order_id
+                    ? r.supplier_order_id === a._existing_po_id
+                    : r.supplier_id === a.supplier_id
+                );
+                if (hasSentRequest) next[itemId] = 'sent';
               });
               return next;
             });
@@ -212,20 +221,6 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               if ((isAdv && fr.supplier_ref && a.supplier_ref !== fr.supplier_ref) ||
                   (fr.zoho_po_number && a.zoho_po_number !== fr.zoho_po_number)) {
                 next[itemId] = { ...a, supplier_ref: newRef, zoho_po_number: newZoho };
-                changed = true;
-              }
-            });
-            return changed ? next : prev;
-          });
-          // Clear awaiting state for items whose expected field is now filled
-          setPoRequests(prev => {
-            const next = { ...prev };
-            let changed = false;
-            Object.entries(allocRef.current).forEach(([itemId, a]) => {
-              const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
-              const filled = isAdv ? !!a.supplier_ref : !!a.zoho_po_number;
-              if (filled && next[itemId] === 'sent') {
-                delete next[itemId];
                 changed = true;
               }
             });
@@ -298,10 +293,11 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
         supplier_id:            resolvedSupplierId,
         zoho_po_number:         existing?.zoho_po_number || prevFulfilled?.zoho_po_number || '',
         buying_price_per_unit:  existing?.buying_price_per_unit || srcRow?.sourced_price || '',
-        confirmed_price:        existing?.confirmed_price ||
-                                  (srcRow?.sourced_price && li.qty
-                                    ? (parseFloat(srcRow.sourced_price)*li.qty).toFixed(2)
-                                    : ''),
+        // confirmed_price in allocation state is a LINE total. Never copy a
+        // multi-item PO's full total into every row or it multiplies on resave.
+        confirmed_price:        srcRow?.sourced_price && li.qty
+                                  ? (parseFloat(srcRow.sourced_price)*li.qty).toFixed(2)
+                                  : ((existing?.items||[]).length <= 1 ? (existing?.confirmed_price || '') : ''),
         confirmed_currency:     existing?.confirmed_currency || srcRow?.sourced_currency || 'INR',
         promised_delivery_date: existing?.promised_delivery_date || '',
         ...liveTerms,
@@ -312,6 +308,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
         _sourced_currency:      srcRow?.sourced_currency,
         _sourced_supplier_id:   srcRow?.supplier_id,
         _existing_po_id:        existing?.id,
+        _payment_blocked:       existing?.payment_blocked===1||existing?.payment_blocked===true,
       };
     });
     return a;
@@ -379,6 +376,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
 
     return {
       ...firstRow,
+      existing_po_id: firstRow._existing_po_id || '',
       supplier_id: supplierId,
       item_ids: itemIds,
       buying_price_per_unit: buyingPricePerUnit,
@@ -396,12 +394,14 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       toast.error('No supplier items selected');
       return;
     }
-    const piNumber = (supplierPiInputs[data.supplier_id] || '').trim();
+    const piNumber = (supplierPiInputs[itemId] !== undefined
+      ? supplierPiInputs[itemId]
+      : (data.supplier_ref || '')).trim();
     if (!piNumber) {
       toast.error('Please enter the Supplier PI Number before sending');
       return;
     }
-    const piFile = supplierPiFiles[data.supplier_id] || null;
+    const piFile = supplierPiFiles[itemId] || null;
     setPoRequests(r=>supplierItemIds.reduce((next, id)=>({...next,[id]:'sending'}), r));
     try {
       const poNotes = supplierPayload.payment_terms_change_reason
@@ -449,7 +449,11 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       setAlloc(prev => {
         const next = { ...prev };
         supplierItemIds.forEach(id => {
-          if (next[id]) next[id] = { ...next[id], supplier_ref: piNumber };
+          if (next[id]) next[id] = {
+            ...next[id],
+            supplier_ref: piNumber,
+            _payment_blocked: po.data?.payment_blocked===1||po.data?.payment_blocked===true,
+          };
         });
         return next;
       });
@@ -611,15 +615,41 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                       </td>
                       {/* Supplier select */}
                       <td style={{minWidth:160}}>
+                        {(()=>{
+                          const supplierLocked = poRequests[li.id]==='sent' || a._payment_blocked===true;
+                          return <>
                         <select className="input" value={a.supplier_id||''}
+                          disabled={supplierLocked}
+                          title={supplierLocked ? 'Supplier locked — already sent to Finance' : ''}
                           onChange={e=>{
                             const newSupId = e.target.value;
+                            const oldSupId = a.supplier_id;
+                            const matchingEntry = Object.entries(alloc).find(([itemId, row]) =>
+                              itemId !== li.id && row.supplier_id === newSupId
+                            );
+                            const matchingItemId = matchingEntry?.[0];
+                            const matchingRow = matchingEntry?.[1];
+                            if (newSupId !== oldSupId) {
+                              const sharedPi = matchingItemId && supplierPiInputs[matchingItemId] !== undefined
+                                ? supplierPiInputs[matchingItemId]
+                                : (matchingRow?.supplier_ref || '');
+                              const sharedFile = matchingItemId ? (supplierPiFiles[matchingItemId] || null) : null;
+                              setSupplierPiInputs(prev => ({ ...prev, [li.id]: sharedPi }));
+                              setSupplierPiFiles(prev => ({ ...prev, [li.id]: sharedFile }));
+                              setPoRequests(prev => ({ ...prev, [li.id]: 'idle' }));
+                            }
                             setAlloc(prev => {
                               const liveTerms = newSupId.startsWith('__inv__')
                                 ? { payment_terms_type:'net', payment_net_days:30, payment_advance_pct:0 }
                                 : getSupplierTerms(newSupId);
                               return { ...prev, [li.id]: { ...prev[li.id],
-                                supplier_id: newSupId, ...liveTerms, _userEdited: true }};
+                                supplier_id: newSupId, ...liveTerms,
+                                supplier_ref: newSupId === oldSupId ? prev[li.id]?.supplier_ref : (matchingRow?.supplier_ref || ''),
+                                zoho_po_number: newSupId === oldSupId ? prev[li.id]?.zoho_po_number : (matchingRow?.zoho_po_number || ''),
+                                _existing_po_id: newSupId === oldSupId
+                                  ? prev[li.id]?._existing_po_id
+                                  : (matchingRow?._existing_po_id || prev[li.id]?._existing_po_id),
+                                _userEdited: true }};
                             });
                           }}
                           style={{fontSize:11,borderColor:!a.supplier_id?'var(--amber,#d97706)':undefined}}>
@@ -645,14 +675,18 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                             ★ Originally sourced from {supName(srcSupplier)}
                           </div>
                         )}
+                        {supplierLocked && <div style={{fontSize:10,color:'var(--green)',marginTop:3,fontWeight:600}}>🔒 Sent to Finance</div>}
+                          </>;
+                        })()}
                       </td>
                       {/* Supplier PI + Send PO Request */}
                       <td style={{minWidth:200}}>
                         {a.supplier_id && (() => {
                           const isAdv = a.payment_terms_type==='advance'||a.payment_terms_type==='split';
-                          const alreadySent = poRequests[li.id]==='sent';
+                          const alreadySent = poRequests[li.id]==='sent' || a._payment_blocked===true;
                           const sending = poRequests[li.id]==='sending';
                           const suppId = a.supplier_id;
+                          const savedPiDoc = supplierPiDocs.find(f=>f.entity_id===a._existing_po_id);
                           // After sent: show PI and status
                           if (alreadySent) {
                             return (
@@ -661,15 +695,20 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                                   ? <span style={{color:'var(--green)'}}>✅ PI saved — Finance pays from Advance tab</span>
                                   : <span style={{color:'var(--green)'}}>✅ PO Request sent</span>}
                                 {a.supplier_ref && <div className="mono" style={{marginTop:2,color:'var(--green)',fontWeight:700}}>{a.supplier_ref}</div>}
+                                {savedPiDoc && <a href={savedPiDoc.download_url} target="_blank" rel="noreferrer"
+                                  style={{display:'inline-flex',marginTop:3,color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                                  📎 {savedPiDoc.original_name}
+                                </a>}
                               </div>
                             );
                           }
-                          const piVal = supplierPiInputs[suppId] !== undefined ? supplierPiInputs[suppId] : (a.supplier_ref || '');
-                          const piFile = supplierPiFiles[suppId] || null;
+                          const piVal = supplierPiInputs[li.id] !== undefined ? supplierPiInputs[li.id] : (a.supplier_ref || '');
+                          const piFile = supplierPiFiles[li.id] || null;
+                          const hasExistingPi = !!a.supplier_ref && !!a._existing_po_id;
                           return (
                             <div style={{display:'flex',flexDirection:'column',gap:4}}>
                               <input className="input" value={piVal}
-                                onChange={e=>setSupplierPiInputs(p=>({...p,[suppId]:e.target.value}))}
+                                onChange={e=>setSupplierPiInputs(p=>({...p,[li.id]:e.target.value}))}
                                 placeholder="Supplier PI No. *"
                                 style={{fontSize:11,borderColor:!piVal?'var(--amber,#d97706)':undefined}}/>
                               <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:10,color:'var(--text2)'}}>
@@ -677,10 +716,10 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                                   style={{display:'none'}}
                                   onChange={e=>{
                                     const f = e.target.files?.[0];
-                                    if(f) setSupplierPiFiles(p=>({...p,[suppId]:f}));
+                                    if(f) setSupplierPiFiles(p=>({...p,[li.id]:f}));
                                   }}/>
                                 <span style={{padding:'3px 8px',borderRadius:4,border:'1px solid var(--border)',background:'var(--surface2)',fontSize:11}}>
-                                  📎 {piFile ? piFile.name : 'Upload PI'}
+                                  📎 {piFile ? piFile.name : hasExistingPi ? 'Existing PI uploaded' : 'Upload PI'}
                                 </span>
                               </label>
                               {!isAdv && a.zoho_po_number && (
@@ -689,8 +728,8 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                               {(!isAdv && !a.zoho_po_number) || isAdv ? (
                                 <button className="btn btn-xs"
                                   style={{fontSize:10,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}
-                                  disabled={sending || !piVal.trim() || !piFile}
-                                  title={!piVal.trim() ? 'Enter Supplier PI number' : !piFile ? 'Upload PI file first' : ''}
+                                  disabled={sending || !piVal.trim() || (!piFile && !hasExistingPi)}
+                                  title={!piVal.trim() ? 'Enter Supplier PI number' : (!piFile && !hasExistingPi) ? 'Upload PI file first' : ''}
                                   onClick={()=>sendFinanceRequest(li.id, a)}>
                                   {sending ? '⏳ Sending…' : '📋 Send PO Request'}
                                 </button>
@@ -754,11 +793,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               const missingPiEntry = (order.lineItems||[]).some(li => {
                 const a = alloc[li.id];
                 if (!a?.supplier_id) return false;
-                const piVal = supplierPiInputs[a.supplier_id] !== undefined
-                  ? supplierPiInputs[a.supplier_id]
+                const piVal = supplierPiInputs[li.id] !== undefined
+                  ? supplierPiInputs[li.id]
                   : (a.supplier_ref || '');
-                const piFile = supplierPiFiles[a.supplier_id] || null;
-                return !piVal.trim() || !piFile;
+                const piFile = supplierPiFiles[li.id] || null;
+                const hasExistingPi = !!a.supplier_ref && !!a._existing_po_id;
+                return !piVal.trim() || (!piFile && !hasExistingPi);
               });
               return (
                 <button className="btn btn-primary"
@@ -908,10 +948,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const [saving,    setSaving]    = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showPayForm, setShowPayForm] = useState(false);
-  const [financeSent, setFinanceSent] = useState(() => {
-    try { return typeof window !== 'undefined' && sessionStorage.getItem(`po_finance_notified_${po.id}`) === '1'; }
-    catch (_) { return false; }
-  });
   const [payForm, setPayForm]     = useState({
     payment_ref:'', payment_date:new Date().toISOString().slice(0,10),
     paid_amount:po.confirmed_price||'', notes:''
@@ -934,10 +970,11 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const sourceTotal = poItems.reduce((sum, li) => {
     const enqItem = (enquiry?.items||[]).find(i=>i.id===li.id || i.component===li.component);
     const srcRows = (enquiry?.sourcing||[]).filter(s =>
-      (s.enquiry_item_id===li.id || (enqItem && s.enquiry_item_id===enqItem.id)) &&
-      (!po.supplier_id || s.supplier_id===po.supplier_id)
+      s.enquiry_item_id===li.id || (enqItem && s.enquiry_item_id===enqItem.id)
     );
-    const srcRow = srcRows[0] || null;
+    // Prefer the PO supplier's quote; for reassigned items, retain the original
+    // sourced price so Manage matches the Payment Breakdown line-for-line.
+    const srcRow = srcRows.find(s=>s.supplier_id===po.supplier_id) || srcRows[0] || null;
     return sum + ((parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
   }, 0);
   const totalPurchasePrice = (() => {
@@ -958,11 +995,6 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   const poChargeNote = po.advance_amount_change_note || po.net_amount_change_note || '';
   const grandPurchasePrice = totalPurchasePrice + poChargesTotal;
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
-  const markFinanceSent = () => {
-    setFinanceSent(true);
-    try { if (typeof window !== 'undefined') sessionStorage.setItem(`po_finance_notified_${po.id}`, '1'); } catch (_) {}
-    toast('💰 Finance team has been notified. Check Finance tab for payment status.');
-  };
   const canEditPaymentTerms = !readOnly && po.finance_returned === true && po.status === 'draft' && !isBlocked;
   const needsFinanceResend = canEditPaymentTerms;
   const carrierOptions = (shippers && shippers.length)
@@ -1052,14 +1084,11 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
             {isBlocked&&<span style={{fontSize:11,fontWeight:700,color:'var(--red)',
               background:'var(--red-lt,#fef2f2)',padding:'2px 9px',borderRadius:999,
               border:'1px solid var(--red)44'}}>🔒 Payment Blocked</span>}
-            {/* ADDED: Go to Finance button in ManagePO header when blocked */}
+            {/* Advance POs are queued for Finance automatically when allocation is saved. */}
             {isBlocked&&(
-              <button className="btn btn-sm"
-                disabled={financeSent}
-                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',fontWeight:700,opacity:financeSent?0.65:1,cursor:financeSent?'not-allowed':'pointer'}}
-                onClick={markFinanceSent}>
-                {financeSent ? '✅ Already Sent to Finance' : '💰 Send to Finance'}
-              </button>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--green)',
+                background:'var(--green-lt)',padding:'4px 9px',borderRadius:999,
+                border:'1px solid var(--green)44'}}>✅ Sent to Finance</span>
             )}
             <POStatusBadge status={effectivePoStatus}/>
             <button className="close-x" onClick={onClose}>×</button>
@@ -1474,10 +1503,6 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
   const [managingPO, setManagingPO] = useState(null);
   const [paymentBreakdownOpen, setPaymentBreakdownOpen] = useState(true);
   const [lineItemsOpen, setLineItemsOpen] = useState(true);
-  const [financeSent, setFinanceSent] = useState(() => {
-    try { return typeof window !== 'undefined' && sessionStorage.getItem(`order_finance_notified_${order.id}`) === '1'; }
-    catch (_) { return false; }
-  });
   const custName=id=>customers.find(c=>c.id===id)?.name||id;
   const inventoryById = useMemo(() => {
     const map = {};
@@ -1513,7 +1538,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     return s;
   }, 0);
   const blockedPOs=soList.filter(so=>so.payment_blocked===1||so.payment_blocked===true);
-  const allocationLocked = readOnly || soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update';
+  const returnedForCorrection = soList.some(so=>so.finance_returned===true||so.finance_returned===1);
+  // Do not lock the whole allocation after only one supplier group is sent.
+  // Every active line must be linked to a supplier PO before allocation is complete.
+  const activeItems = allItems.filter(li=>!['delivered','closed'].includes(li.line_status));
+  const allocationComplete = activeItems.length > 0 && activeItems.every(li=>poItemIds.includes(li.id));
+  const allocationLocked = readOnly || (!returnedForCorrection && allocationComplete &&
+    (soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update'));
   const sourcingRows = enquiry?.sourcing || [];
   const enquiryItems = enquiry?.items || [];
   const supplierSummaries = soList.map(so => {
@@ -1558,12 +1589,6 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       actualAmount: actualAmountRaw !== null ? parseFloat(actualAmountRaw) : null,
     };
   });
-  const markFinanceSent = () => {
-    setFinanceSent(true);
-    try { if (typeof window !== 'undefined') sessionStorage.setItem(`order_finance_notified_${order.id}`, '1'); } catch (_) {}
-    toast('💰 Finance team has been notified. Check Finance tab for payment status.');
-  };
-
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
@@ -1617,16 +1642,12 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
             <div style={{padding:'10px 14px',borderRadius:'var(--r)',background:'var(--red-lt,#fef2f2)',
               border:'2px solid var(--red)',marginBottom:14,fontSize:12,color:'var(--red)',fontWeight:600,
               display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-              <span>🔒 {blockedPOs.length} PO{blockedPOs.length!==1?'s are':' is'} blocked pending advance payment.
-              Finance team must record payment to release.</span>
-              {/* ADDED: Go to Finance button — same pattern as customer advance in OrdersPage */}
-              <button className="btn btn-sm"
-                disabled={financeSent}
-                style={{background:'var(--red)',color:'#fff',borderColor:'var(--red)',
-                  fontWeight:700,whiteSpace:'nowrap',flexShrink:0,opacity:financeSent?0.65:1,cursor:financeSent?'not-allowed':'pointer'}}
-                onClick={markFinanceSent}>
-                {financeSent ? '✅ Already Sent to Finance' : '💰 Send to Finance'}
-              </button>
+              <span>🔒 {blockedPOs.length} PO{blockedPOs.length!==1?'s have':' has'} already been sent to Finance and {blockedPOs.length!==1?'are':'is'} blocked pending advance payment.
+              Finance must record payment to release.</span>
+              <span style={{fontSize:11,fontWeight:700,color:'var(--green)',background:'var(--green-lt)',
+                padding:'4px 9px',borderRadius:999,border:'1px solid var(--green)44',whiteSpace:'nowrap'}}>
+                ✅ Sent to Finance
+              </span>
             </div>
           )}
           <div className="card card-sm" style={{marginBottom:14}}>
@@ -1792,9 +1813,20 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td>{fmt(li.qty)}</td>
                       <td>
-                        {srcSup
-                          ? <div>
-                              <div style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>★ {supName(srcSup)}</div>
+                        {srcSup || so?.supplier_id
+                          ? <div style={{display:'flex',flexDirection:'column',alignItems:'flex-start',gap:3}}>
+                              {srcSup && so?.supplier_id && srcSup !== so.supplier_id ? <>
+                                <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:999,
+                                  color:'var(--teal,#0d9488)',background:'var(--teal-lt,#f0fdfa)',border:'1px solid var(--teal,#0d9488)33'}}>
+                                  Original: {supName(srcSup)}
+                                </span>
+                                <span style={{fontSize:10,fontWeight:700,padding:'2px 7px',borderRadius:999,
+                                  color:'var(--accent)',background:'var(--accent-lt)',border:'1px solid var(--accent)33'}}>
+                                  PO: {supName(so.supplier_id)}
+                                </span>
+                              </> : <span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>
+                                ★ {supName(so?.supplier_id || srcSup)}
+                              </span>}
                               {srcRow?.availability&&<div style={{fontSize:10,color:'var(--text3)'}}>{srcRow.availability}</div>}
                               {srcRow?.lead_time&&<div style={{fontSize:10,color:'var(--text3)'}}>Lead: {srcRow.lead_time}</div>}
                             </div>
@@ -2153,6 +2185,19 @@ export default function ProcurementBinPage() {
   };
 
   const safeOrders = Array.isArray(orders) ? orders : [];
+  // Keep an open detail modal synchronized after allocation/payment mutations.
+  // Without this, the list query refreshed but the modal continued rendering its
+  // old order object, showing stale suppliers, totals and duplicate POs.
+  useEffect(() => {
+    if (!selected) return;
+    const fresh = safeOrders.find(o=>o.id===selected.id);
+    if (fresh && fresh !== selected) setSelected(fresh);
+  }, [safeOrders, selected]);
+  useEffect(() => {
+    if (!previewOrder) return;
+    const fresh = safeOrders.find(o=>o.id===previewOrder.id);
+    if (fresh && fresh !== previewOrder) setPreviewOrder(fresh);
+  }, [safeOrders, previewOrder]);
   const READ_ONLY_STATUSES = ['delivery_hub','partial_hub','transit_hub','partial_dispatched','transit_customer','closed'];
   const procOrders = safeOrders.filter(o =>
     ['procurement','sup_payment_update', ...READ_ONLY_STATUSES].includes(o.status) &&

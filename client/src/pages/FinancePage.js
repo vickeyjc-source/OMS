@@ -1650,6 +1650,25 @@ export default function FinancePage() {
     }
   };
 
+  const returnSupplierNetToProcurement = async (supplierOrder) => {
+    setReturningId(supplierOrder.id);
+    try {
+      await api.post('/finance/supplier-net-return/' + supplierOrder.id);
+      await Promise.all([
+        qc.invalidateQueries(['finance-supplier']),
+        qc.invalidateQueries(['po-requests']),
+        qc.invalidateQueries(['orders']),
+        qc.invalidateQueries(['summary']),
+      ]);
+      toast.success('Sent back to Procurement — PO allocation unlocked');
+      setReturnConfirm(null);
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to send back to Procurement');
+    } finally {
+      setReturningId(null);
+    }
+  };
+
   const { data: custQueueRaw=[], isLoading: custLoading }   = useQuery({ queryKey:['finance-customer'], queryFn:()=>api.get('/finance/customer-queue').then(r=>r.data).catch(()=>[]), refetchInterval:30000 });
   const { data: supQueueRaw={advance:[],net:[]}, isLoading: supLoading } = useQuery({ queryKey:['finance-supplier'], queryFn:()=>api.get('/finance/supplier-queue').then(r=>r.data).catch(()=>({advance:[],net:[]})), refetchInterval:30000 });
   const { data: historyRaw={customer:[],supplier:[]} }      = useQuery({ queryKey:['finance-history'], queryFn:()=>api.get('/finance/history').then(r=>r.data).catch(()=>({customer:[],supplier:[]})) });
@@ -1664,6 +1683,7 @@ export default function FinancePage() {
   const { data: suppliers=[] }                           = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data).catch(()=>[]) });
   const { data: customers=[] }                           = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
   const { data: inventoryItems=[] }                      = useQuery({ queryKey:['inventory'],  queryFn:()=>api.get('/inventory').then(r=>r.data).catch(()=>[]) });
+  const { data: supplierPiDocs=[] }                      = useQuery({ queryKey:['supplier-pi-files'], queryFn:()=>api.get('/files', { params:{ entity_type:'supplier_order', field_name:'supplier_pi' } }).then(r=>r.data||[]).catch(()=>[]) });
 
   // Resolve the real entity (customer or supplier) behind a supplier_id (including __inv__ ones)
   const resolveFinanceSupplier = (supplierId) => {
@@ -1991,7 +2011,7 @@ export default function FinancePage() {
           ) : (
             <table className="table">
               <thead><tr>
-                <th>PO No.</th><th>Supplier</th><th>Order</th>
+                <th>Order</th><th>Supplier</th><th>PO No.</th>
                 <th>PI / Ref No.</th><th>Terms</th>
                 <th style={{textAlign:'right'}}>Amount Due</th>
                 <th style={{textAlign:'right'}}>Paid</th>
@@ -2021,13 +2041,23 @@ export default function FinancePage() {
                     const canReleaseSupplier = paid > 0 && releasePending;
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
-                    <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
+                    <td><span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span></td>
                     <td style={{fontWeight:500}}>
                       {displayName}
                       {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
                     </td>
-                    <td><span className="mono" style={{fontSize:11}}>{r.order_id}</span></td>
-                    <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>{r.supplier_ref||'—'}</td>
+                    <td><span className="mono" style={{fontSize:11,color:'var(--text2)'}}>{r.internal_po_no||r.supplier_order_id}</span></td>
+                    <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600}}>
+                      <div>{r.supplier_ref||'—'}</div>
+                      {(()=>{
+                        const doc=supplierPiDocs.find(f=>f.entity_id===(r.supplier_order_id||r.id));
+                        return doc ? <a href={doc.download_url} target="_blank" rel="noreferrer"
+                          onClick={e=>e.stopPropagation()}
+                          style={{display:'inline-flex',marginTop:3,color:'var(--accent)',fontWeight:600,textDecoration:'none'}}>
+                          📎 {doc.original_name}
+                        </a> : null;
+                      })()}
+                    </td>
                     <td><span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red)',fontWeight:700}}>
                       {r.payment_terms||'Advance'}
                     </span></td>
@@ -2108,7 +2138,7 @@ export default function FinancePage() {
           ) : (
             <table className="table">
               <thead><tr>
-                <th>PO No.</th><th>Supplier</th><th>Order</th><th>Terms</th>
+                <th>Order</th><th>Supplier</th><th>PO No.</th><th>Terms</th>
                 <th style={{textAlign:'right'}}>Total Amount</th>
                 <th style={{textAlign:'right'}}>Paid</th>
                 <th style={{textAlign:'right'}}>Balance</th>
@@ -2125,12 +2155,12 @@ export default function FinancePage() {
                   const balance = Math.max(0, total - paid);
                   return (
                     <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.id })}>
-                      <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.internal_po_no||r.id}</span></td>
+                      <td><span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span></td>
                       <td style={{fontWeight:500}}>
                         {displayName}
                         {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
                       </td>
-                      <td><span className="mono" style={{fontSize:11}}>{r.order_id}</span></td>
+                      <td><span className="mono" style={{fontSize:11,color:'var(--text2)'}}>{r.internal_po_no||r.id}</span></td>
                       <td><TermsBadge terms={r.payment_terms||('Net '+r.payment_net_days)}/></td>
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700}}>
                         {fmtM(total, r.confirmed_currency)}
@@ -2152,6 +2182,15 @@ export default function FinancePage() {
                       </td>
                       <td><StatusBadge s={r.status||'pending'}/></td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
+                        <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                        {paid <= 0 && r.status === 'draft' && (
+                          <button className="btn btn-xs"
+                            onClick={()=>setReturnConfirm({type:'supplier-net',item:r})}
+                            disabled={returningId===r.id}
+                            style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
+                            {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
+                          </button>
+                        )}
                         {r.status === 'net_payment_recorded' ? (
                           <button className="btn btn-xs"
                             onClick={()=>setSupplierNetReleaseConfirm({...r, _resolvedName: displayName})}
@@ -2166,6 +2205,7 @@ export default function FinancePage() {
                             {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
                           </button>
                         ) : null}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -2377,7 +2417,11 @@ export default function FinancePage() {
                 <button className="btn btn-primary"
                   disabled={returningId===busyId}
                   style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontWeight:700}}
-                  onClick={()=>isCustomer ? returnCustomerToOrder(item) : returnSupplierToProcurement(item)}>
+                  onClick={()=>isCustomer
+                    ? returnCustomerToOrder(item)
+                    : returnConfirm.type==='supplier-net'
+                      ? returnSupplierNetToProcurement(item)
+                      : returnSupplierToProcurement(item)}>
                   {returningId===busyId ? 'Sending…' : 'Confirm'}
                 </button>
               </div>

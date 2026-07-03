@@ -2096,7 +2096,14 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
   const finSupAdvance  = await g("SELECT COUNT(*) as c FROM finance_queue WHERE status='pending'");
   const finCustAdvance = await g("SELECT COUNT(*) as c FROM orders WHERE status='payment_approval' AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid'))");
   const finCustNet     = await g("SELECT COUNT(*) as c FROM orders WHERE status NOT IN ('closed','cancelled','deleted','payment_approval') AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid')) AND payment_terms NOT LIKE 'Advance%' AND payment_terms LIKE 'Net%'");
-  const finSupNet      = await g("SELECT COUNT(*) as c FROM supplier_orders WHERE payment_terms_type='net' AND status NOT IN ('paid','cancelled') AND (payment_blocked IS NULL OR payment_blocked=0)");
+  const finSupNet      = await g(`SELECT COUNT(*) as c FROM supplier_orders so
+    WHERE so.payment_terms_type='net'
+      AND so.status NOT IN ('paid','cancelled')
+      AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
+      AND NOT EXISTS (
+        SELECT 1 FROM finance_queue fq
+        WHERE fq.supplier_order_id=so.id AND fq.status='returned_to_procurement'
+      )`);
   const finPORequests  = await g("SELECT COUNT(*) as c FROM po_requests WHERE status='pending'");
   res.json({
     total:         await g("SELECT COUNT(*) as c FROM orders"),
@@ -2367,10 +2374,24 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
 
   // ── Check if a draft PO already exists for this supplier on this order ──────
   // If yes, update it instead of creating a duplicate
-  const existingSO = await getAsync(
+  let existingSO = await getAsync(
     "SELECT * FROM supplier_orders WHERE order_id=? AND supplier_id=? AND status='draft'",
     [req.params.id, d.supplier_id]
   );
+  // A Finance return unlocks the original PO for correction. Reuse that PO even
+  // when its supplier changes, provided the whole original item allocation moved.
+  if (!existingSO && d.existing_po_id) {
+    const candidate = await getAsync(
+      "SELECT * FROM supplier_orders WHERE id=? AND order_id=? AND status='draft'",
+      [d.existing_po_id, req.params.id]
+    );
+    if (candidate) {
+      const linked = await allAsync('SELECT item_id FROM supplier_order_items WHERE supplier_order_id=?', [candidate.id]);
+      const oldItems = linked.map(r=>r.item_id).sort();
+      const newItems = (d.item_ids||[]).slice().sort();
+      if (oldItems.length===newItems.length && oldItems.every((id,i)=>id===newItems[i])) existingSO = candidate;
+    }
+  }
 
   let poId, poNo;
 
@@ -2378,6 +2399,12 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
     // Update existing draft PO
     poId = existingSO.id;
     poNo = existingSO.internal_po_no;
+    const supplierChanged = existingSO.supplier_id !== d.supplier_id;
+    if (supplierChanged) {
+      await runAsync("UPDATE supplier_orders SET supplier_id=?,supplier_ref='',zoho_po_number='' WHERE id=?", [d.supplier_id, poId]);
+      await runAsync("UPDATE po_requests SET status='cancelled' WHERE supplier_order_id=? AND status IN ('pending','fulfilled')", [poId]);
+      await runAsync("DELETE FROM app_files WHERE entity_type='supplier_order' AND entity_id=?", [poId]);
+    }
     const systemPoRef = order.finance_po_no || order.po_number || '';
     if (!existingSO.po_no && systemPoRef) {
       await runAsync('UPDATE supplier_orders SET po_no=? WHERE id=?', [systemPoRef, poId]);
@@ -2398,9 +2425,28 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
        'pending', d.notes||'', now]);
   }
 
+  // An item can belong to only one active PO allocation. Moving it to another
+  // supplier must detach it from its previous draft PO first.
+  for (const iid of (d.item_ids||[])) {
+    await runAsync('DELETE FROM supplier_order_items WHERE item_id=? AND supplier_order_id<>?', [iid, poId]);
+  }
+
   // Link line items to this supplier order
   for (const iid of (d.item_ids||[])) {
     try { await runAsync('INSERT INTO supplier_order_items VALUES(?,?)', [poId, iid]); } catch(_) {}
+  }
+
+  // Remove empty draft POs left behind by a supplier change. Their old Finance
+  // queue/request rows otherwise appear as an extra Supplier count.
+  const emptyDraftPOs = await allAsync(`SELECT so.id FROM supplier_orders so
+    WHERE so.order_id=? AND so.status='draft' AND so.id<>?
+      AND NOT EXISTS (SELECT 1 FROM supplier_order_items soi WHERE soi.supplier_order_id=so.id)`,
+    [req.params.id, poId]);
+  for (const emptyPO of emptyDraftPOs) {
+    await runAsync('DELETE FROM finance_queue WHERE supplier_order_id=?', [emptyPO.id]);
+    await runAsync('DELETE FROM po_requests WHERE supplier_order_id=?', [emptyPO.id]);
+    await runAsync("DELETE FROM app_files WHERE entity_type='supplier_order' AND entity_id=?", [emptyPO.id]);
+    await runAsync('DELETE FROM supplier_orders WHERE id=?', [emptyPO.id]);
   }
 
   // Calculate payment due date for Net terms
@@ -2417,11 +2463,15 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
 
   // Update with payment fields
   await runAsync(`UPDATE supplier_orders SET payment_terms_type=?,payment_net_days=?,
-       payment_advance_pct=?,payment_due_date=?,zoho_po_number=?,payment_blocked=?,notes=?
+       payment_advance_pct=?,payment_due_date=?,zoho_po_number=?,payment_blocked=?,notes=?,
+       supplier_ref=CASE WHEN ?<>'' THEN ? ELSE supplier_ref END,
+       confirmed_price=?,confirmed_currency=?,buying_price_per_unit=?,promised_delivery_date=?
        WHERE id=?`,
     [d.payment_terms_type||'net', netDays,
      d.payment_advance_pct||0, paymentDueDate,
-     d.zoho_po_number||'', paymentBlocked, d.notes||'', poId]);
+     d.zoho_po_number||'', paymentBlocked, d.notes||'', d.supplier_ref||'', d.supplier_ref||'',
+     d.confirmed_price||null, d.confirmed_currency||'INR', d.buying_price_per_unit||null,
+     d.promised_delivery_date||'', poId]);
 
   // If advance payment required → create finance queue item
   // FIX B: check for existing pending entry before inserting to prevent duplicates
@@ -2429,12 +2479,12 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
     // Set order status to sup_payment_update so it's visible across the system
     await runAsync("UPDATE orders SET status='sup_payment_update' WHERE id=? AND status NOT IN ('closed','cancelled','payment_approval','cust_payment_update')", [req.params.id]);
     const existingFQ = await getAsync(
-      "SELECT id FROM finance_queue WHERE supplier_order_id=? AND status='pending'",
+      "SELECT id,status FROM finance_queue WHERE supplier_order_id=? AND status IN ('pending','returned_to_procurement') ORDER BY created_at DESC LIMIT 1",
       [poId]
     );
     if (existingFQ) {
-      await runAsync('UPDATE finance_queue SET amount=?,currency=?,payment_terms=? WHERE id=?',
-        [d.confirmed_price, d.confirmed_currency||'INR',
+      await runAsync("UPDATE finance_queue SET status='pending',supplier_id=?,amount=?,currency=?,payment_terms=?,notes='' WHERE id=?",
+        [d.supplier_id, d.confirmed_price, d.confirmed_currency||'INR',
          (d.payment_advance_pct||100)+'% Advance required', existingFQ.id]);
     } else {
       const fqId = uuid();
@@ -2446,6 +2496,12 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
          (d.payment_advance_pct||100)+'% Advance required',
          '', 'pending', now]);
     }
+  } else {
+    // A returned Net PO has now been corrected/resubmitted. Remove its unlock
+    // marker so the allocation becomes read-only again after saving.
+    await runAsync("UPDATE finance_queue SET status='cancelled',supplier_id=?,notes=? WHERE supplier_order_id=? AND status='returned_to_procurement'",
+      [d.supplier_id, 'Corrected in Procurement and resubmitted as Net', poId]);
+    await runAsync("UPDATE orders SET status='procurement' WHERE id=?", [req.params.id]);
   }
 
   try {
@@ -3196,7 +3252,14 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
   try { advRows = await allAsync("SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
-  const netRows = await allAsync("SELECT so.* FROM supplier_orders so WHERE so.payment_terms_type='net' AND so.status NOT IN ('paid','cancelled') AND (so.payment_blocked IS NULL OR so.payment_blocked=0)");
+  const netRows = await allAsync(`SELECT so.* FROM supplier_orders so
+    WHERE so.payment_terms_type='net'
+      AND so.status NOT IN ('paid','cancelled')
+      AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
+      AND NOT EXISTS (
+        SELECT 1 FROM finance_queue fq
+        WHERE fq.supplier_order_id=so.id AND fq.status='returned_to_procurement'
+      )`);
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
   res.json({
@@ -3234,6 +3297,7 @@ app.post('/api/finance/supplier-return/:fq_id', auth, asyncRoute(async (req, res
   await runAsync("UPDATE finance_queue SET status='returned_to_procurement',notes=? WHERE id=?",
     ['Returned by Finance for payment-term correction', fq.id]);
   await runAsync("UPDATE supplier_orders SET status='draft',payment_blocked=0 WHERE id=?", [so.id]);
+  await runAsync("UPDATE po_requests SET status='cancelled' WHERE supplier_order_id=? AND status IN ('pending','fulfilled')", [so.id]);
   const otherPending = await getAsync(
     "SELECT 1 FROM finance_queue WHERE order_id=? AND status='pending' AND id<>? LIMIT 1",
     [fq.order_id, fq.id]
@@ -3247,6 +3311,42 @@ app.post('/api/finance/supplier-return/:fq_id', auth, asyncRoute(async (req, res
   } catch(_) {}
   saveNow();
   res.json({ ok: true, status: 'returned_to_procurement' });
+}));
+
+// POST /api/finance/supplier-net-return/:so_id — return an unpaid Net PO and
+// its PO request to Procurement, unlocking the allocation for correction.
+app.post('/api/finance/supplier-net-return/:so_id', auth, asyncRoute(async (req, res) => {
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [req.params.so_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier PO not found' });
+  if (so.payment_terms_type !== 'net') return res.status(400).json({ error: 'This is not a Supplier Net PO' });
+  if (so.status !== 'draft') {
+    return res.status(400).json({ error: 'Only a Draft Supplier Net PO can be sent back to Procurement' });
+  }
+  if ((parseFloat(so.net_total_paid)||0) > 0 || ['net_payment_recorded','paid'].includes(so.status)) {
+    return res.status(400).json({ error: 'A supplier payment is already recorded and cannot be returned' });
+  }
+  const now = nowStr();
+  let marker = await getAsync("SELECT id FROM finance_queue WHERE supplier_order_id=? AND status='returned_to_procurement'", [so.id]);
+  if (!marker) {
+    marker = { id: uuid() };
+    await runAsync(`INSERT INTO finance_queue(id,supplier_order_id,order_id,supplier_id,amount,currency,payment_terms,due_date,status,created_at,notes)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [marker.id, so.id, so.order_id, so.supplier_id, so.confirmed_price||0, so.confirmed_currency||'INR',
+       'Net '+(so.payment_net_days||30), so.payment_due_date||'', 'returned_to_procurement', now,
+       'Supplier Net PO returned by Finance for correction']);
+  }
+  // Reverse the Finance-completed PO data while preserving Procurement's
+  // Supplier PI/reference and uploaded document. This makes the corrected Net
+  // PO eligible for a fresh PO Request when Procurement resends it.
+  await runAsync("UPDATE supplier_orders SET status='draft',payment_blocked=0,zoho_po_number='' WHERE id=?", [so.id]);
+  await runAsync("UPDATE po_requests SET status='cancelled' WHERE supplier_order_id=? AND status IN ('pending','fulfilled')", [so.id]);
+  await runAsync("UPDATE orders SET status='procurement' WHERE id=?", [so.order_id]);
+  try {
+    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), so.order_id, `Finance returned Supplier Net PO ${so.internal_po_no||so.id} to Procurement`, req.session.user.name, '', now]);
+  } catch(_) {}
+  saveNow();
+  res.json({ ok:true, status:'returned_to_procurement' });
 }));
 
 // PUT /api/finance/supplier-pay/:fq_id

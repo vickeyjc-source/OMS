@@ -689,7 +689,6 @@ async function initDb() {
         FROM enquiry_items ei
         JOIN enquiry_sourcing es ON es.enquiry_item_id = ei.id
           AND es.enquiry_id = o.enquiry_id
-          AND es.supplier_id = so.supplier_id
         WHERE ei.enquiry_id = o.enquiry_id
           AND (
             ei.id = oi.id
@@ -700,7 +699,10 @@ async function initDb() {
               AND LOWER(ei.ipn) = LOWER(oi.ipn)
             )
           )
-        ORDER BY es.updated_at DESC
+        -- Prefer a price quoted by the currently assigned supplier. If the item
+        -- was reassigned and that supplier has no sourcing row, retain the
+        -- original sourced price so the component is not dropped from PO totals.
+        ORDER BY (es.supplier_id = so.supplier_id) DESC, es.updated_at DESC
         LIMIT 1
       ) src ON true
       GROUP BY so.id
