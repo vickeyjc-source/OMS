@@ -1613,6 +1613,42 @@ app.get('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   const allowedSections = await getAllowedSections(req.session.user);
   res.json(stripSensitive(await assembleOrder(o), req.session.user, allowedSections));
 }));
+
+// Save PO Allocation draft fields only — does not create POs or notify Finance.
+app.put('/api/orders/:id/allocation-draft', auth, asyncRoute(async (req, res) => {
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
+  if (!order) return res.status(404).json({ error:'Order not found' });
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  const now = nowStr();
+  for (const item of items) {
+    const orderItem = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [item.item_id, req.params.id]);
+    if (!orderItem) continue;
+    const sourcePrice = parseFloat(item.source_price);
+    await runAsync('UPDATE order_items SET supplier_id=?,procurement_price=? WHERE id=? AND order_id=?',
+      [item.supplier_id||'', Number.isFinite(sourcePrice)?sourcePrice:0, item.item_id, req.params.id]);
+    if (order.enquiry_id && Number.isFinite(sourcePrice)) {
+      const enquiryItem = await getAsync(`SELECT id FROM enquiry_items WHERE enquiry_id=? AND
+        (id=? OR LOWER(COALESCE(component,''))=LOWER(?) OR
+        (COALESCE(ipn,'')<>'' AND LOWER(ipn)=LOWER(?)))
+        ORDER BY CASE WHEN id=? THEN 0 WHEN LOWER(COALESCE(component,''))=LOWER(?) THEN 1 ELSE 2 END LIMIT 1`,
+        [order.enquiry_id,item.item_id,orderItem.component||'',orderItem.ipn||'',item.item_id,orderItem.component||'']);
+      if (enquiryItem) {
+        let sourceRow = item.source_supplier_id ? await getAsync(`SELECT id FROM enquiry_sourcing
+          WHERE enquiry_id=? AND enquiry_item_id=? AND supplier_id=? ORDER BY updated_at DESC LIMIT 1`,
+          [order.enquiry_id,enquiryItem.id,item.source_supplier_id]) : null;
+        if (!sourceRow) sourceRow = await getAsync(`SELECT id FROM enquiry_sourcing
+          WHERE enquiry_id=? AND enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1`,
+          [order.enquiry_id,enquiryItem.id]);
+        if (sourceRow) await runAsync('UPDATE enquiry_sourcing SET sourced_price=?,updated_at=? WHERE id=?',
+          [sourcePrice,now,sourceRow.id]);
+      }
+    }
+  }
+  try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(),req.params.id,'PO Allocation supplier/source prices updated',req.session.user.name,'',now]); } catch(_) {}
+  saveNow();
+  res.json({ok:true,updated:items.length});
+}));
 app.post('/api/orders', auth, asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.id || !d.customer_id) return res.status(400).json({ error: 'id and customer_id required' });
@@ -2434,6 +2470,31 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
   // Link line items to this supplier order
   for (const iid of (d.item_ids||[])) {
     try { await runAsync('INSERT INTO supplier_order_items VALUES(?,?)', [poId, iid]); } catch(_) {}
+    const overridePrice = parseFloat(d.item_prices?.[iid]);
+    if (Number.isFinite(overridePrice) && overridePrice >= 0) {
+      await runAsync('UPDATE order_items SET procurement_price=? WHERE id=? AND order_id=?', [overridePrice, iid, req.params.id]);
+      // Make the PO Allocation override authoritative across the full flow:
+      // update the linked Sourcing/Enquiry price as well as the Order item.
+      if (order.enquiry_id) {
+        const orderItem = await getAsync('SELECT component,ipn FROM order_items WHERE id=? AND order_id=?', [iid, req.params.id]);
+        const enquiryItem = orderItem ? await getAsync(`SELECT id FROM enquiry_items
+          WHERE enquiry_id=? AND (id=? OR LOWER(COALESCE(component,''))=LOWER(?) OR
+            (COALESCE(ipn,'')<>'' AND LOWER(ipn)=LOWER(?)))
+          ORDER BY CASE WHEN id=? THEN 0 WHEN LOWER(COALESCE(component,''))=LOWER(?) THEN 1 ELSE 2 END LIMIT 1`,
+          [order.enquiry_id, iid, orderItem.component||'', orderItem.ipn||'', iid, orderItem.component||'']) : null;
+        if (enquiryItem) {
+          const sourceSupplierId = d.item_source_supplier_ids?.[iid] || '';
+          let sourceRow = sourceSupplierId ? await getAsync(`SELECT id FROM enquiry_sourcing
+            WHERE enquiry_id=? AND enquiry_item_id=? AND supplier_id=? ORDER BY updated_at DESC LIMIT 1`,
+            [order.enquiry_id, enquiryItem.id, sourceSupplierId]) : null;
+          if (!sourceRow) sourceRow = await getAsync(`SELECT id FROM enquiry_sourcing
+            WHERE enquiry_id=? AND enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1`,
+            [order.enquiry_id, enquiryItem.id]);
+          if (sourceRow) await runAsync('UPDATE enquiry_sourcing SET sourced_price=?,updated_at=? WHERE id=?',
+            [overridePrice, now, sourceRow.id]);
+        }
+      }
+    }
   }
 
   // Remove empty draft POs left behind by a supplier change. Their old Finance
@@ -2465,13 +2526,15 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
   await runAsync(`UPDATE supplier_orders SET payment_terms_type=?,payment_net_days=?,
        payment_advance_pct=?,payment_due_date=?,zoho_po_number=?,payment_blocked=?,notes=?,
        supplier_ref=CASE WHEN ?<>'' THEN ? ELSE supplier_ref END,
-       confirmed_price=?,confirmed_currency=?,buying_price_per_unit=?,promised_delivery_date=?
+       confirmed_price=?,confirmed_currency=?,buying_price_per_unit=?,promised_delivery_date=?,
+       supplier_subtotal=?,supplier_tax_rate=?,supplier_tax_amount=?
        WHERE id=?`,
     [d.payment_terms_type||'net', netDays,
      d.payment_advance_pct||0, paymentDueDate,
      d.zoho_po_number||'', paymentBlocked, d.notes||'', d.supplier_ref||'', d.supplier_ref||'',
      d.confirmed_price||null, d.confirmed_currency||'INR', d.buying_price_per_unit||null,
-     d.promised_delivery_date||'', poId]);
+     d.promised_delivery_date||'', d.supplier_subtotal||0, d.supplier_tax_rate||0,
+     d.supplier_tax_amount||0, poId]);
 
   // If advance payment required → create finance queue item
   // FIX B: check for existing pending entry before inserting to prevent duplicates
@@ -2552,7 +2615,8 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
        shipper_id=?, tracking_no=?, notes=?, ship_load_date=?,
        zoho_po_number=?, payment_terms_type=?, payment_net_days=?,
        payment_advance_pct=?, payment_due_date=?,
-       payment_blocked=?, confirmed_at=?, received_at=?, actual_delivery_date=?
+       payment_blocked=?, confirmed_at=?, received_at=?, actual_delivery_date=?,
+       supplier_subtotal=?,supplier_tax_rate=?,supplier_tax_amount=?
        WHERE id=?`,
     [d.po_no ?? so.po_no ?? '',
      newStatus,
@@ -2569,6 +2633,9 @@ app.put('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
      nextTermsType, nextNetDays, nextAdvancePct, nextDueDate,
      nextPaymentBlocked, confirmedAt, receivedAt,
      d.actual_delivery_date !== undefined ? (d.actual_delivery_date || '') : (so.actual_delivery_date || ''),
+     d.supplier_subtotal ?? so.supplier_subtotal ?? 0,
+     d.supplier_tax_rate ?? so.supplier_tax_rate ?? 0,
+     d.supplier_tax_amount ?? so.supplier_tax_amount ?? 0,
      req.params.id]);
 
   if (returnedFinanceItem) {

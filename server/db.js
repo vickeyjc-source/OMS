@@ -656,6 +656,11 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN zoho_po_number TEXT"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN payment_blocked INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN buying_price_per_unit NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_subtotal NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_tax_rate NUMERIC DEFAULT 18"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ALTER COLUMN supplier_tax_rate SET DEFAULT 18"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_tax_amount NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("UPDATE supplier_orders so SET supplier_tax_rate=0 FROM suppliers s WHERE s.id=so.supplier_id AND LOWER(COALESCE(s.type,''))='international'"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN ship_load_date TEXT"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN actual_delivery_date TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN credit_note_no TEXT DEFAULT ''"); } catch(_) {}
@@ -671,7 +676,7 @@ async function initDb() {
   try {
     const poTotals = await pool.query(`
       SELECT
-        so.id,
+        so.id, so.supplier_tax_rate,
         ROUND(COALESCE(SUM(
           COALESCE(
             NULLIF(oi.procurement_price, 0),
@@ -705,19 +710,22 @@ async function initDb() {
         ORDER BY (es.supplier_id = so.supplier_id) DESC, es.updated_at DESC
         LIMIT 1
       ) src ON true
-      GROUP BY so.id
+      GROUP BY so.id, so.supplier_tax_rate
     `);
     let repaired = 0;
     for (const row of poTotals.rows) {
       const sourceTotal = Number(row.source_total || 0);
       if (sourceTotal <= 0) continue;
+      const taxRate = Number(row.supplier_tax_rate || 0);
+      const taxAmount = Number((sourceTotal * taxRate / 100).toFixed(2));
+      const payableTotal = Number((sourceTotal + taxAmount).toFixed(2));
       await pool.query(
-        "UPDATE supplier_orders SET confirmed_price=$1, confirmed_currency='INR' WHERE id=$2",
-        [sourceTotal, row.id]
+        "UPDATE supplier_orders SET supplier_subtotal=$1,supplier_tax_amount=$2,confirmed_price=$3,confirmed_currency='INR' WHERE id=$4",
+        [sourceTotal, taxAmount, payableTotal, row.id]
       );
       await pool.query(
         "UPDATE finance_queue SET amount=$1, currency='INR' WHERE supplier_order_id=$2",
-        [sourceTotal, row.id]
+        [payableTotal, row.id]
       );
       repaired++;
     }

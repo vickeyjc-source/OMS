@@ -108,7 +108,7 @@ function getSourcedSupplierId(lineItem, enquiry) {
   const enqItem = enqItems.find(i => i.id === lineItem.id || i.component === lineItem.component);
   const srcRow = enqSourcing.find(s => s.enquiry_item_id === lineItem.id)
     || (enqItem ? enqSourcing.find(s => s.enquiry_item_id === enqItem.id) : null);
-  return srcRow?.supplier_id || lineItem.supplier_id || '';
+  return lineItem.supplier_id || srcRow?.supplier_id || '';
 }
 
 function getInventoryLabel(inv) {
@@ -150,6 +150,11 @@ const inputStyle = {
 // ── Allocation Matrix Modal ───────────────────────────────────────────────────
 function AllocationModal({ order, suppliers, inventoryItems, customers=[], enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
+  const { data: taxRateRows=[] } = useQuery({ queryKey:['tax-rates'], queryFn:()=>api.get('/tax-rates').then(r=>r.data||[]).catch(()=>[]) });
+  const domesticGstRates = React.useMemo(() => {
+    const configured = taxRateRows.find(r=>r.currency==='INR')?.rates || [];
+    return [...new Set([18,...configured].map(Number).filter(n=>Number.isFinite(n)&&n>=0))].sort((a,b)=>a-b);
+  }, [taxRateRows]);
   const { data: supplierPiDocs=[] } = useQuery({
     queryKey:['supplier-pi-files', order.id],
     queryFn:()=>api.get('/files', { params:{ entity_type:'supplier_order', field_name:'supplier_pi' } })
@@ -159,6 +164,8 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
   const [poRequests, setPoRequests] = React.useState({}); // lineItemId → 'idle'|'sending'|'sent'
   const [supplierPiInputs, setSupplierPiInputs] = React.useState({}); // lineItemId → PI string entered by procurement
   const [supplierPiFiles, setSupplierPiFiles] = React.useState({}); // lineItemId → File object for PI upload
+  const [allocationEditMode, setAllocationEditMode] = React.useState(false);
+  const [savingDraft, setSavingDraft] = React.useState(false);
   const allocRef = React.useRef({});
   // Fulfilled PO requests for this order — fetched on mount so defaultAlloc can pre-fill
   const [fulfilledPOReqs, setFulfilledPOReqs] = React.useState([]);
@@ -276,7 +283,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       const enqItem  = (enquiry?.items||[]).find(i=>i.id===li.id || i.component===li.component);
       const srcRow   = (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
                     || (enqItem ? (enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id) : null);
-      const resolvedSupplierId = existing?.supplier_id || srcRow?.supplier_id || '';
+      const resolvedSupplierId = existing?.supplier_id || li.supplier_id || srcRow?.supplier_id || '';
       const systemPoRef = order?.finance_po_no || order?.po_number || '';
       // ALWAYS read payment terms from live supplier record
       const liveSup   = suppliers.find(s=>s.id===resolvedSupplierId);
@@ -289,22 +296,24 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       const prevFulfilled = fulfilledPOReqs
         .filter(fr => fr.supplier_id === resolvedSupplierId)
         .sort((a,b) => new Date(b.fulfilled_at||0) - new Date(a.fulfilled_at||0))[0];
+      const effectiveSourcePrice = parseFloat(li.procurement_price)||parseFloat(srcRow?.sourced_price)||0;
       a[li.id] = {
         supplier_id:            resolvedSupplierId,
         zoho_po_number:         existing?.zoho_po_number || prevFulfilled?.zoho_po_number || '',
-        buying_price_per_unit:  existing?.buying_price_per_unit || srcRow?.sourced_price || '',
+        buying_price_per_unit:  (parseFloat(li.procurement_price)>0 ? li.procurement_price : null) || srcRow?.sourced_price || existing?.buying_price_per_unit || '',
         // confirmed_price in allocation state is a LINE total. Never copy a
         // multi-item PO's full total into every row or it multiplies on resave.
-        confirmed_price:        srcRow?.sourced_price && li.qty
-                                  ? (parseFloat(srcRow.sourced_price)*li.qty).toFixed(2)
-                                  : ((existing?.items||[]).length <= 1 ? (existing?.confirmed_price || '') : ''),
+        confirmed_price:        effectiveSourcePrice && li.qty
+                                  ? (effectiveSourcePrice*li.qty).toFixed(2)
+                                  : ((existing?.items||[]).length <= 1 ? (existing?.supplier_subtotal || '') : ''),
         confirmed_currency:     existing?.confirmed_currency || srcRow?.sourced_currency || 'INR',
         promised_delivery_date: existing?.promised_delivery_date || '',
         ...liveTerms,
+        supplier_tax_rate:       existing?.supplier_tax_rate ?? ((liveSup?.type||'').toLowerCase()==='domestic' ? 18 : 0),
         supplier_ref:           existing?.supplier_ref || prevFulfilled?.supplier_ref || '',
         notes:                  existing?.notes || '',
         _orig_payment_terms_type: liveTerms.payment_terms_type,
-        _sourced_price:         srcRow?.sourced_price,
+        _sourced_price:         (parseFloat(li.procurement_price)>0 ? li.procurement_price : null) || srcRow?.sourced_price,
         _sourced_currency:      srcRow?.sourced_currency,
         _sourced_supplier_id:   srcRow?.supplier_id,
         _existing_po_id:        existing?.id,
@@ -366,7 +375,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
     const firstRow = rows[0].row;
     const currencies = [...new Set(rows.map(({ row }) => row.confirmed_currency || 'INR'))];
     const confirmedCurrency = currencies[0] || 'INR';
-    const confirmedPrice = rows.reduce((sum, { row }) => sum + (parseFloat(row.confirmed_price) || 0), 0);
+    const supplierSubtotal = rows.reduce((sum, { row }) => sum + (parseFloat(row.confirmed_price) || 0), 0);
+    const supplier = suppliers.find(s=>s.id===supplierId);
+    const isDomestic = (supplier?.type||'').toLowerCase()==='domestic';
+    const taxRate = isDomestic ? (parseFloat(firstRow.supplier_tax_rate) || 0) : 0;
+    const taxAmount = supplierSubtotal * taxRate / 100;
+    const confirmedPrice = supplierSubtotal + taxAmount;
 
     const unitPrices = rows
       .map(({ row }) => parseFloat(row.buying_price_per_unit))
@@ -379,7 +393,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
       existing_po_id: firstRow._existing_po_id || '',
       supplier_id: supplierId,
       item_ids: itemIds,
+      item_prices: Object.fromEntries(rows.map(({itemId,row})=>[itemId, parseFloat(row.buying_price_per_unit)||parseFloat(row._sourced_price)||0])),
+      item_source_supplier_ids: Object.fromEntries(rows.map(({itemId,row})=>[itemId,row._sourced_supplier_id||''])),
       buying_price_per_unit: buyingPricePerUnit,
+      supplier_subtotal: supplierSubtotal.toFixed(2),
+      supplier_tax_rate: taxRate,
+      supplier_tax_amount: taxAmount.toFixed(2),
       confirmed_price: confirmedPrice > 0 ? confirmedPrice.toFixed(2) : '',
       confirmed_currency: confirmedCurrency,
     };
@@ -501,6 +520,24 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
     finally { setSaving(false); }
   };
 
+  const saveAllocationDraft = async () => {
+    setSavingDraft(true);
+    try {
+      await api.put('/orders/'+order.id+'/allocation-draft', {
+        items:Object.entries(alloc).map(([item_id,row])=>({
+          item_id,
+          supplier_id:row.supplier_id||'',
+          source_price:parseFloat(row.buying_price_per_unit)||parseFloat(row._sourced_price)||0,
+          source_supplier_id:row._sourced_supplier_id||'',
+        })),
+      });
+      await qc.invalidateQueries(['orders']);
+      setAllocationEditMode(false);
+      toast.success('Supplier and source prices updated');
+    } catch(e) { toast.error(e.response?.data?.error||'Failed to save changes'); }
+    finally { setSavingDraft(false); }
+  };
+
   const items = order.lineItems||[];
 
   return (
@@ -611,7 +648,20 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                         }
                       </td>
                       <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>
-                        {a._sourced_price ? fmtM(a._sourced_price,a._sourced_currency||'INR') : <span style={{color:'var(--text3)'}}>—</span>}
+                        {allocationEditMode ? (
+                          <div style={{display:'flex',gap:4,alignItems:'center'}}>
+                            <input className="input" type="number" min="0" step="0.01"
+                              disabled={poRequests[li.id]==='sent'||a._payment_blocked===true}
+                              value={a.buying_price_per_unit||''}
+                              onChange={e=>{
+                                const price=e.target.value;
+                                setAlloc(prev=>({...prev,[li.id]:{...prev[li.id],buying_price_per_unit:price,
+                                  _sourced_price:price,confirmed_price:price?(parseFloat(price)*(li.qty||0)).toFixed(2):'',_userEdited:true}}));
+                              }} style={{width:82,fontSize:11}}/>
+                          </div>
+                        ) : <span style={{display:'inline-flex',alignItems:'center',gap:4}}>
+                          {a._sourced_price ? fmtM(a._sourced_price,a._sourced_currency||'INR') : '—'}
+                        </span>}
                       </td>
                       {/* Supplier select */}
                       <td style={{minWidth:160}}>
@@ -619,7 +669,7 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                           const supplierLocked = poRequests[li.id]==='sent' || a._payment_blocked===true;
                           return <>
                         <select className="input" value={a.supplier_id||''}
-                          disabled={supplierLocked}
+                          disabled={supplierLocked || !allocationEditMode}
                           title={supplierLocked ? 'Supplier locked — already sent to Finance' : ''}
                           onChange={e=>{
                             const newSupId = e.target.value;
@@ -759,6 +809,24 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                             {a.payment_advance_pct||50}% advance
                           </div>
                         )}
+                        {(()=>{
+                          const supplier=suppliers.find(s=>s.id===a.supplier_id);
+                          if ((supplier?.type||'').toLowerCase()!=='domestic') return null;
+                          const locked=poRequests[li.id]==='sent'||a._payment_blocked===true;
+                          return <label style={{display:'flex',alignItems:'center',gap:5,fontSize:10,marginTop:5,color:'var(--text2)'}}>
+                            GST %
+                            <select className="input"
+                              disabled={locked} value={a.supplier_tax_rate??''}
+                              onChange={e=>{
+                                const rate=e.target.value;
+                                setAlloc(prev=>Object.fromEntries(Object.entries(prev).map(([id,row])=>[
+                                  id,row.supplier_id===a.supplier_id?{...row,supplier_tax_rate:rate,_userEdited:true}:row
+                                ])));
+                              }} style={{width:82,height:26,fontSize:10,padding:'2px 5px'}}>
+                              {domesticGstRates.map(rate=><option key={rate} value={rate}>{rate}%</option>)}
+                            </select>
+                          </label>;
+                        })()}
                       </td>
                     </tr>
                   );
@@ -781,6 +849,10 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
             )}
           </div>
           <div style={{display:'flex',gap:8}}>
+            {!readOnly && !allocationEditMode && <button className="btn" onClick={()=>setAllocationEditMode(true)}>✏ Edit</button>}
+            {!readOnly && allocationEditMode && <button className="btn btn-primary" disabled={savingDraft} onClick={saveAllocationDraft}>
+              {savingDraft?'Saving…':'💾 Save Changes'}
+            </button>}
             <button className="btn" onClick={onClose}>{readOnly?'Close':'Cancel'}</button>
             {/* Refresh — useful after Finance fills in PI/Zoho PO via PO Requests */}
             <button className="btn btn-sm" title="Refresh data from Finance"
@@ -975,7 +1047,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     // Prefer the PO supplier's quote; for reassigned items, retain the original
     // sourced price so Manage matches the Payment Breakdown line-for-line.
     const srcRow = srcRows.find(s=>s.supplier_id===po.supplier_id) || srcRows[0] || null;
-    return sum + ((parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
+    return sum + ((parseFloat(li.procurement_price)||parseFloat(srcRow?.sourced_price) || 0) * (li.qty||0));
   }, 0);
   const totalPurchasePrice = (() => {
     if (sourceTotal > 0) return sourceTotal;
@@ -985,6 +1057,9 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     if (Number.isFinite(bpu) && bpu > 0) return bpu * totalQty;
     return 0;
   })();
+  const supplierTaxRate = parseFloat(po.supplier_tax_rate)||0;
+  const supplierTaxAmount = parseFloat(po.supplier_tax_amount) || totalPurchasePrice*supplierTaxRate/100;
+  const supplierPayableTotal = totalPurchasePrice + supplierTaxAmount;
   // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
   const poCharges = (() => {
     const parse = (raw) => { try { if (!raw) return []; const p = typeof raw==='string'?JSON.parse(raw):raw; return Array.isArray(p)?p:[]; } catch(_) { return []; } };
@@ -993,7 +1068,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   })();
   const poChargesTotal = poCharges.reduce((s,c)=>s+(parseFloat(c.amount)||0),0);
   const poChargeNote = po.advance_amount_change_note || po.net_amount_change_note || '';
-  const grandPurchasePrice = totalPurchasePrice + poChargesTotal;
+  const grandPurchasePrice = supplierPayableTotal + poChargesTotal;
   const isBlocked=po.payment_blocked===1||po.payment_blocked===true;
   const canEditPaymentTerms = !readOnly && po.finance_returned === true && po.status === 'draft' && !isBlocked;
   const needsFinanceResend = canEditPaymentTerms;
@@ -1008,7 +1083,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
       ];
   const setStatusAndSave = async (nextStatus) => {
     const prevStatus = form.status;
-    const nextForm = { ...form, status: nextStatus, confirmed_price: totalPurchasePrice || form.confirmed_price };
+    const nextForm = { ...form, status: nextStatus, confirmed_price: supplierPayableTotal || form.confirmed_price,
+      supplier_subtotal:totalPurchasePrice,supplier_tax_rate:supplierTaxRate,supplier_tax_amount:supplierTaxAmount };
     setForm(nextForm);
     setSaving(true);
     try {
@@ -1037,7 +1113,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
     }
     setSaving(true);
     try{
-      await api.put('/supplier-orders/'+po.id,{...form, confirmed_price: totalPurchasePrice || form.confirmed_price});
+      await api.put('/supplier-orders/'+po.id,{...form, confirmed_price: supplierPayableTotal || form.confirmed_price,
+        supplier_subtotal:totalPurchasePrice,supplier_tax_rate:supplierTaxRate,supplier_tax_amount:supplierTaxAmount});
       if (canEditPaymentTerms && form.payment_terms_type === 'net') {
         await api.post('/po-requests', {
           order_id: order.id,
@@ -1235,6 +1312,9 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                 value={fmtM(grandPurchasePrice)}
                 disabled
                 style={{background:'var(--surface2)',color:'var(--text)',fontWeight:700}}/>
+              {supplierTaxRate > 0 && <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
+                Subtotal {fmtM(totalPurchasePrice)} + GST {supplierTaxRate}% ({fmtM(supplierTaxAmount)})
+              </div>}
               {poChargesTotal > 0 && (
                 <div style={{marginTop:4,fontSize:11,color:'var(--text2)'}}>
                   Base {fmtM(totalPurchasePrice)}
@@ -1547,13 +1627,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     (soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update'));
   const sourcingRows = enquiry?.sourcing || [];
   const enquiryItems = enquiry?.items || [];
-  const supplierSummaries = soList.map(so => {
+  let supplierSummaries = soList.map(so => {
     const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
     const itemBreakdown = soItems.map(li => {
       const enqItem = enquiryItems.find(ei => ei.id===li.id || ei.component===li.component);
       const srcRow = sourcingRows.find(s=>s.enquiry_item_id===li.id)
         || (enqItem ? sourcingRows.find(s=>s.enquiry_item_id===enqItem.id) : null);
-      const unitSource = parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
+      const unitSource = parseFloat(li.procurement_price) || parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
       const lineSourceTotal = unitSource * (li.qty||0);
       return {
         component: li.component,
@@ -1564,6 +1644,9 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       };
     });
     const sourceTotal = itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0);
+    const supplierTaxRate = parseFloat(so.supplier_tax_rate)||0;
+    const supplierTaxAmount = parseFloat(so.supplier_tax_amount) || sourceTotal* supplierTaxRate/100;
+    const supplierPayable = sourceTotal + supplierTaxAmount;
     // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
     const parseCharges = (raw) => {
       try {
@@ -1582,6 +1665,9 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       id: so.id,
       supplierName: supName(so.supplier_id),
       sourceTotal,
+      supplierTaxRate,
+      supplierTaxAmount,
+      supplierPayable,
       items: itemBreakdown,
       charges,
       chargesTotal,
@@ -1589,6 +1675,31 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       actualAmount: actualAmountRaw !== null ? parseFloat(actualAmountRaw) : null,
     };
   });
+  // Before POs are generated, show the provisional sourcing allocation instead
+  // of an empty ₹0 payable box.
+  if (supplierSummaries.length===0) {
+    const provisional={};
+    allItems.forEach(li=>{
+      const enqItem=enquiryItems.find(ei=>ei.id===li.id||ei.component===li.component);
+      const srcRow=sourcingRows.find(s=>s.enquiry_item_id===li.id)
+        ||(enqItem?sourcingRows.find(s=>s.enquiry_item_id===enqItem.id):null);
+      const supplierId=getSourcedSupplierId(li,enquiry);
+      if(!supplierId) return;
+      const unitSource=parseFloat(li.procurement_price)||parseFloat(srcRow?.sourced_price)||0;
+      if(!provisional[supplierId]) provisional[supplierId]=[];
+      provisional[supplierId].push({component:li.component,qty:li.qty||0,unitSource,
+        lineSourceTotal:unitSource*(li.qty||0),currency:srcRow?.sourced_currency||li.currency||'INR'});
+    });
+    supplierSummaries=Object.entries(provisional).map(([supplierId,items])=>{
+      const sourceTotal=items.reduce((sum,item)=>sum+item.lineSourceTotal,0);
+      const supplier=suppliers.find(s=>s.id===supplierId);
+      const supplierTaxRate=(supplier?.type||'').toLowerCase()==='domestic'?18:0;
+      const supplierTaxAmount=sourceTotal*supplierTaxRate/100;
+      return {id:'provisional_'+supplierId,supplierName:supName(supplierId),sourceTotal,supplierTaxRate,
+        supplierTaxAmount,supplierPayable:sourceTotal+supplierTaxAmount,items,charges:[],chargesTotal:0,
+        amountChangeNote:'',actualAmount:null};
+    });
+  }
   return (
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
@@ -1685,6 +1796,9 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                             <span>{summary.supplierName}</span>
                             <strong>{fmtM(summary.sourceTotal)}</strong>
                           </div>
+                          {summary.supplierTaxRate>0&&<div style={{display:'flex',justifyContent:'space-between',gap:12,fontSize:11,color:'var(--text2)'}}>
+                            <span>GST ({summary.supplierTaxRate}%)</span><span>{fmtM(summary.supplierTaxAmount)}</span>
+                          </div>}
                           {summary.charges.map((c,i)=>(
                             <div key={summary.id+'_c'+i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
                               <span>+ {c.name}</span>
@@ -1697,7 +1811,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                         </React.Fragment>
                       ))}
                       {(() => {
-                        const baseTotal = supplierSummaries.reduce((sum, s)=>sum+s.sourceTotal,0);
+                        const baseTotal = supplierSummaries.reduce((sum, s)=>sum+s.supplierPayable,0);
                         const allChargesTotal = supplierSummaries.reduce((sum, s)=>sum+s.chargesTotal,0);
                         return (
                           <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
@@ -1722,8 +1836,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                             </div>
                           ))}
                           <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)'}}>
-                            <span>Supplier total</span>
-                            <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</strong>
+                            <span>Subtotal</span><strong>{fmtM(summary.sourceTotal)}</strong>
+                          </div>
+                          {summary.supplierTaxRate>0&&<div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                            <span>GST ({summary.supplierTaxRate}%)</span><strong>{fmtM(summary.supplierTaxAmount)}</strong>
+                          </div>}
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,fontWeight:700}}>
+                            <span>Supplier payable</span><strong style={{color:'var(--accent)'}}>{fmtM(summary.supplierPayable)}</strong>
                           </div>
                           {summary.charges.map((c,i)=>(
                             <div key={'detc'+i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
@@ -1734,10 +1853,10 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                           {summary.chargesTotal > 0 && (
                             <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
                               <span style={{fontWeight:700}}>Grand total (incl. charges)</span>
-                              <strong style={{color:'var(--green)'}}>{fmtM(summary.sourceTotal + summary.chargesTotal)}</strong>
+                              <strong style={{color:'var(--green)'}}>{fmtM(summary.supplierPayable + summary.chargesTotal)}</strong>
                             </div>
                           )}
-                          {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.sourceTotal + summary.chargesTotal)) > 0.009 && (
+                          {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.supplierPayable + summary.chargesTotal)) > 0.009 && (
                             <div style={{display:'flex',justifyContent:'space-between',gap:12}}>
                               <span style={{color:'var(--green)'}}>Actual paid</span>
                               <strong style={{color:'var(--green)'}}>{fmtM(summary.actualAmount)}</strong>
@@ -1835,14 +1954,14 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       {/* Sourced price */}
                       <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700}}>
-                        {srcRow?.sourced_price
-                          ? fmtM(srcRow.sourced_price, srcRow.sourced_currency||li.currency)
+                        {((parseFloat(li.procurement_price)>0?li.procurement_price:null)||srcRow?.sourced_price)
+                          ? fmtM((parseFloat(li.procurement_price)>0?li.procurement_price:srcRow.sourced_price), srcRow?.sourced_currency||li.currency)
                           : <span style={{color:'var(--text3)'}}>—</span>
                         }
                       </td>
                       <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',fontWeight:700}}>
                         {(() => {
-                          const srcPrice = Number(srcRow?.sourced_price) || 0;
+                          const srcPrice = Number(li.procurement_price)||Number(srcRow?.sourced_price) || 0;
                           const base = srcPrice * (li.qty||0);
                           return base ? <div>{fmtM(base, srcRow?.sourced_currency||li.currency)}</div> : <span style={{color:'var(--text3)'}}>—</span>;
                         })()}
@@ -1896,7 +2015,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status==='negotiating'?'Confirmed':li.line_status}</span></td>
                       <td>{(()=>{
-                        const srcPrice   = Number(srcRow?.sourced_price) || 0;
+                        const srcPrice   = Number(li.procurement_price)||Number(srcRow?.sourced_price) || 0;
                         const quotePrice = Number(srcRow?.quote_price)   || 0;
                         if (!srcPrice || !quotePrice) return <span style={{color:'var(--text3)'}}>—</span>;
                         const grossUnit  = quotePrice - srcPrice;

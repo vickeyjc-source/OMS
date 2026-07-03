@@ -1376,7 +1376,7 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
       const enqItem = enquiryItems.find(ei => ei.id === li.id || ei.component === li.component);
       const srcRow = sourcingRows.find(s => s.enquiry_item_id === li.id)
         || (enqItem ? sourcingRows.find(s => s.enquiry_item_id === enqItem.id) : null);
-      const unitSource = parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
+      const unitSource = parseFloat(li.procurement_price)||parseFloat(srcRow?.sourced_price) || parseFloat(so.buying_price_per_unit) || 0;
       const lineSourceTotal = unitSource * (li.qty || 0);
       return {
         component: li.component,
@@ -1399,11 +1399,14 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
     const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
     const amountChangeNote = so.advance_amount_change_note || so.net_amount_change_note || '';
     const actualAmount = so.advance_actual_amount ?? so.net_actual_amount ?? null;
+    const sourceTotal=itemBreakdown.reduce((sum,item)=>sum+item.lineSourceTotal,0);
+    const supplierTaxRate=parseFloat(so.supplier_tax_rate)||0;
+    const supplierTaxAmount=parseFloat(so.supplier_tax_amount)||sourceTotal*supplierTaxRate/100;
     return {
       id: so.id,
       supplierOrderId: so.id,
       supplierName: supName(so.supplier_id),
-      sourceTotal: itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0),
+      sourceTotal, supplierTaxRate, supplierTaxAmount, supplierPayable:sourceTotal+supplierTaxAmount,
       items: itemBreakdown,
       charges,
       chargesTotal,
@@ -1489,6 +1492,9 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                           <span>{summary.supplierName}</span>
                           <strong>{fmtM(summary.sourceTotal)}</strong>
                         </div>
+                        {summary.supplierTaxRate>0&&<div style={{display:'flex',justifyContent:'space-between',gap:12}}>
+                          <span>GST ({summary.supplierTaxRate}%)</span><strong>{fmtM(summary.supplierTaxAmount)}</strong>
+                        </div>}
                         {/* Additional charges (freight, duty, bank fees, etc.) added at payment time */}
                         {summary.charges.map((c,i)=>(
                           <div key={i} style={{display:'flex',justifyContent:'space-between',gap:12,color:'var(--amber,#d97706)',fontWeight:600}}>
@@ -1498,9 +1504,9 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                         ))}
                         <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
                           <span>{summary.chargesTotal > 0 ? 'Grand total (incl. charges)' : 'Total supplier payable'}</span>
-                          <strong style={{color:'var(--accent)'}}>{fmtM(summary.sourceTotal + summary.chargesTotal)}</strong>
+                          <strong style={{color:'var(--accent)'}}>{fmtM(summary.supplierPayable + summary.chargesTotal)}</strong>
                         </div>
-                        {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.sourceTotal + summary.chargesTotal)) > 0.009 && (
+                        {summary.actualAmount !== null && Math.abs(summary.actualAmount - (summary.supplierPayable + summary.chargesTotal)) > 0.009 && (
                           <div style={{display:'flex',justifyContent:'space-between',gap:12,fontSize:12}}>
                             <span style={{color:'var(--green)'}}>Actual paid</span>
                             <strong style={{color:'var(--green)'}}>{fmtM(summary.actualAmount)}</strong>
@@ -1529,8 +1535,8 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                             </tr>
                           ))}
                           <tr>
-                            <td colSpan={3} style={{fontWeight:700}}>Supplier total</td>
-                            <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:'var(--accent)'}}>{fmtM(summary.sourceTotal)}</td>
+                            <td colSpan={3} style={{fontWeight:700}}>{summary.supplierTaxRate>0?'Supplier payable (incl. GST)':'Supplier total'}</td>
+                            <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:'var(--accent)'}}>{fmtM(summary.supplierPayable)}</td>
                           </tr>
                         </tbody>
                       </table>

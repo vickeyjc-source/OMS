@@ -1,36 +1,37 @@
 // client/src/App.js  v2
 
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import KeyboardProvider from './components/KeyboardProvider';
-import Layout from './components/Layout';
-import LoginPage from './pages/LoginPage';
-import DashboardPage from './pages/DashboardPage';
-import EnquiriesPage from './pages/EnquiriesPage';
-import NewEnquiryPage from './pages/NewEnquiryPage';
-import EnquiryDetailPage from './pages/EnquiryDetailPage';
-import QuotesPage from './pages/QuotesPage';
-import OrdersPage from './pages/OrdersPage';
-import NewOrderPage from './pages/NewOrderPage';
-import CustomersPage from './pages/CustomersPage';
-import SuppliersPage from './pages/SuppliersPage';
-import LineCardsPage from './pages/LineCardsPage';
-import UsersPage from './pages/UsersPage';
-import SettingsPage from './pages/SettingsPage';
-import DeliveryHubPage from './pages/DeliveryHubPage';
-import ApprovalsPage from './pages/ApprovalsPage';
-import ReportsPage from './pages/ReportsPage';
-import SourcingBinDrawerPage from './pages/SourcingBinDrawerPage';
-import ProcurementBinPage from './pages/ProcurementBinPage';
-import ClosedBinPage from './pages/ClosedBinPage';
-import DeletedBinPage from './pages/DeletedBinPage';
-import DangerZonePage from './pages/DangerZonePage';
-import FinancePage from './pages/FinancePage'; // Finance module
-import TaxSettingsPage from './pages/TaxSettingsPage'; // Tax Settings
-import InventoryPage from './pages/InventoryPage'; // Stock Inventory
 import { canAccessSection } from './utils/sections';
+
+const Layout = lazy(()=>import('./components/Layout'));
+const LoginPage = lazy(()=>import('./pages/LoginPage'));
+const DashboardPage = lazy(()=>import('./pages/DashboardPage'));
+const EnquiriesPage = lazy(()=>import('./pages/EnquiriesPage'));
+const NewEnquiryPage = lazy(()=>import('./pages/NewEnquiryPage'));
+const EnquiryDetailPage = lazy(()=>import('./pages/EnquiryDetailPage'));
+const QuotesPage = lazy(()=>import('./pages/QuotesPage'));
+const OrdersPage = lazy(()=>import('./pages/OrdersPage'));
+const NewOrderPage = lazy(()=>import('./pages/NewOrderPage'));
+const CustomersPage = lazy(()=>import('./pages/CustomersPage'));
+const SuppliersPage = lazy(()=>import('./pages/SuppliersPage'));
+const LineCardsPage = lazy(()=>import('./pages/LineCardsPage'));
+const UsersPage = lazy(()=>import('./pages/UsersPage'));
+const SettingsPage = lazy(()=>import('./pages/SettingsPage'));
+const DeliveryHubPage = lazy(()=>import('./pages/DeliveryHubPage'));
+const ApprovalsPage = lazy(()=>import('./pages/ApprovalsPage'));
+const ReportsPage = lazy(()=>import('./pages/ReportsPage'));
+const SourcingBinDrawerPage = lazy(()=>import('./pages/SourcingBinDrawerPage'));
+const ProcurementBinPage = lazy(()=>import('./pages/ProcurementBinPage'));
+const ClosedBinPage = lazy(()=>import('./pages/ClosedBinPage'));
+const DeletedBinPage = lazy(()=>import('./pages/DeletedBinPage'));
+const DangerZonePage = lazy(()=>import('./pages/DangerZonePage'));
+const FinancePage = lazy(()=>import('./pages/FinancePage'));
+const TaxSettingsPage = lazy(()=>import('./pages/TaxSettingsPage'));
+const InventoryPage = lazy(()=>import('./pages/InventoryPage'));
 
 function Spinner() {
   return (
@@ -65,7 +66,7 @@ function AppRoutes() {
   const { user, loading } = useAuth();
   if (loading) return <Spinner />;
   return (
-    <Routes>
+    <Suspense fallback={<Spinner/>}><Routes>
       <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
       <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
         <Route index element={<RequireSection section="dashboard"><DashboardPage /></RequireSection>} />
@@ -93,7 +94,7 @@ function AppRoutes() {
         <Route path="inventory" element={<RequireSection section="inventory"><InventoryPage /></RequireSection>} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/' : '/login'} replace />} />
-    </Routes>
+    </Routes></Suspense>
   );
 }
 
