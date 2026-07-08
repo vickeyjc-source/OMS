@@ -1274,12 +1274,13 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
 
                     {/* Supplier dropdown — always */}
                     <select {...inp} value={row.supplier_id||''} disabled={isReadOnly || fieldLocked}
-                      style={{ height:32, fontSize:13, width:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
+                      title={row.supplier_id?.startsWith('__inv__') ? undefined : suppliers.find(s=>s.id===row.supplier_id)?.name}
+                      style={{ height:32, fontSize:13, width:'100%', maxWidth:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
                       onChange={e=>handleSupChange(e.target.value)}>
                       <option value="">— Select —</option>
                       {itemStockHits.length>0 && <optgroup label="📦 IN STOCK">{itemStockHits.map(h=><option key={'__inv__'+h.id} value={'__inv__'+h.id}>{h.holder_type==='customer'?'👤':h.holder_type==='supplier'?'🏢':'🏭'} {h.holder_display||h.holder_name||'Warehouse'}{h.target_price?' — '+(h.target_currency||'INR')+' '+Number(h.target_price).toLocaleString('en-IN',{maximumFractionDigits:2}):''} ({h.quantity_available} pcs)</option>)}</optgroup>}
                       {itemStockHits.length>0 && <option disabled>──────────</option>}
-                      {suppliers.map(s=><option key={s.id} value={s.id}>{s.name} {s.type==='domestic'?'🇮🇳':'🌐'}</option>)}
+                      {suppliers.map(s=><option key={s.id} value={s.id}>{s.name} {s.type==='domestic'?'🇮🇳':'🌐'}{s.status==='deleted'?' (deleted)':''}</option>)}
                     </select>
 
                     {/* Qty */}
@@ -1747,7 +1748,7 @@ export default function SourcingBinDrawerPage() {
 
   const { data: enquiries = [], isLoading } = useQuery({ queryKey: ['enquiries'], queryFn: () => api.get('/enquiries').then(r => r.data), refetchInterval: 20000 });
   const { data: customers = [] } = useQuery({ queryKey: ['customers'],  queryFn: () => api.get('/customers').then(r => r.data).catch(() => []) });
-  const { data: suppliers = [] } = useQuery({ queryKey: ['suppliers'],  queryFn: () => api.get('/suppliers').then(r => r.data) });
+  const { data: suppliers = [] } = useQuery({ queryKey: ['suppliers', 'all'],  queryFn: () => api.get('/suppliers?include_deleted=1').then(r => r.data) });
   const { data: users = [] }     = useQuery({ queryKey: ['users'],      queryFn: () => api.get('/users').then(r => r.data) });
   const { data: quotes = [] }    = useQuery({ queryKey: ['quotes'],     queryFn: () => api.get('/quotes').then(r => r.data) });
   const { data: orders = [] }    = useQuery({ queryKey: ['orders'],     queryFn: () => api.get('/orders').then(r => r.data).catch(() => []) });
