@@ -685,6 +685,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
       [idx]: inferMarginMode(row, quoteRows[idx]),
     }), {})
   );
+  const [adminSupEditIdx, setAdminSupEditIdx] = useState(null);
   const [notePopover, setNotePopover] = useState(null);
   const [notePopoverPos, setNotePopoverPos] = useState({ top: 0, left: 0 });
   // Send-to-ENQ reason modal
@@ -1154,6 +1155,18 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                 return (mm === 'pct' ? s*(1+m/100) : s+m).toFixed(2);
               };
 
+              const isAdminSupplierEdit = user?.role === 'admin';
+              const isAdminEditingSupplier = adminSupEditIdx === idx;
+              const handleAdminSupSave = async () => {
+                try {
+                  await api.put(`/sourcing/${row.id}/supplier`, { supplier_id: row.supplier_id || '' });
+                  toast.success('Supplier updated');
+                  setAdminSupEditIdx(null);
+                } catch (err) {
+                  toast.error('Failed to update supplier');
+                }
+              };
+
               const handleSupChange = (supId) => {
                 if (!supId) {
                   updSrc(idx,'supplier_id','');
@@ -1273,15 +1286,27 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     <div style={{ fontSize:13, color:'var(--text2)', textAlign:'center', wordBreak:'break-word', whiteSpace:'normal', lineHeight:1.3, paddingTop:6 }}>{item.manufacturer||'—'}</div>
 
                     {/* Supplier dropdown — always */}
-                    <select {...inp} value={row.supplier_id||''} disabled={isReadOnly || fieldLocked}
-                      title={row.supplier_id?.startsWith('__inv__') ? undefined : suppliers.find(s=>s.id===row.supplier_id)?.name}
-                      style={{ height:32, fontSize:13, width:'100%', maxWidth:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
-                      onChange={e=>handleSupChange(e.target.value)}>
-                      <option value="">— Select —</option>
-                      {itemStockHits.length>0 && <optgroup label="📦 IN STOCK">{itemStockHits.map(h=><option key={'__inv__'+h.id} value={'__inv__'+h.id}>{h.holder_type==='customer'?'👤':h.holder_type==='supplier'?'🏢':'🏭'} {h.holder_display||h.holder_name||'Warehouse'}{h.target_price?' — '+(h.target_currency||'INR')+' '+Number(h.target_price).toLocaleString('en-IN',{maximumFractionDigits:2}):''} ({h.quantity_available} pcs)</option>)}</optgroup>}
-                      {itemStockHits.length>0 && <option disabled>──────────</option>}
-                      {suppliers.map(s=><option key={s.id} value={s.id}>{s.name} {s.type==='domestic'?'🇮🇳':'🌐'}{s.status==='deleted'?' (deleted)':''}</option>)}
-                    </select>
+                    <div style={{ display:'flex', alignItems:'center', gap:4, width:'100%' }}>
+                      <select {...inp} value={row.supplier_id||''}
+                        disabled={(isReadOnly || fieldLocked) && !isAdminEditingSupplier}
+                        title={row.supplier_id?.startsWith('__inv__') ? undefined : suppliers.find(s=>s.id===row.supplier_id)?.name}
+                        style={{ height:32, fontSize:13, width:'100%', maxWidth:'100%', textAlign:'left', fontWeight:row.supplier_id?600:400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', borderColor:row.supplier_id?.startsWith('__inv__')?'#86efac':undefined, color:row.supplier_id?.startsWith('__inv__')?'#15803d':undefined }}
+                        onChange={e=>isAdminEditingSupplier ? updSrc(idx,'supplier_id',e.target.value) : handleSupChange(e.target.value)}>
+                        <option value="">— Select —</option>
+                        {itemStockHits.length>0 && <optgroup label="📦 IN STOCK">{itemStockHits.map(h=><option key={'__inv__'+h.id} value={'__inv__'+h.id}>{h.holder_type==='customer'?'👤':h.holder_type==='supplier'?'🏢':'🏭'} {h.holder_display||h.holder_name||'Warehouse'}{h.target_price?' — '+(h.target_currency||'INR')+' '+Number(h.target_price).toLocaleString('en-IN',{maximumFractionDigits:2}):''} ({h.quantity_available} pcs)</option>)}</optgroup>}
+                        {itemStockHits.length>0 && <option disabled>──────────</option>}
+                        {suppliers.map(s=><option key={s.id} value={s.id}>{s.name} {s.type==='domestic'?'🇮🇳':'🌐'}{s.status==='deleted'?' (deleted)':''}</option>)}
+                      </select>
+                      {isAdminSupplierEdit && (isReadOnly || fieldLocked) && row.id && (
+                        isAdminEditingSupplier ? (
+                          <button type="button" title="Save supplier" onClick={handleAdminSupSave}
+                            style={{ flexShrink:0, width:24, height:24, border:'1px solid #86efac', background:'#dcfce7', color:'#15803d', borderRadius:5, cursor:'pointer', fontSize:13, fontWeight:800 }}>✓</button>
+                        ) : (
+                          <button type="button" title="Edit supplier (admin)" onClick={()=>setAdminSupEditIdx(idx)}
+                            style={{ flexShrink:0, width:24, height:24, border:'1px solid #d1d5db', background:'#f9fafb', color:'#374151', borderRadius:5, cursor:'pointer', fontSize:12 }}>✎</button>
+                        )
+                      )}
+                    </div>
 
                     {/* Qty */}
                     <div style={{ textAlign:'center', fontWeight:700, fontSize:13 }}>{item.quantity}</div>

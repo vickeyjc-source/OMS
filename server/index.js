@@ -1151,6 +1151,16 @@ async function nextSourNoAsync() {
   return prefix + String(next).padStart(4, '0');
 }
 
+// Admin-only: change supplier on a single sourcing row without touching any other field.
+app.put('/api/sourcing/:id/supplier', auth, asyncRoute(async (req, res) => {
+  if (req.session?.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const row = await getAsync('SELECT id FROM enquiry_sourcing WHERE id=?', [req.params.id]);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  await runAsync('UPDATE enquiry_sourcing SET supplier_id=? WHERE id=?', [req.body.supplier_id || '', req.params.id]);
+  saveNow();
+  res.json({ ok: true });
+}));
+
 app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   const e = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
   if (!e) return res.status(404).json({ error: 'Not found' });
