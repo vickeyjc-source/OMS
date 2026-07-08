@@ -1247,6 +1247,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
         await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,item_status,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
+               supplier_id=EXCLUDED.supplier_id,
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
                src_price_foreign=EXCLUDED.src_price_foreign, exchange_rate=EXCLUDED.exchange_rate,
                hsn_code=EXCLUDED.hsn_code,
