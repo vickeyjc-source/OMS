@@ -772,23 +772,16 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
 
   const handleConfirm = async () => {
     if (!form.delivery_date) { toast.error('Delivery date is required'); return; }
+    if (!shipment?.id) { toast.error('No active shipment found'); return; }
     setSaving(true);
     try {
-      const openShipments = (order.shipments || []).filter(s => s.status !== 'delivered');
-      if (!openShipments.length) {
-        toast.error('No active shipment found');
-        setSaving(false);
-        return;
-      }
-      for (const ship of openShipments) {
-        await api.put('/shipments/' + ship.id, {
-          status:       'delivered',
-          pod_ref:      form.pod_ref,
-          notes:        form.notes,
-          delivered_at: form.delivery_date,
-        });
-      }
-      toast.success(openShipments.length > 1 ? '✅ Order marked as received by customer!' : '✅ Shipment marked as delivered!');
+      await api.put('/shipments/' + shipment.id, {
+        status:       'delivered',
+        pod_ref:      form.pod_ref,
+        notes:        form.notes,
+        delivered_at: form.delivery_date,
+      });
+      toast.success('✅ Shipment marked as delivered!');
       qc.invalidateQueries(['orders']);
       onSaved();
     } catch(e) { toast.error(e.response?.data?.error||'Failed to confirm delivery'); }
@@ -824,7 +817,7 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
           <div>
             <h2>✅ Mark Received by Customer</h2>
             <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              {order.id} · {((order.shipments || []).filter(s => s.status !== 'delivered').length || 1)} active shipment{((order.shipments || []).filter(s => s.status !== 'delivered').length || 1)!==1?'s':''}
+              {order.id} · Shipment {shipment?.shipment_no || shipment?.id}
             </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
@@ -915,7 +908,7 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
           <div style={{marginTop:12,padding:'10px 14px',borderRadius:'var(--r)',
             background:'var(--green-lt)',border:'1px solid var(--green)33',fontSize:12,
             color:'var(--green)',fontWeight:600}}>
-            ✅ Confirming this will mark the remaining shipment(s) delivered and close the order.
+            ✅ Confirming this will mark this shipment delivered. The order closes automatically once every shipment on it has been marked delivered.
           </div>
         </div>
         <div className="modal-footer">
@@ -1181,19 +1174,19 @@ export default function DeliveryHubPage() {
                         </button>
                       );
                     })()}
-                    {/* Mark Received: for dispatched shipments awaiting customer */}
-                    {hasCustomerShipmentInFlight && (
+                    {/* Mark Received: only shown when there's exactly one open shipment —
+                        with multiple open shipments, use the per-shipment "Confirm" button
+                        below instead, so confirming one never silently also completes others. */}
+                    {hasCustomerShipmentInFlight && allOpenShipments.length === 1 && (
                       <button className="btn btn-xs"
                         style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
                         disabled={!canMarkCustomerReceived}
                         onClick={()=>{
-                          const activeShipment = allOpenShipments[0] || shipmentList[0] || null;
-                          if (!activeShipment) { toast.error('No shipment found for this order'); return; }
                           if (!canMarkCustomerReceived) {
                             toast.error('Wait until all supplier GRN and shipment lines are completed');
                             return;
                           }
-                          setConfirming({ order, shipment: activeShipment });
+                          setConfirming({ order, shipment: allOpenShipments[0] });
                         }}>
                         ✅ Mark Received by Customer
                       </button>
@@ -1274,6 +1267,18 @@ export default function DeliveryHubPage() {
                           </span>
                           {ship.delivered_at&&<span style={{color:'var(--text3)',marginLeft:8,fontSize:11}}>on {ship.delivered_at.slice(0,10)}</span>}
                         </div>
+                        {ship.status!=='delivered' && (
+                          <button className="btn btn-xs"
+                            style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                            disabled={!canMarkCustomerReceived}
+                            title={!canMarkCustomerReceived ? 'Wait until all supplier GRN and shipment lines are completed' : ''}
+                            onClick={()=>{
+                              if (!canMarkCustomerReceived) { toast.error('Wait until all supplier GRN and shipment lines are completed'); return; }
+                              setConfirming({ order, shipment: ship });
+                            }}>
+                            ✅ Confirm
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

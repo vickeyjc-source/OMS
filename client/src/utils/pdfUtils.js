@@ -656,3 +656,118 @@ export function generateReportPDF(title, rows, columns) {
   ${companyFooter('')}
   </body></html>`;
 }
+
+// ─── AUDIT REPORT PDF — estimate vs actual landed cost, per supplier PO ──────
+export function generateAuditReportPDF(order, audit, auditItems, customer) {
+  const FIELDS = [
+    ['Material',  'material'],
+    ['Freight',   'freight'],
+    ['Insurance', 'insurance'],
+    ['BCD',       'bcd'],
+    ['SWS',       'sws'],
+    ['CESS',      'cess'],
+    ['Bank Charges', 'bank'],
+    ['Clearing',  'clearing'],
+    ['Margin',    'margin'],
+  ];
+
+  const poSections = (auditItems || []).map((it, idx) => {
+    const rows = FIELDS.map(([label, key]) => {
+      const est = parseFloat(it['est_'+key]) || 0;
+      const act = it['act_'+key] === null || it['act_'+key] === undefined ? null : parseFloat(it['act_'+key]) || 0;
+      const variance = act === null ? null : act - est;
+      const varClass = variance === null ? '' : (variance > 0 ? 'style="color:#b91c1c;font-weight:700"' : variance < 0 ? 'style="color:#15803d;font-weight:700"' : '');
+      return `<tr>
+        <td>${label}</td>
+        <td class="right">${inr(est)}</td>
+        <td class="right">${act === null ? '—' : inr(act)}</td>
+        <td class="right" ${varClass}>${variance === null ? '—' : (variance>0?'+':'') + inr(variance)}</td>
+      </tr>`;
+    }).join('');
+
+    const estTotal = parseFloat(it.est_total) || 0;
+    const actTotal = it.act_total === null || it.act_total === undefined ? null : parseFloat(it.act_total) || 0;
+    const totalVar = actTotal === null ? null : actTotal - estTotal;
+    const totalVarClass = totalVar === null ? '' : (totalVar > 0 ? 'style="color:#b91c1c"' : totalVar < 0 ? 'style="color:#15803d"' : '');
+
+    return `
+    <div class="section-title">PO ${idx+1} — ${it.supplier_name || it.supplier_id || '—'} (${it.scope === 'international' ? 'International' : 'Domestic'})</div>
+    <table style="margin-top:0;margin-bottom:10px">
+      <thead><tr>
+        <th style="width:34%">Cost Component</th>
+        <th class="right" style="width:22%">Estimated</th>
+        <th class="right" style="width:22%">Actual</th>
+        <th class="right" style="width:22%">Variance</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot>
+        <tr class="total-row">
+          <td>TOTAL LANDED COST</td>
+          <td class="right">${inr(estTotal)}</td>
+          <td class="right">${actTotal === null ? '—' : inr(actTotal)}</td>
+          <td class="right" ${totalVarClass}>${totalVar === null ? '—' : (totalVar>0?'+':'') + inr(totalVar)}</td>
+        </tr>
+      </tfoot>
+    </table>
+    ${it.notes ? `<div style="padding:6px 8px;border:1px solid #d1d5db;font-size:9px;margin-bottom:10px"><b>Notes:</b> ${it.notes}</div>` : ''}
+    `;
+  }).join('');
+
+  const grandEst = (auditItems||[]).reduce((s,it) => s + (parseFloat(it.est_total)||0), 0);
+  const grandAct = (auditItems||[]).reduce((s,it) => s + (it.act_total===null||it.act_total===undefined ? 0 : parseFloat(it.act_total)||0), 0);
+  const anyActual = (auditItems||[]).some(it => it.act_total !== null && it.act_total !== undefined);
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Audit Report — ${order?.id || audit?.order_id}</title>
+  <style>${PDF_CSS}</style></head><body>
+  <div class="no-print">
+    <span>📋 Audit Report — ${order?.id || audit?.order_id}</span>
+    <button onclick="window.print()">🖨 Download / Print PDF</button>
+  </div>
+  ${companyHeader('AUDIT REPORT')}
+
+  <table style="margin-bottom:10px">
+    <tr>
+      <td style="width:55%;border:none;padding:0 10px 0 0;vertical-align:top">
+        <div class="section-title">ORDER DETAILS</div>
+        <table style="margin-top:0">
+          <tr><td class="label" style="width:38%">Order</td><td class="accent mono">${order?.id || audit?.order_id}</td></tr>
+          <tr><td class="label">PO Number</td><td>${order?.po_number || '—'}</td></tr>
+          <tr><td class="label">Customer</td><td>${customer?.name || order?.customer_ref || '—'}</td></tr>
+          <tr><td class="label">Closed On</td><td>${order?.closed_at || '—'}</td></tr>
+        </table>
+      </td>
+      <td style="width:45%;border:none;padding:0 0 0 10px;vertical-align:top">
+        <div class="section-title">AUDIT STATUS</div>
+        <table style="margin-top:0">
+          <tr><td class="label" style="width:42%">Status</td><td style="text-transform:capitalize">${audit?.status || 'pending'}</td></tr>
+          <tr><td class="label">Created</td><td>${audit?.created_at || '—'}</td></tr>
+          <tr><td class="label">Submitted By</td><td>${audit?.submitted_by || '—'}</td></tr>
+          <tr><td class="label">Report Date</td><td>${today()}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  ${poSections || '<div style="text-align:center;color:#6b7280;padding:20px">No purchase orders on this audit</div>'}
+
+  <div class="section-title">GRAND TOTAL — ALL SUPPLIER POs</div>
+  <table style="margin-top:0">
+    <thead><tr>
+      <th style="width:34%">&nbsp;</th>
+      <th class="right" style="width:22%">Estimated</th>
+      <th class="right" style="width:22%">Actual</th>
+      <th class="right" style="width:22%">Variance</th>
+    </tr></thead>
+    <tbody>
+      <tr class="total-row">
+        <td>ORDER TOTAL</td>
+        <td class="right">${inr(grandEst)}</td>
+        <td class="right">${anyActual ? inr(grandAct) : '—'}</td>
+        <td class="right" ${anyActual ? (grandAct-grandEst>0?'style="color:#b91c1c"':'style="color:#15803d"') : ''}>${anyActual ? ((grandAct-grandEst>0?'+':'') + inr(grandAct-grandEst)) : '—'}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  ${companyFooter(audit?.id || '')}
+  </body></html>`;
+}

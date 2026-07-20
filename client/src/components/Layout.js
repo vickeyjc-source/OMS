@@ -93,6 +93,10 @@ export default function Layout() {
             <Icon d="M2 8l4 4 8-8"/>
             Closed Bin
           </NavLink>}
+          {can('audit-bin') && <NavLink to="/audit-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+            <Icon d="M4 2h8v12H4zM6 5h4M6 8h4M6 11h2"/>
+            Audit Bin
+          </NavLink>}
           {can('finance') && (
             <NavLink to="/finance" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
               <Icon d="M2 4h12v8H2zM2 8h12M6 12v2M10 12v2M5 14h6"/>
@@ -176,7 +180,7 @@ export default function Layout() {
 }
 
 function PageTitle() {
-  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/deleted-bin':'Recycle Bin','/danger-zone':'Danger Zone','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance','/inventory':'Stock Inventory'};
+  const map = {'/':'Dashboard','/enquiries':'Enquiries','/enquiries/new':'New Enquiry','/quotes':'Quotes','/orders':'Orders','/orders/new':'New Order','/sourcing-bin':'Sourcing Bin','/procurement-bin':'Procurement Bin','/closed-bin':'Closed Bin','/audit-bin':'Audit Bin','/deleted-bin':'Recycle Bin','/danger-zone':'Danger Zone','/customers':'Customers','/suppliers':'Suppliers','/linecards':'Line Cards','/users':'User Management','/settings':'Settings','/tax-settings':'Tax Settings','/delivery-hub':'Delivery Hub','/approvals':'Approval Workflows','/reports':'Reports','/finance':'Finance','/inventory':'Stock Inventory'};
   return map[window.location.pathname] || 'Supply Chain Management System';
 }
 

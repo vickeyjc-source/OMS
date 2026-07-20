@@ -8,6 +8,7 @@ import { fmt, fmtCur, StatusBadge, isDelayed, DaysBadge } from '../utils/helpers
 import { printDoc, generateSupplierPOPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import { ALL_CURRENCIES } from '../utils/currencies';
 
 const PO_STATUS = {
   draft:                { label:'Draft',                 color:'var(--text3)',          bg:'var(--surface2)',          icon:'📝', step:0 },
@@ -1583,6 +1584,11 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
   const [managingPO, setManagingPO] = useState(null);
   const [paymentBreakdownOpen, setPaymentBreakdownOpen] = useState(true);
   const [lineItemsOpen, setLineItemsOpen] = useState(true);
+  const { data: taxRateRows=[] } = useQuery({ queryKey:['tax-rates'], queryFn:()=>api.get('/tax-rates').then(r=>r.data||[]).catch(()=>[]) });
+  const domesticGstRates = useMemo(() => {
+    const configured = taxRateRows.find(r=>r.currency==='INR')?.rates || [];
+    return [...new Set([18,...configured].map(Number).filter(n=>Number.isFinite(n)&&n>=0))].sort((a,b)=>a-b);
+  }, [taxRateRows]);
   const custName=id=>customers.find(c=>c.id===id)?.name||id;
   const inventoryById = useMemo(() => {
     const map = {};
@@ -1598,6 +1604,196 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
   const allItems=order.lineItems||[];
   const soList=order.supplierOrders||[];
   const poItemIds=soList.flatMap(so=>so.items||[]);
+  // Split is only offered on brand-new orders — before any PO exists at all.
+  // Matches the backend's own safety rail (see /orders/:id/items/:itemId/split).
+  const canSplitOrder = soList.length === 0;
+  const [splitDialog, setSplitDialog] = useState(null); // { item, qty:'', supplierId:'' }
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [mergeBusy, setMergeBusy] = useState(null); // item id currently merging back
+  // Mirrors SourcingBinDrawerPage.js's calcLanded() exactly — same CIF-based
+  // math, same field set (Freight, Insurance, Transport, Packaging, BCD, SWS,
+  // CESS, Clearing, Bank, Margin, Buffer), same per-field %/Fixed toggle — so a
+  // split-priced international item lands on the identical number Sourcing Bin
+  // would have produced.
+  const LANDED_FIELDS = [
+    { key:'freight',   label:'Freight',   group:2, landedKey:'freightINR' },
+    { key:'insurance', label:'Insurance', group:2, landedKey:'insuranceINR' },
+    { key:'transport', label:'Transport', group:2, landedKey:'transportINR' },
+    { key:'packaging', label:'Packaging', group:2, landedKey:'packagingINR' },
+    { key:'bcd',       label:'BCD',       group:3, landedKey:'bcdAmount' },
+    { key:'sws',       label:'SWS',       group:3, landedKey:'swsAmount' },
+    { key:'cess',      label:'CESS',      group:3, landedKey:'cessAmount' },
+    { key:'clearing',  label:'Clearing',  group:3, landedKey:'clearingINR' },
+    { key:'bank',      label:'Bank Charges', group:4, landedKey:'bankAmount' },
+    { key:'margin',    label:'Margin',       group:4, landedKey:'marginAmt' },
+    { key:'buffer',    label:'Buffer',       group:4, landedKey:'bufferINR' },
+  ];
+  const INTL_DEFAULT_MODES = { freight:'amt', insurance:'pct', transport:'amt', packaging:'amt',
+    bcd:'pct', sws:'pct', cess:'pct', clearing:'amt', bank:'amt', margin:'amt', buffer:'amt' };
+  const computeLanded = (d) => {
+    const qty = Number(d.qty) || 0;
+    const isIntl = d.scope==='international';
+    const unitPriceInr = isIntl ? (Number(d.srcPriceForeign)||0) * (Number(d.exchangeRate)||1) : (Number(d.price)||0);
+    const materialValue = unitPriceInr * qty;
+    const amtOf = (key, base) => {
+      const val = Number(d[key+'Val']) || 0;
+      const mode = d[key+'Mode'];
+      if (mode !== 'pct') return val;
+      return base * val / 100;
+    };
+    const freightINR = amtOf('freight', materialValue);
+    const insuranceINR = isIntl ? amtOf('insurance', materialValue) : 0;
+    const transportINR = amtOf('transport', materialValue);
+    const packagingINR = amtOf('packaging', materialValue);
+    const cifValue = materialValue + freightINR + insuranceINR;
+    const bcdAmount = isIntl ? amtOf('bcd', cifValue) : 0;
+    const swsAmount = isIntl ? amtOf('sws', cifValue) : 0;
+    const cessAmount = isIntl ? amtOf('cess', cifValue) : 0;
+    const importCost = cifValue + bcdAmount + swsAmount + cessAmount;
+    const clearingINR = isIntl ? amtOf('clearing', cifValue) : 0;
+    const bankAmount = amtOf('bank', importCost);
+    const bufferINR = amtOf('buffer', importCost);
+    const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankAmount;
+    const marginAmt = amtOf('margin', landedBeforeMargin);
+    const finalCost = landedBeforeMargin + marginAmt + bufferINR;
+    const unitLanded = qty>0 ? finalCost/qty : 0;
+    return { unitPriceInr, materialValue, freightINR, insuranceINR, transportINR, packagingINR, cifValue,
+      bcdAmount, swsAmount, cessAmount, importCost, clearingINR, bankAmount, bufferINR,
+      landedBeforeMargin, marginAmt, finalCost, unitLanded };
+  };
+
+  const buildSplitPricing = (isIntl, landed) => ({
+    scope: splitDialog.scope,
+    hsn_code: splitDialog.hsnCode || '',
+    sourced_price: landed.unitPriceInr,       // per-unit, INR — what everything else in the app reads
+    sourced_currency: 'INR',
+    lead_time: splitDialog.leadTime,
+    tax_rate: Number(splitDialog.taxRate) || 0,
+    availability: splitDialog.availability || '',
+    ...(isIntl ? {
+      sourced_currency: splitDialog.srcCurrency || 'USD',
+      exchange_rate: Number(splitDialog.exchangeRate) || 1,
+      src_price_foreign: Number(splitDialog.srcPriceForeign) || 0,
+      freight_pct: Number(splitDialog.freightVal) || 0,
+      insurance_pct: Number(splitDialog.insuranceVal) || 0,
+      duty_pct: Number(splitDialog.bcdVal) || 0,
+      cess_pct: Number(splitDialog.swsVal) || 0,
+      // DB has no dedicated CESS/Bank/Transport/Packaging/Buffer columns — same as
+      // Sourcing Bin, which keeps Transport/Packaging/Buffer purely client-side and
+      // reuses bank_fixed_usd for CESS. Everything is still captured in field_modes
+      // below so the split row can be edited later without losing these values.
+      bank_fixed_usd: Number(splitDialog.cessVal) || 0,
+      clearance_fixed_inr: Number(splitDialog.clearingVal) || 0,
+      margin_pct: Number(splitDialog.marginVal) || 0,
+      field_modes: JSON.stringify({
+        freight: splitDialog.freightMode, insurance: splitDialog.insuranceMode,
+        transport: splitDialog.transportMode, packaging: splitDialog.packagingMode,
+        bcd: splitDialog.bcdMode, sws: splitDialog.swsMode, cess: splitDialog.cessMode,
+        bank: splitDialog.bankMode, clearing: splitDialog.clearingMode,
+        margin: splitDialog.marginMode, buffer: splitDialog.bufferMode,
+        transport_val: splitDialog.transportVal, packaging_val: splitDialog.packagingVal,
+        bank_val: splitDialog.bankVal, buffer_val: splitDialog.bufferVal,
+      }),
+      freight_inr: landed.freightINR, insurance_inr: landed.insuranceINR,
+      duty_inr: landed.bcdAmount, cess_inr: landed.swsAmount,
+      bank_inr: landed.bankAmount, clearance_inr: landed.clearingINR, margin_inr: landed.marginAmt,
+    } : {}),
+  });
+
+  const confirmSplit = async () => {
+    const li = splitDialog.item;
+    const isIntl = splitDialog.scope==='international';
+    if (isIntl ? !splitDialog.srcPriceForeign : !splitDialog.price) {
+      toast.error('Enter a price for the new supplier');
+      return;
+    }
+    if (!splitDialog.leadTime) {
+      toast.error('Enter a lead time for the new supplier');
+      return;
+    }
+    setSplitBusy(true);
+    try {
+      const landed = computeLanded(splitDialog);
+      // Reopened, already-split item — save pricing changes in place rather
+      // than creating a brand-new split (that route requires 2+ fresh qty
+      // splits and would misfire against a row that's already split off).
+      if (li.split_from_item_id) {
+        await api.put(`/orders/${order.id}/items/${li.id}/split-pricing`, {
+          supplier_id: splitDialog.supplierId || '',
+          pricing: buildSplitPricing(isIntl, landed),
+        });
+        toast.success('Split pricing updated');
+        setSplitDialog(null);
+        onSaved();
+        return;
+      }
+      const offQty = Math.floor(Number(splitDialog.qty));
+      if (!Number.isFinite(offQty) || offQty <= 0 || offQty >= li.qty) {
+        toast.error(`Enter a quantity between 1 and ${li.qty-1}`);
+        return;
+      }
+      await api.post(`/orders/${order.id}/items/${li.id}/split`, {
+        splits: [
+          { qty: li.qty - offQty },                                   // stays with the original supplier, unchanged
+          { qty: offQty, supplier_id: splitDialog.supplierId || '', pricing: buildSplitPricing(isIntl, landed) },
+        ],
+      });
+      toast.success('Line item split and priced');
+      setSplitDialog(null);
+      onSaved();
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to save');
+    } finally {
+      setSplitBusy(false);
+    }
+  };
+  // Reopen a previously-split, already-priced line item in the same dialog,
+  // read-only by default — reconstructed straight from its own enquiry_sourcing
+  // row (srcRow), which the split route wrote for exactly this purpose.
+  const openSplitView = (li, srcRow) => {
+    // sourced_currency alone isn't a fully reliable signal (older split rows,
+    // written before sourced_currency was correctly persisted, may still read
+    // back as 'INR' even though they were priced as international) — also
+    // check for exchange_rate/src_price_foreign, which are only ever written
+    // for an international row on both the create and edit routes.
+    const isIntl = (srcRow?.sourced_currency && srcRow.sourced_currency !== 'INR')
+      || Number(srcRow?.exchange_rate) > 0 || Number(srcRow?.src_price_foreign) > 0;
+    const modes = (() => {
+      try { return srcRow?.field_modes ? JSON.parse(srcRow.field_modes) : {}; } catch(_) { return {}; }
+    })();
+    setSplitDialog({
+      item:li, step:2, viewOnly:true, qty: li.qty, supplierId: srcRow?.supplier_id || '',
+      scope: isIntl ? 'international' : 'domestic',
+      price: !isIntl ? (srcRow?.sourced_price||'') : '',
+      leadTime: srcRow?.lead_time || '',
+      taxRate: srcRow?.tax_rate || 18, availability: srcRow?.availability || '', hsnCode: srcRow?.hsn_code || '',
+      srcCurrency: srcRow?.sourced_currency || 'USD',
+      exchangeRate: srcRow?.exchange_rate || '', srcPriceForeign: srcRow?.src_price_foreign || '',
+      freightVal: srcRow?.freight_pct || '', freightMode: modes.freight || 'amt',
+      insuranceVal: srcRow?.insurance_pct || '', insuranceMode: modes.insurance || 'pct',
+      transportVal: modes.transport_val || '', transportMode: modes.transport || 'amt',
+      packagingVal: modes.packaging_val || '', packagingMode: modes.packaging || 'amt',
+      bcdVal: srcRow?.duty_pct || '', bcdMode: modes.bcd || 'pct',
+      swsVal: srcRow?.cess_pct || '', swsMode: modes.sws || 'pct',
+      cessVal: srcRow?.bank_fixed_usd || '', cessMode: modes.cess || 'pct',
+      clearingVal: srcRow?.clearance_fixed_inr || '', clearingMode: modes.clearing || 'amt',
+      bankVal: modes.bank_val || '', bankMode: modes.bank || 'amt',
+      marginVal: srcRow?.margin_pct || '', marginMode: modes.margin || 'amt',
+      bufferVal: modes.buffer_val || '', bufferMode: modes.buffer || 'amt',
+    });
+  };
+  const removeSplit = async (li) => {
+    setMergeBusy(li.id);
+    try {
+      await api.post(`/orders/${order.id}/items/${li.id}/merge-back`, {});
+      toast.success('Split removed — quantity merged back');
+      onSaved();
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to remove split');
+    } finally {
+      setMergeBusy(null);
+    }
+  };
   const unPOd=allItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, enquiry));
   const orderVal=allItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
   const orderTaxVal=allItems.reduce((s,li)=>{
@@ -1919,7 +2115,12 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
               <tbody>
                 {allItems.map((li,i)=>{
                   const so=soList.find(s=>(s.items||[]).includes(li.id));
-                  const enqItem=(enquiry?.items||[]).find(i=>i.id===li.id||i.component===li.component);
+                  // A row created by splitting must never fall back to matching by
+                  // component name — that's exactly what caused a split row to wrongly
+                  // show the ORIGINAL item's sourced supplier/price/lead-time. It should
+                  // only ever match its own direct enquiry_item_id (a real sourcing
+                  // record written for it specifically, e.g. by the split-pricing step).
+                  const enqItem = li.split_from_item_id ? null : (enquiry?.items||[]).find(i=>i.id===li.id||i.component===li.component);
                   const srcRow=(enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
                     ||(enqItem?(enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id):null);
                   const srcSup=srcRow?.supplier_id;
@@ -1929,6 +2130,51 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       <td className="bold">
                         {li.component}
                         <div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div>
+                        {canSplitOrder && !so && li.qty > 1 && !li.split_from_item_id && (
+                          <button className="btn btn-xs" style={{marginTop:6,color:'var(--accent)',
+                            borderColor:'var(--accent)',background:'var(--accent-lt)',fontWeight:700}}
+                            onClick={()=>{
+                              const srcId = getSourcedSupplierId(li, enquiry);
+                              const srcSupplierType = suppliers.find(s=>s.id===srcId)?.type;
+                              setSplitDialog({
+                                item:li, step:1, qty:'', supplierId:'',
+                                scope: srcSupplierType==='international' ? 'international' : 'domestic',
+                                price:'', leadTime:'',
+                                taxRate: li.tax_rate || 18, availability:'', hsnCode:'',
+                                srcCurrency:'USD', exchangeRate:'', srcPriceForeign:'',
+                                // Per-field value + mode ('pct'|'amt'), same defaults Sourcing Bin uses
+                                // for a fresh international row (INTL_DEFAULT_MODES).
+                                freightVal:'', freightMode:'amt',
+                                insuranceVal:'', insuranceMode:'pct',
+                                transportVal:'', transportMode:'amt',
+                                packagingVal:'', packagingMode:'amt',
+                                bcdVal:'', bcdMode:'pct',
+                                swsVal:'', swsMode:'pct',
+                                cessVal:'', cessMode:'pct',
+                                clearingVal:'', clearingMode:'amt',
+                                bankVal:'', bankMode:'amt',
+                                marginVal:'', marginMode:'amt',
+                                bufferVal:'', bufferMode:'amt',
+                              });
+                            }}>
+                            ✂ Split
+                          </button>
+                        )}
+                        {canSplitOrder && !so && li.split_from_item_id && (
+                          <div style={{display:'flex',gap:6,marginTop:6}}>
+                            <button className="btn btn-xs" style={{color:'var(--accent)',
+                              borderColor:'var(--accent)',background:'var(--accent-lt)',fontWeight:700}}
+                              onClick={()=>openSplitView(li, srcRow)}>
+                              👁 View
+                            </button>
+                            <button className="btn btn-xs" style={{color:'var(--red)',
+                              borderColor:'var(--red)',background:'var(--red-lt,#fef2f2)',fontWeight:700}}
+                              disabled={mergeBusy===li.id}
+                              onClick={()=>removeSplit(li)}>
+                              {mergeBusy===li.id ? 'Removing…' : '🗑 Remove split'}
+                            </button>
+                          </div>
+                        )}
                       </td>
                       <td>{fmt(li.qty)}</td>
                       <td>
@@ -2259,6 +2505,340 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
         poList={soList} poIndex={soList.findIndex(s=>s.id===managingPO.id)}
         onNavigate={(idx)=>setManagingPO(soList[idx])}
         onClose={()=>setManagingPO(null)} onSaved={()=>{setManagingPO(null);qc.invalidateQueries(['orders']);onSaved();}}/>}
+
+      {/* ── Split dialog — asks for both Qty and Supplier together ── */}
+      {splitDialog && (
+        <div className="overlay" style={{zIndex:60}}>
+          <div className={`modal ${splitDialog.step===2 && splitDialog.scope==='international' ? 'modal-xl' : 'modal-sm'}`}
+            style={splitDialog.step===2 && splitDialog.scope==='international' ? {height:'96vh',maxHeight:'96vh',width:'96vw'} : undefined}>
+            <div className="modal-header">
+              <h2>{splitDialog.viewOnly ? '👁 View Split — ' : '✂ Split '}{splitDialog.item.component}</h2>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                {splitDialog.viewOnly && (
+                  <button className="btn btn-sm" style={{color:'var(--accent)',borderColor:'var(--accent)'}}
+                    onClick={()=>setSplitDialog(d=>({...d,viewOnly:false}))}>
+                    ✏ Edit
+                  </button>
+                )}
+                <button className="close-x" onClick={()=>setSplitDialog(null)}>×</button>
+              </div>
+            </div>
+
+            {/* Step indicator */}
+            <div style={{display:'flex',alignItems:'center',gap:8,padding:'10px 20px',borderBottom:'1px solid var(--border)',background:'var(--surface2)'}}>
+              <div style={{width:20,height:20,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+                fontSize:10,fontWeight:700,background:splitDialog.step>1?'var(--accent)':'var(--accent-lt)',
+                color:splitDialog.step>1?'#fff':'var(--accent)',border:'2px solid var(--accent)'}}>
+                {splitDialog.step>1?'✓':'1'}
+              </div>
+              <span style={{fontSize:11,fontWeight:600,color:splitDialog.step===1?'var(--accent)':'var(--text2)'}}>Qty &amp; Supplier</span>
+              <div style={{flex:1,height:1,background:'var(--border-md)'}}/>
+              <div style={{width:20,height:20,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+                fontSize:10,fontWeight:700,background:splitDialog.step===2?'var(--accent-lt)':'#fff',
+                color:splitDialog.step===2?'var(--accent)':'var(--text3)',border:`2px solid ${splitDialog.step===2?'var(--accent)':'var(--border-md)'}`}}>2</div>
+              <span style={{fontSize:11,fontWeight:600,color:splitDialog.step===2?'var(--accent)':'var(--text3)'}}>Price it</span>
+            </div>
+
+            {splitDialog.step===1 && (<>
+              <div className="modal-body">
+                <div style={{fontSize:12,color:'var(--text2)',marginBottom:14}}>
+                  Currently <b>{splitDialog.item.qty}</b> units
+                  {(() => {
+                    const srcId = getSourcedSupplierId(splitDialog.item, enquiry);
+                    return srcId ? <> with ★ <b>{supName(srcId)}</b></> : null;
+                  })()}.
+                </div>
+                <div className="form-group" style={{marginBottom:12}}>
+                  <label className="label">Qty to split off</label>
+                  <input className="input" type="number" min="1" max={splitDialog.item.qty-1}
+                    value={splitDialog.qty}
+                    onChange={e=>setSplitDialog(d=>({...d,qty:e.target.value}))}
+                    placeholder={`1–${splitDialog.item.qty-1}`}/>
+                </div>
+                <div className="form-group" style={{marginBottom:4}}>
+                  <label className="label">Assign this portion to</label>
+                  <select className="input" value={splitDialog.supplierId}
+                    onChange={e=>{
+                      const supplierId = e.target.value;
+                      // Auto-select the correct pricing scope (domestic/international)
+                      // from the chosen supplier's own record — the user should never
+                      // have to remember to flip the toggle themselves in step 2.
+                      const supType = suppliers.find(s=>s.id===supplierId)?.type;
+                      setSplitDialog(d=>({...d,supplierId,
+                        scope: supType==='international' ? 'international' : supType==='domestic' ? 'domestic' : d.scope}));
+                    }}>
+                    <option value="">— Select supplier —</option>
+                    {suppliers.filter(s=>s.id!==getSourcedSupplierId(splitDialog.item, enquiry)).map(s=>
+                      <option key={s.id} value={s.id}>{s.type==='international'?'🌐':'🇮🇳'} {s.name}</option>)}
+                  </select>
+                </div>
+                {splitDialog.qty > 0 && splitDialog.qty < splitDialog.item.qty && (
+                  <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>
+                    Remaining <b>{splitDialog.item.qty - Number(splitDialog.qty)}</b> units stay where they are
+                    {(() => {
+                      const srcId = getSourcedSupplierId(splitDialog.item, enquiry);
+                      return srcId ? <> (★ {supName(srcId)})</> : null;
+                    })()}.
+                  </div>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button className="btn" onClick={()=>setSplitDialog(null)}>Cancel</button>
+                <button className="btn btn-primary"
+                  disabled={!splitDialog.qty || Number(splitDialog.qty)<=0 || Number(splitDialog.qty)>=splitDialog.item.qty || !splitDialog.supplierId}
+                  onClick={()=>setSplitDialog(d=>({...d,step:2}))}>
+                  Next: Price it →
+                </button>
+              </div>
+            </>)}
+
+            {splitDialog.step===2 && (<>
+              <div className="modal-body" style={{
+                overflowY: splitDialog.scope==='international' ? 'hidden' : 'auto',
+                padding: splitDialog.scope==='international' ? 0 : undefined,
+                flex: splitDialog.scope==='international' ? 1 : undefined,
+                minHeight: 0,
+              }}>
+              <fieldset disabled={splitDialog.viewOnly} style={{border:'none',margin:0,padding:0,minWidth:0,height:'100%'}}>
+                {splitDialog.scope==='domestic' ? (<>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:14}}>
+                    <div style={{fontSize:12,color:'var(--text2)'}}>
+                      What is <b>{supName(splitDialog.supplierId)}</b> quoting for these <b>{splitDialog.qty}</b> units?
+                    </div>
+                    <div style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 12px',flexShrink:0,
+                      borderRadius:7,fontSize:12,fontWeight:700,whiteSpace:'nowrap',
+                      background:'var(--green-lt)', color:'var(--green)', border:'1px solid var(--green)44'}}>
+                      🇮🇳 Domestic Supplier
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Price / unit (INR) <span className="req">*</span></label>
+                      <input className="input" type="number" step="0.01" value={splitDialog.price}
+                        onChange={e=>setSplitDialog(d=>({...d,price:e.target.value}))} placeholder="0.00"/>
+                    </div>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Lead time (days) <span className="req">*</span></label>
+                      <input className="input" type="number" value={splitDialog.leadTime}
+                        onChange={e=>setSplitDialog(d=>({...d,leadTime:e.target.value}))} placeholder="e.g. 15"/>
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Tax %</label>
+                      <select className="input" value={splitDialog.taxRate}
+                        onChange={e=>setSplitDialog(d=>({...d,taxRate:e.target.value}))}>
+                        {domesticGstRates.map(r=><option key={r} value={r}>{r}%</option>)}
+                      </select>
+                    </div>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label">Availability</label>
+                      <input className="input" value={splitDialog.availability}
+                        onChange={e=>setSplitDialog(d=>({...d,availability:e.target.value}))} placeholder="e.g. In stock"/>
+                    </div>
+                  </div>
+                </>) : (() => {
+                  const landed = computeLanded(splitDialog);
+                  const fmtP = n => '₹'+(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
+                  const SumRow = ({label,val,bold,highlight}) => (
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0',
+                      fontSize:highlight?14:bold?11.5:11,fontWeight:highlight?800:bold?700:400,gap:6,
+                      color:highlight?'#4ade80':bold?'#fff':'rgba(255,255,255,.65)'}}>
+                      <span>{label}</span>
+                      <span style={{fontFamily:'monospace',whiteSpace:'nowrap'}}>{fmtP(val)}</span>
+                    </div>
+                  );
+                  const SumDivider = () => <div style={{borderTop:'1px solid rgba(255,255,255,.1)',margin:'6px 0'}}/>;
+                  return (
+                  <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',height:'100%',minHeight:0}}>
+                    {/* Left — inputs */}
+                    <div style={{overflowY:'auto',padding:'16px 18px',borderRight:'1px solid var(--border)',minWidth:0}}>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:14}}>
+                        <div style={{fontSize:12,color:'var(--text2)'}}>
+                          What is <b>{supName(splitDialog.supplierId)}</b> quoting for these <b>{splitDialog.qty}</b> units?
+                        </div>
+                        <div style={{display:'inline-flex',alignItems:'center',gap:6,padding:'6px 12px',flexShrink:0,
+                          borderRadius:7,fontSize:12,fontWeight:700,whiteSpace:'nowrap',
+                          background:'var(--accent-lt)', color:'var(--accent)', border:'1px solid var(--accent)44'}}>
+                          🌐 International Supplier
+                        </div>
+                      </div>
+
+                      <div className="id-grp" style={{marginBottom:14}}>
+                        <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text)',paddingBottom:6,marginBottom:10,borderBottom:'2px solid var(--border)'}}>1. Material Details</div>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1.4fr',gap:'10px 14px',marginBottom:10}}>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">HSN Code</label>
+                            <input className="input" value={splitDialog.hsnCode}
+                              onChange={e=>setSplitDialog(d=>({...d,hsnCode:e.target.value}))} placeholder="e.g. 8542"/>
+                          </div>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Lead time (days) <span className="req">*</span></label>
+                            <input className="input" type="number" value={splitDialog.leadTime}
+                              onChange={e=>setSplitDialog(d=>({...d,leadTime:e.target.value}))} placeholder="e.g. 15"/>
+                          </div>
+                        </div>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:'10px 14px'}}>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Currency</label>
+                            <select className="input" value={splitDialog.srcCurrency}
+                              onChange={e=>setSplitDialog(d=>({...d,srcCurrency:e.target.value}))}>
+                              {ALL_CURRENCIES.filter(c=>c!=='INR').map(c=><option key={c}>{c}</option>)}
+                            </select>
+                          </div>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Exchange Rate (1 {splitDialog.srcCurrency} = ₹) <span className="req">*</span></label>
+                            <input className="input" type="number" step="0.01" value={splitDialog.exchangeRate}
+                              onChange={e=>setSplitDialog(d=>({...d,exchangeRate:e.target.value}))} placeholder="83.42"/>
+                          </div>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Price / unit ({splitDialog.srcCurrency}) <span className="req">*</span></label>
+                            <input className="input" type="number" step="0.0001" value={splitDialog.srcPriceForeign}
+                              onChange={e=>setSplitDialog(d=>({...d,srcPriceForeign:e.target.value}))} placeholder="0.00"/>
+                          </div>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label" style={{color:'var(--green)'}}>= Price / unit (₹)</label>
+                            <div className="input" style={{background:'var(--green-lt)',color:'var(--green)',
+                              border:'1.5px solid var(--green)',fontWeight:700,display:'flex',alignItems:'center'}}>
+                              {(Number(splitDialog.srcPriceForeign)>0 && Number(splitDialog.exchangeRate)>0)
+                                ? `₹${(Number(splitDialog.srcPriceForeign)*Number(splitDialog.exchangeRate)).toLocaleString('en-IN',{maximumFractionDigits:2})}`
+                                : '—'}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {[2,3,4].map(groupNum=>(
+                        <div className="id-grp" key={groupNum} style={{marginBottom:groupNum<4?14:0}}>
+                          <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text)',paddingBottom:6,marginBottom:10,borderBottom:'2px solid var(--border)'}}>
+                            {groupNum}. {groupNum===2?'Freight & Logistics':groupNum===3?'Import Charges':'Financial'}
+                          </div>
+                          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'10px 14px'}}>
+                            {LANDED_FIELDS.filter(f=>f.group===groupNum).map(f=>{
+                              const qty = Number(splitDialog.qty)||0;
+                              const perUnit = qty>0 ? (landed[f.landedKey]||0)/qty : 0;
+                              return (
+                              <div key={f.key} className="form-group" style={{marginBottom:0}}>
+                                <label className="label" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                                  {f.label}
+                                  <div style={{display:'flex',border:'1px solid var(--border-md)',borderRadius:5,overflow:'hidden'}}>
+                                    {['pct','amt'].map(m=>(
+                                      <button key={m} type="button"
+                                        onClick={()=>setSplitDialog(d=>({...d,[f.key+'Mode']:m}))}
+                                        style={{padding:'2px 7px',fontSize:9.5,fontWeight:700,border:'none',cursor:'pointer',
+                                          background:splitDialog[f.key+'Mode']===m?'var(--accent)':'transparent',
+                                          color:splitDialog[f.key+'Mode']===m?'#fff':'var(--text3)'}}>
+                                        {m==='pct'?'%':'₹'}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </label>
+                                <input className="input" type="number" value={splitDialog[f.key+'Val']}
+                                  onChange={e=>setSplitDialog(d=>({...d,[f.key+'Val']:e.target.value}))}/>
+                                {perUnit > 0 && <span style={{fontSize:10,color:'var(--text3)',fontWeight:600}}>₹{perUnit.toLocaleString('en-IN',{maximumFractionDigits:2})} / unit</span>}
+                              </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+
+                      <div className="id-grp" style={{marginTop:14}}>
+                        <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.05em',color:'var(--text)',paddingBottom:6,marginBottom:10,borderBottom:'2px solid var(--border)'}}>5. Tax &amp; Availability</div>
+                        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px 14px'}}>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Tax %</label>
+                            <select className="input" value={splitDialog.taxRate}
+                              onChange={e=>setSplitDialog(d=>({...d,taxRate:e.target.value}))}>
+                              {domesticGstRates.map(r=><option key={r} value={r}>{r}%</option>)}
+                            </select>
+                          </div>
+                          <div className="form-group" style={{marginBottom:0}}>
+                            <label className="label">Availability</label>
+                            <input className="input" value={splitDialog.availability}
+                              onChange={e=>setSplitDialog(d=>({...d,availability:e.target.value}))} placeholder="e.g. In stock"/>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{marginTop:14,padding:'12px 14px',borderRadius:8,
+                        background:'var(--green-lt)',border:'1.5px solid var(--green)'}}>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12}}>
+                          <div>
+                            <div className="label" style={{color:'var(--green)',marginBottom:2}}>Unit Price — Landed Cost (₹)</div>
+                            <div style={{fontWeight:800,fontSize:15,color:'var(--green)'}}>
+                              ₹{landed.unitLanded.toLocaleString('en-IN',{maximumFractionDigits:2})}
+                            </div>
+                          </div>
+                          <div style={{textAlign:'right'}}>
+                            <div className="label" style={{color:'var(--green)',marginBottom:2}}>Total ({splitDialog.qty} units)</div>
+                            <div style={{fontWeight:800,fontSize:15,color:'var(--green)'}}>
+                              ₹{landed.finalCost.toLocaleString('en-IN',{maximumFractionDigits:2})}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Right — live calculation summary, same dark panel Sourcing Bin uses */}
+                    <div style={{overflowY:'auto',padding:'14px 16px',background:'#0f172a',display:'flex',flexDirection:'column'}}>
+                      <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.1em',color:'rgba(255,255,255,.4)',marginBottom:12}}>
+                        Calculation Summary
+                      </div>
+                      <div style={{fontSize:14,fontWeight:700,color:'#fff',marginBottom:14,paddingBottom:8,borderBottom:'1px solid rgba(255,255,255,.12)'}}>
+                        {splitDialog.item.component} <span style={{fontWeight:400,opacity:.5,fontSize:11}}>×{splitDialog.qty}</span>
+                      </div>
+                      {!landed.unitPriceInr ? (
+                        <div style={{textAlign:'center',fontSize:11,color:'rgba(255,255,255,.3)',padding:'24px 0'}}>
+                          Enter source price to see calculation
+                        </div>
+                      ) : (<>
+                        <SumRow label="Material Value" val={landed.materialValue}/>
+                        <SumRow label={`+ Freight (${splitDialog.freightVal||0}${splitDialog.freightMode==='pct'?'%':'₹'})`} val={landed.freightINR}/>
+                        <SumRow label={`+ Insurance (${splitDialog.insuranceVal||0}${splitDialog.insuranceMode==='pct'?'%':'₹'})`} val={landed.insuranceINR}/>
+                        <SumRow label="= CIF Value" val={landed.cifValue} bold/>
+                        <SumDivider/>
+                        <SumRow label={`+ BCD (${splitDialog.bcdVal||0}${splitDialog.bcdMode==='pct'?'%':'₹'})`} val={landed.bcdAmount}/>
+                        <SumRow label={`+ SWS (${splitDialog.swsVal||0}${splitDialog.swsMode==='pct'?'%':'₹'})`} val={landed.swsAmount}/>
+                        <SumRow label={`+ CESS (${splitDialog.cessVal||0}${splitDialog.cessMode==='pct'?'%':'₹'})`} val={landed.cessAmount}/>
+                        <SumRow label="= Import Cost" val={landed.importCost} bold/>
+                        <SumDivider/>
+                        {landed.clearingINR>0 && <SumRow label={`+ Clearing (${splitDialog.clearingVal||0}${splitDialog.clearingMode==='pct'?'%':'₹'})`} val={landed.clearingINR}/>}
+                        {landed.transportINR>0 && <SumRow label={`+ Transport (${splitDialog.transportVal||0}${splitDialog.transportMode==='pct'?'%':'₹'})`} val={landed.transportINR}/>}
+                        {landed.packagingINR>0 && <SumRow label={`+ Packaging (${splitDialog.packagingVal||0}${splitDialog.packagingMode==='pct'?'%':'₹'})`} val={landed.packagingINR}/>}
+                        {landed.bankAmount>0 && <SumRow label={`+ Bank Charges (${splitDialog.bankVal||0}${splitDialog.bankMode==='pct'?'%':'₹'})`} val={landed.bankAmount}/>}
+                        <SumRow label="= Landed Before Margin" val={landed.landedBeforeMargin} bold/>
+                        <SumDivider/>
+                        <SumRow label={`+ Margin (${splitDialog.marginVal||0}${splitDialog.marginMode==='pct'?'%':'₹'})`} val={landed.marginAmt}/>
+                        {landed.bufferINR>0 && <SumRow label={`+ Buffer (${splitDialog.bufferVal||0}${splitDialog.bufferMode==='pct'?'%':'₹'})`} val={landed.bufferINR}/>}
+                        <SumRow label="= Final Cost" val={landed.finalCost} bold/>
+                        <SumRow label={`Unit Landed Cost (÷${splitDialog.qty})`} val={landed.unitLanded}/>
+                        <SumDivider/>
+                        <SumRow label={`Total (${splitDialog.qty} units)`} val={landed.finalCost} highlight/>
+                      </>)}
+                    </div>
+                  </div>
+                  );
+                })()}
+              </fieldset>
+              </div>
+              <div className="modal-footer">
+                {splitDialog.viewOnly ? (
+                  <button className="btn" onClick={()=>setSplitDialog(null)}>Close</button>
+                ) : (<>
+                  {!splitDialog.item.split_from_item_id &&
+                    <button className="btn" onClick={()=>setSplitDialog(d=>({...d,step:1}))}>← Back</button>}
+                  <button className="btn btn-primary"
+                    disabled={splitBusy || !splitDialog.leadTime || (splitDialog.scope==='domestic' ? !splitDialog.price : (!splitDialog.srcPriceForeign || !splitDialog.exchangeRate))}
+                    onClick={confirmSplit}>
+                    {splitBusy ? 'Saving…' : (splitDialog.item.split_from_item_id ? '💾 Save Changes' : '✓ Confirm Split')}
+                  </button>
+                </>)}
+              </div>
+            </>)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

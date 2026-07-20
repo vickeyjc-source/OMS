@@ -289,6 +289,7 @@ const SECTION_DEFINITIONS = [
   { key: 'delivery-hub', label: 'Delivery Hub' },
   { key: 'inventory', label: 'Stock Inventory' },
   { key: 'closed-bin', label: 'Closed Bin' },
+  { key: 'audit-bin', label: 'Audit Bin' },
   { key: 'deleted-bin', label: 'Recycle Bin', adminOnly: true, locked: true },
   { key: 'danger-zone', label: 'Danger Zone', adminOnly: true, locked: true },
   { key: 'finance', label: 'Finance' },
@@ -376,6 +377,132 @@ async function updateEnquiryStatusAfterQuoteOrder(enquiryId, quoteId) {
   await runAsync('UPDATE enquiries SET status=?, updated_at=? WHERE id=?', [nextStatus, nowStr(), enquiryId]);
 }
 
+// ── Audit Bin — snapshot the estimated landed cost for every supplier PO on an
+// order the moment it closes, so Procurement's actual-vs-estimate reconciliation
+// always has a stable baseline that can't silently drift if sourcing data
+// changes later. Called from both places an order's status becomes 'closed'.
+// Defensive/non-blocking by design — never throws into its caller.
+function parseJsonSafe(raw, fallback) {
+  if (!raw) return fallback;
+  try { const p = typeof raw === 'string' ? JSON.parse(raw) : raw; return Array.isArray(p) ? p : fallback; }
+  catch(_) { return fallback; }
+}
+async function createCostAudit(orderId) {
+  try {
+    const existing = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [orderId]);
+    if (existing) return;
+
+    const order = await getAsync('SELECT * FROM orders WHERE id=?', [orderId]);
+    if (!order) return;
+    const supplierOrders = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [orderId]);
+    if (!supplierOrders.length) return;
+
+    const soIds = supplierOrders.map(s => s.id);
+    const soItemRows = await allAsync(
+      'SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')',
+      soIds
+    );
+    const orderItems = await allAsync('SELECT * FROM order_items WHERE order_id=?', [orderId]);
+    const itemsById = {}; orderItems.forEach(li => { itemsById[li.id] = li; });
+
+    const enquiryItems = order.enquiry_id
+      ? await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [order.enquiry_id])
+      : [];
+    // Resolve each order_item to the enquiry_sourcing row that actually priced it —
+    // split-created items were written keyed to their own id (see the split route);
+    // every other item has to be re-found via its original enquiry_item.
+    const resolvedSourcingId = {};
+    orderItems.forEach(li => {
+      if (li.split_from_item_id) { resolvedSourcingId[li.id] = li.id; return; }
+      const enqItem = enquiryItems.find(ei => ei.component === li.component && (ei.manufacturer||'') === (li.manufacturer||''));
+      resolvedSourcingId[li.id] = enqItem ? enqItem.id : null;
+    });
+    const searchIds = [...new Set(Object.values(resolvedSourcingId).filter(Boolean))];
+    const sourcingRows = searchIds.length
+      ? await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id IN (' + searchIds.map(()=>'?').join(',') + ') ORDER BY updated_at DESC', searchIds)
+      : [];
+    const srcByResolvedId = {};
+    sourcingRows.forEach(s => { if (!srcByResolvedId[s.enquiry_item_id]) srcByResolvedId[s.enquiry_item_id] = s; });
+
+    const auditId = uuid();
+    await runAsync('INSERT INTO order_cost_audits (id, order_id, status, created_at) VALUES (?,?,?,?)',
+      [auditId, orderId, 'pending', nowStr()]);
+
+    for (const so of supplierOrders) {
+      const itemIds = soItemRows.filter(r => r.supplier_order_id === so.id).map(r => r.item_id);
+      const items = itemIds.map(id => itemsById[id]).filter(Boolean);
+      const customerTotal = items.reduce((s, li) => {
+        const base = (Number(li.qty)||0) * (Number(li.unit_price)||0);
+        return s + base + base * ((Number(li.tax_rate)||0)/100);
+      }, 0);
+
+      // Material cost is the PO's own confirmed price — the final procurement
+      // decision Procurement actually locked in — NOT re-derived from
+      // enquiry_sourcing, which can have moved on since (re-priced, re-sourced,
+      // etc.) after the PO was raised. The structured freight/duty/etc.
+      // breakdown still comes from enquiry_sourcing, since the PO itself has
+      // no per-charge columns — only its confirmed_price/buying_price_per_unit.
+      const bpu = parseFloat(so.buying_price_per_unit);
+      const poMaterialTotal = bpu > 0 ? bpu * items.reduce((s,li)=>s+(Number(li.qty)||0),0)
+        : (parseFloat(so.confirmed_price) || 0);
+
+      const totals = { material: poMaterialTotal, freight:0, insurance:0, bcd:0, sws:0, cess:0, bank:0, clearing:0, margin:0 };
+      let scope = 'domestic';
+      for (const li of items) {
+        const rid = resolvedSourcingId[li.id];
+        const src = rid ? srcByResolvedId[rid] : null;
+        if (!src) continue;
+        const isIntl = (src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0;
+        if (isIntl) scope = 'international';
+        totals.freight   += Number(src.freight_inr) || 0;
+        totals.insurance += Number(src.insurance_inr) || 0;
+        totals.bcd       += Number(src.duty_inr) || 0;
+        totals.sws       += Number(src.cess_inr) || 0;
+        totals.bank      += Number(src.bank_inr) || 0;
+        totals.clearing  += Number(src.clearance_inr) || 0;
+        totals.margin    += Number(src.margin_inr) || 0;
+      }
+      // CESS reuses bank_fixed_usd on enquiry_sourcing (same convention as the split feature) — no separate *_inr column exists for it, so back it out of the raw pct/amt the same way the split route computes it, using cif value = material+freight+insurance.
+      const cifValue = totals.material + totals.freight + totals.insurance;
+      let cessTotal = 0;
+      for (const li of items) {
+        const rid = resolvedSourcingId[li.id];
+        const src = rid ? srcByResolvedId[rid] : null;
+        if (!src) continue;
+        const modesObj = (() => { try { return typeof src.field_modes === 'string' ? JSON.parse(src.field_modes||'{}') : (src.field_modes||{}); } catch(_) { return {}; } })();
+        const cessRaw = Number(src.bank_fixed_usd) || 0;
+        cessTotal += modesObj.cess === 'pct' ? (cifValue * cessRaw / 100) : cessRaw;
+      }
+      totals.cess = cessTotal;
+
+      // Ad-hoc additional charges already committed to this PO before delivery
+      // (entered during payment processing) — real money, folds into the estimate total.
+      let fq = null;
+      try { fq = await getAsync('SELECT additional_charges FROM finance_queue WHERE supplier_order_id=?', [so.id]); } catch(_) {}
+      const netCharges = parseJsonSafe(so.net_additional_charges, []);
+      const advCharges = parseJsonSafe(fq?.additional_charges, []);
+      const charges = advCharges.length ? advCharges : netCharges;
+      const chargesTotal = charges.reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+
+      const estTotal = totals.material + totals.freight + totals.insurance + totals.bcd + totals.sws
+        + totals.cess + totals.bank + totals.clearing + totals.margin + chargesTotal;
+
+      const supplier = so.supplier_id ? await getAsync('SELECT name FROM suppliers WHERE id=?', [so.supplier_id]) : null;
+
+      await runAsync(
+        `INSERT INTO order_cost_audit_items
+           (id, audit_id, order_id, supplier_order_id, supplier_id, supplier_name, scope, customer_total,
+            est_material, est_freight, est_insurance, est_bcd, est_sws, est_cess, est_bank, est_clearing, est_margin, est_total)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), auditId, orderId, so.id, so.supplier_id||'', supplier?.name||'', scope, customerTotal,
+         totals.material, totals.freight, totals.insurance, totals.bcd, totals.sws, totals.cess, totals.bank, totals.clearing, totals.margin, estTotal]
+      );
+    }
+  } catch(err) {
+    console.error('[createCostAudit] failed for order', orderId, err.message);
+  }
+}
+
 // Dept permissions
 const DEPT_PERMS = {
   management:  { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
@@ -387,7 +514,7 @@ const DEPT_PERMS = {
   approvers:   { canSeeAll: true,  canSeeProcurementPrice: true,  canSeeCustomer: true,  canApprove: true  },
 };
 function getPerms(user) { return DEPT_PERMS[user.department] || DEPT_PERMS.sales; }
-const ORDER_FULL_ACCESS_SECTIONS = ['dashboard','orders','new-order','quotes','procurement-bin','delivery-hub','finance','closed-bin','reports'];
+const ORDER_FULL_ACCESS_SECTIONS = ['dashboard','orders','new-order','quotes','procurement-bin','delivery-hub','finance','closed-bin','audit-bin','reports'];
 const ENQUIRY_FULL_ACCESS_SECTIONS = ['enquiries','new-enquiry','quotes','orders','new-order','sourcing-bin','procurement-bin','reports'];
 function hasAllowedSection(user, allowedSections, sectionKeys) {
   if (!user) return false;
@@ -655,12 +782,12 @@ app.get('/api/sections', adminOnly, sectionGate('users'), (req, res) => {
 });
 
 const SECTION_API_ACCESS = {
-  customers: ['customers', 'dashboard', 'enquiries', 'new-enquiry', 'quotes', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'reports'],
+  customers: ['customers', 'dashboard', 'enquiries', 'new-enquiry', 'quotes', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'audit-bin', 'reports'],
   linecards: ['linecards', 'enquiries', 'new-enquiry', 'suppliers', 'inventory'],
-  suppliers: ['suppliers', 'enquiries', 'new-enquiry', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'reports'],
+  suppliers: ['suppliers', 'enquiries', 'new-enquiry', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'delivery-hub', 'inventory', 'finance', 'closed-bin', 'audit-bin', 'reports'],
   enquiries: ['enquiries', 'new-enquiry', 'quotes', 'orders', 'new-order', 'sourcing-bin', 'procurement-bin', 'reports'],
   quotes: ['quotes', 'orders', 'new-order', 'sourcing-bin', 'reports'],
-  orders: ['orders', 'new-order', 'quotes', 'procurement-bin', 'delivery-hub', 'finance', 'closed-bin', 'reports', 'dashboard'],
+  orders: ['orders', 'new-order', 'quotes', 'procurement-bin', 'delivery-hub', 'finance', 'closed-bin', 'audit-bin', 'reports', 'dashboard'],
   approvals: ['approvals'],
   inventory: ['inventory', 'sourcing-bin', 'procurement-bin', 'finance'],
   settings: ['settings', 'procurement-bin', 'finance'],
@@ -1770,6 +1897,7 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
 
   if (d.status === 'closed') {
     await runAsync('UPDATE orders SET closed_at=? WHERE id=?', [nowStr(), oid]);
+    try { await createCostAudit(oid); } catch(_) {}
     if (o.enquiry_id) {
       await runAsync("UPDATE enquiries SET status='closed', updated_at=? WHERE id=?", [nowStr(), o.enquiry_id]);
     }
@@ -2714,6 +2842,13 @@ app.delete('/api/supplier-orders/:id', auth, asyncRoute(async (req, res) => {
   if (!so) return res.status(404).json({ error: 'Not found' });
   await runAsync('DELETE FROM supplier_order_items WHERE supplier_order_id=?', [req.params.id]);
   await runAsync('DELETE FROM supplier_orders WHERE id=?', [req.params.id]);
+  // If that was the order's last PO, its status must fall back out of any
+  // PO-specific stage (e.g. 'sup_payment_update') — otherwise the order gets
+  // stuck permanently read-only in Procurement even though it has zero POs.
+  const remaining = await getAsync('SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=?', [so.order_id]);
+  if ((remaining?.c || 0) === 0) {
+    await runAsync("UPDATE orders SET status='procurement' WHERE id=? AND status NOT IN ('closed','cancelled')", [so.order_id]);
+  }
   saveNow();
   res.json({ ok: true });
 }));
@@ -2771,6 +2906,322 @@ app.post('/api/orders/:id/deduplicate-pos', auth, asyncRoute(async (req, res) =>
   }
   saveNow();
   res.json({ ok: true, removed: toDelete.length });
+}));
+
+// ── Split a line item's quantity across suppliers (e.g. domestic + international) ──
+// Only allowed while the order has NO purchase orders yet at all — i.e. brand-new
+// orders, before procurement has started. This sidesteps the destructive
+// PUT /api/orders/:id lineItems-replace path entirely; that endpoint is never
+// touched by this feature.
+app.post('/api/orders/:id/items/:itemId/split', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const itemId = req.params.itemId;
+  const { splits } = req.body || {};
+
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const existingPOCount = await getAsync('SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=?', [oid]);
+  if ((existingPOCount?.c || 0) > 0) {
+    return res.status(400).json({ error: 'This order already has purchase orders — splitting a line item is only available on new orders, before any PO has been raised.' });
+  }
+
+  const item = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [itemId, oid]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this order' });
+
+  if (!Array.isArray(splits) || splits.length < 2) {
+    return res.status(400).json({ error: 'Provide at least two split quantities' });
+  }
+  const qtys = splits.map(s => Number(s?.qty));
+  if (qtys.some(q => !Number.isFinite(q) || q <= 0)) {
+    return res.status(400).json({ error: 'Each split quantity must be a positive number' });
+  }
+  const total = qtys.reduce((s,q)=>s+q, 0);
+  if (total !== Number(item.qty)) {
+    return res.status(400).json({ error: `Split quantities (${total}) must add up to the original quantity (${item.qty})` });
+  }
+
+  // Shrink the original row to the first split's quantity — it keeps its id,
+  // so anything already linked to it (e.g. sourcing data) stays intact.
+  // If a supplier was chosen for this portion in the split dialog, apply it.
+  const firstSupplier = splits[0]?.supplier_id;
+  await runAsync('UPDATE order_items SET qty=?, supplier_id=COALESCE(NULLIF(?,\'\'), supplier_id) WHERE id=?',
+    [qtys[0], firstSupplier || '', itemId]);
+
+  // Create a brand-new, ordinary order_item for each additional split — same
+  // component/dates, tagged with split_from_item_id so it can be safely merged
+  // back later (even after a reload), and its own supplier + pricing if the
+  // split dialog's pricing step was filled in.
+  const newIds = [];
+  for (let i = 1; i < qtys.length; i++) {
+    const newId = uuid();
+    const splitSupplier = splits[i]?.supplier_id || '';
+    const pricing = splits[i]?.pricing || null;
+    const taxRate = pricing?.tax_rate ?? item.tax_rate ?? 0;
+
+    await runAsync(
+      `INSERT INTO order_items
+         (id, order_id, component, manufacturer, ipn, qty, unit_price, procurement_price,
+          currency, order_date, delivery_date, supplier_id, line_status, sort_order, tax_rate,
+          split_from_item_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [newId, oid, item.component, item.manufacturer||'', item.ipn||'', qtys[i],
+       item.unit_price||0, item.procurement_price||0, item.currency||'INR',
+       item.order_date||'', item.delivery_date||'', splitSupplier, item.line_status||'negotiating',
+       item.sort_order||0, taxRate, itemId]
+    );
+    newIds.push(newId);
+
+    // Write a real sourcing record for this new item — this is what makes it
+    // display correctly everywhere (Sourced From / Source Price / Lead Time)
+    // through the SAME lookup every other line item already uses, instead of
+    // inventing a second, competing source of pricing data.
+    //
+    // The landed-cost math below mirrors calcLanded() in SourcingBinDrawerPage.js
+    // exactly (CIF-based, per-field %/fixed mode) — computed here server-side
+    // rather than trusting the client's numbers, same as anywhere else money
+    // is involved.
+    if (pricing && splitSupplier) {
+      const isIntl = pricing.scope === 'international';
+      const exRate = isIntl ? (Number(pricing.exchange_rate) || 1) : 1;
+      const unitPriceInr = isIntl ? (Number(pricing.src_price_foreign)||0) * exRate : (Number(pricing.sourced_price)||0);
+      const materialValue = unitPriceInr * qtys[i];
+
+      const modes = pricing.field_modes ? (typeof pricing.field_modes==='string' ? JSON.parse(pricing.field_modes) : pricing.field_modes) : {};
+      const amtOf = (key, pctVal, base) => (modes[key]==='pct') ? (base * (Number(pctVal)||0) / 100) : (Number(pctVal)||0);
+
+      const freightInr   = amtOf('freight', pricing.freight_pct, materialValue);
+      const insuranceInr = isIntl ? amtOf('insurance', pricing.insurance_pct, materialValue) : 0;
+      const cifValue      = materialValue + freightInr + insuranceInr;
+      const dutyInr        = isIntl ? amtOf('bcd', pricing.duty_pct, cifValue) : 0;
+      const swsBase         = modes.sws==='pct' ? dutyInr : cifValue;
+      const cessInr          = isIntl ? amtOf('sws', pricing.cess_pct, swsBase) : 0;
+      const bankInr           = isIntl ? amtOf('bank', pricing.bank_fixed_usd, cifValue) : 0;
+      const importCost         = cifValue + dutyInr + cessInr + bankInr;
+      const clearanceInr        = isIntl ? amtOf('clearing', pricing.clearance_fixed_inr, cifValue) : 0;
+      const landedBeforeMargin   = importCost + clearanceInr;
+      const marginInr             = amtOf('margin', pricing.margin_pct, landedBeforeMargin);
+
+      await runAsync(
+        `INSERT INTO enquiry_sourcing
+           (id, enquiry_id, enquiry_item_id, supplier_id, sourced_price, sourced_currency,
+            availability, lead_time, item_status, updated_by, updated_at, hsn_code,
+            exchange_rate, src_price_foreign, freight_pct, insurance_pct, duty_pct, cess_pct,
+            bank_fixed_usd, clearance_fixed_inr, margin_pct, field_modes,
+            freight_inr, insurance_inr, duty_inr, cess_inr, bank_inr, clearance_inr, margin_inr, tax_rate,
+            quote_price, quote_currency)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), order.enquiry_id || '', newId, splitSupplier,
+         unitPriceInr, isIntl ? (pricing.sourced_currency||'USD') : 'INR',
+         pricing.availability||'', String(pricing.lead_time||''), 'ready',
+         req.session.user?.id || '', nowStr(), pricing.hsn_code||'',
+         isIntl ? exRate : null, isIntl ? (Number(pricing.src_price_foreign)||0) : null,
+         isIntl ? (Number(pricing.freight_pct)||0) : null, isIntl ? (Number(pricing.insurance_pct)||0) : null,
+         isIntl ? (Number(pricing.duty_pct)||0) : null, isIntl ? (Number(pricing.cess_pct)||0) : null,
+         isIntl ? (Number(pricing.bank_fixed_usd)||0) : null, isIntl ? (Number(pricing.clearance_fixed_inr)||0) : null,
+         Number(pricing.margin_pct)||0, isIntl ? (pricing.field_modes||null) : null,
+         isIntl ? freightInr : null, isIntl ? insuranceInr : null, isIntl ? dutyInr : null, isIntl ? cessInr : null,
+         isIntl ? bankInr : null, isIntl ? clearanceInr : null, marginInr,
+         taxRate,
+         // Customer-facing price doesn't change just because procurement re-sourced
+         // this portion from a different supplier — the customer already agreed to
+         // this item's price. Gross Margin needs this to compute at all.
+         Number(item.unit_price)||0, item.currency||'INR']
+      );
+    }
+  }
+
+  saveNow();
+  const updatedItems = await allAsync('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order ASC', [oid]);
+  res.json({ ok: true, items: updatedItems, newItemIds: newIds });
+}));
+
+// ── Merge a split row back into another line item on the same order ───────────
+// Reverse of split: deletes the split-off row and adds its quantity back onto
+// a target row you specify. Same safety rail — blocked once the order has any PO.
+app.post('/api/orders/:id/items/:itemId/merge-back', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const itemId = req.params.itemId; // the split-off row being removed
+  const { merge_into_item_id } = req.body || {};
+
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const existingPOCount = await getAsync('SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=?', [oid]);
+  if ((existingPOCount?.c || 0) > 0) {
+    return res.status(400).json({ error: 'This order already has purchase orders — merging line items is only available on new orders, before any PO has been raised.' });
+  }
+
+  const item = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [itemId, oid]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this order' });
+
+  const targetId = merge_into_item_id || item.split_from_item_id;
+  if (!targetId) return res.status(400).json({ error: 'This item has no recorded split origin — specify merge_into_item_id' });
+
+  const target = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [targetId, oid]);
+  if (!target) return res.status(404).json({ error: 'Target line item not found on this order' });
+  if (target.component !== item.component) {
+    return res.status(400).json({ error: 'Can only merge a split back into the line item it was split from' });
+  }
+
+  await runAsync('UPDATE order_items SET qty = qty + ? WHERE id=?', [item.qty, targetId]);
+  await runAsync('DELETE FROM order_items WHERE id=?', [itemId]);
+
+  saveNow();
+  const updatedItems = await allAsync('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order ASC', [oid]);
+  res.json({ ok: true, items: updatedItems });
+}));
+
+// ── Edit the pricing already saved for a split-off line item ──────────────────
+// Unlike POST .../split (which creates a new row), this updates the existing
+// enquiry_sourcing row a prior split already wrote for this item — used when
+// Procurement reopens an already-priced split via "View" → "Edit". Same safety
+// rail: only while the order still has no POs.
+app.put('/api/orders/:id/items/:itemId/split-pricing', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const itemId = req.params.itemId;
+  const { supplier_id, pricing } = req.body || {};
+
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const existingPOCount = await getAsync('SELECT COUNT(*) as c FROM supplier_orders WHERE order_id=?', [oid]);
+  if ((existingPOCount?.c || 0) > 0) {
+    return res.status(400).json({ error: 'This order already has purchase orders — editing split pricing is only available before any PO has been raised.' });
+  }
+
+  const item = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [itemId, oid]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this order' });
+  if (!item.split_from_item_id) return res.status(400).json({ error: 'This line item was not created by a split' });
+  if (!pricing || !supplier_id) return res.status(400).json({ error: 'Supplier and pricing are required' });
+
+  const isIntl = pricing.scope === 'international';
+  const exRate = isIntl ? (Number(pricing.exchange_rate) || 1) : 1;
+  const unitPriceInr = isIntl ? (Number(pricing.src_price_foreign)||0) * exRate : (Number(pricing.sourced_price)||0);
+  const taxRate = pricing.tax_rate ?? item.tax_rate ?? 0;
+
+  const modes = pricing.field_modes ? (typeof pricing.field_modes==='string' ? JSON.parse(pricing.field_modes) : pricing.field_modes) : {};
+  const amtOf = (key, pctVal, base) => (modes[key]==='pct') ? (base * (Number(pctVal)||0) / 100) : (Number(pctVal)||0);
+  const materialValue = unitPriceInr * item.qty;
+  const freightInr   = amtOf('freight', pricing.freight_pct, materialValue);
+  const insuranceInr = isIntl ? amtOf('insurance', pricing.insurance_pct, materialValue) : 0;
+  const cifValue      = materialValue + freightInr + insuranceInr;
+  const dutyInr        = isIntl ? amtOf('bcd', pricing.duty_pct, cifValue) : 0;
+  const swsBase         = modes.sws==='pct' ? dutyInr : cifValue;
+  const cessInr          = isIntl ? amtOf('sws', pricing.cess_pct, swsBase) : 0;
+  const bankInr           = isIntl ? amtOf('bank', pricing.bank_fixed_usd, cifValue) : 0;
+  const importCost         = cifValue + dutyInr + cessInr + bankInr;
+  const clearanceInr        = isIntl ? amtOf('clearing', pricing.clearance_fixed_inr, cifValue) : 0;
+  const landedBeforeMargin   = importCost + clearanceInr;
+  const marginInr             = amtOf('margin', pricing.margin_pct, landedBeforeMargin);
+
+  await runAsync('UPDATE order_items SET supplier_id=? WHERE id=?', [supplier_id, itemId]);
+
+  const existingSourcing = await getAsync('SELECT id FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1', [itemId]);
+  const params = [
+    supplier_id, unitPriceInr, isIntl ? (pricing.sourced_currency||'USD') : 'INR',
+    pricing.availability||'', String(pricing.lead_time||''), req.session.user?.id || '', nowStr(), pricing.hsn_code||'',
+    isIntl ? exRate : null, isIntl ? (Number(pricing.src_price_foreign)||0) : null,
+    isIntl ? (Number(pricing.freight_pct)||0) : null, isIntl ? (Number(pricing.insurance_pct)||0) : null,
+    isIntl ? (Number(pricing.duty_pct)||0) : null, isIntl ? (Number(pricing.cess_pct)||0) : null,
+    isIntl ? (Number(pricing.bank_fixed_usd)||0) : null, isIntl ? (Number(pricing.clearance_fixed_inr)||0) : null,
+    Number(pricing.margin_pct)||0, isIntl ? (pricing.field_modes||null) : null,
+    isIntl ? freightInr : null, isIntl ? insuranceInr : null, isIntl ? dutyInr : null, isIntl ? cessInr : null,
+    isIntl ? bankInr : null, isIntl ? clearanceInr : null, marginInr, taxRate,
+  ];
+  if (existingSourcing) {
+    await runAsync(
+      `UPDATE enquiry_sourcing SET
+         supplier_id=?, sourced_price=?, sourced_currency=?, availability=?, lead_time=?,
+         updated_by=?, updated_at=?, hsn_code=?, exchange_rate=?, src_price_foreign=?,
+         freight_pct=?, insurance_pct=?, duty_pct=?, cess_pct=?, bank_fixed_usd=?, clearance_fixed_inr=?,
+         margin_pct=?, field_modes=?, freight_inr=?, insurance_inr=?, duty_inr=?, cess_inr=?,
+         bank_inr=?, clearance_inr=?, margin_inr=?, tax_rate=?
+       WHERE id=?`,
+      [...params, existingSourcing.id]
+    );
+  } else {
+    await runAsync(
+      `INSERT INTO enquiry_sourcing
+         (id, enquiry_id, enquiry_item_id, supplier_id, sourced_price, sourced_currency,
+          availability, lead_time, item_status, updated_by, updated_at, hsn_code,
+          exchange_rate, src_price_foreign, freight_pct, insurance_pct, duty_pct, cess_pct,
+          bank_fixed_usd, clearance_fixed_inr, margin_pct, field_modes,
+          freight_inr, insurance_inr, duty_inr, cess_inr, bank_inr, clearance_inr, margin_inr, tax_rate,
+          quote_price, quote_currency)
+       VALUES (?,?,?,?,?,?,?,?,'ready',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [uuid(), order.enquiry_id || '', itemId, ...params, Number(item.unit_price)||0, item.currency||'INR']
+    );
+  }
+
+  saveNow();
+  const updatedItems = await allAsync('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order ASC', [oid]);
+  res.json({ ok: true, items: updatedItems });
+}));
+
+// ── AUDIT BIN ─────────────────────────────────────────────────────────────────
+// Orders land here automatically the moment they close (see createCostAudit(),
+// called from both places orders.status becomes 'closed'). Never locked —
+// actuals can be entered/edited any time after the audit is created.
+app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
+  const u = req.session.user;
+  const perms = getPerms(u);
+  const allowedSections = await getAllowedSections(u);
+  const canSeeAll = perms.canSeeAll || hasAllowedSection(u, allowedSections, ['audit-bin', ...ORDER_FULL_ACCESS_SECTIONS]);
+  const audits = canSeeAll
+    ? await allAsync('SELECT * FROM order_cost_audits ORDER BY created_at DESC')
+    : await allAsync(
+        `SELECT a.* FROM order_cost_audits a JOIN orders o ON o.id=a.order_id
+         WHERE o.created_by=? ORDER BY a.created_at DESC`, [u.id]);
+  const auditIds = audits.map(a => a.id);
+  const items = auditIds.length
+    ? await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id IN (' + auditIds.map(()=>'?').join(',') + ')', auditIds)
+    : [];
+  const orderIds = [...new Set(audits.map(a => a.order_id))];
+  const orders = orderIds.length
+    ? await allAsync('SELECT id, po_number, customer_id, customer_ref, closed_at FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
+    : [];
+  const orderById = {}; orders.forEach(o => { orderById[o.id] = o; });
+  res.json(audits.map(a => ({
+    ...a,
+    order: orderById[a.order_id] || null,
+    items: items.filter(i => i.audit_id === a.id),
+  })));
+}));
+
+app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
+  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
+  if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
+  audit.items = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
+  res.json(audit);
+}));
+
+app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
+  const d = req.body || {};
+  const item = await getAsync('SELECT * FROM order_cost_audit_items WHERE id=?', [req.params.id]);
+  if (!item) return res.status(404).json({ error: 'Audit item not found' });
+
+  const fields = ['act_material','act_freight','act_insurance','act_bcd','act_sws','act_cess','act_bank','act_clearing','act_margin'];
+  const vals = fields.map(f => d[f] !== undefined ? (Number(d[f])||0) : item[f]);
+  const actTotal = vals.reduce((s,v) => s + (Number(v)||0), 0);
+
+  await runAsync(
+    `UPDATE order_cost_audit_items SET
+       act_material=?, act_freight=?, act_insurance=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?,
+       act_total=?, notes=?, updated_by=?, updated_at=?
+     WHERE id=?`,
+    [...vals, actTotal, d.notes ?? item.notes ?? '', req.session.user.name, nowStr(), req.params.id]
+  );
+
+  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [item.audit_id]);
+  if (audit && audit.status !== 'submitted') {
+    await runAsync("UPDATE order_cost_audits SET status='submitted', submitted_at=?, submitted_by=? WHERE id=?",
+      [nowStr(), req.session.user.name, audit.id]);
+  }
+
+  saveNow();
+  const updated = await getAsync('SELECT * FROM order_cost_audit_items WHERE id=?', [req.params.id]);
+  res.json({ ok: true, item: updated });
 }));
 
 // ── APP SETTINGS ─────────────────────────────────────────────────────────────
@@ -3977,6 +4428,7 @@ app.put('/api/shipments/:id', auth, asyncRoute(async (req, res) => {
       deliveredAt || now.slice(0,10), d.notes || '',
     ]);
     await runAsync('UPDATE orders SET status=? WHERE id=?', [allDelivered ? 'closed' : 'partial_dispatched', orderId]);
+    if (allDelivered) { try { await createCostAudit(orderId); } catch(_) {} }
 
     try {
       await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)', [

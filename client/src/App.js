@@ -27,6 +27,7 @@ const ReportsPage = lazy(()=>import('./pages/ReportsPage'));
 const SourcingBinDrawerPage = lazy(()=>import('./pages/SourcingBinDrawerPage'));
 const ProcurementBinPage = lazy(()=>import('./pages/ProcurementBinPage'));
 const ClosedBinPage = lazy(()=>import('./pages/ClosedBinPage'));
+const AuditBinPage = lazy(()=>import('./pages/AuditBinPage'));
 const DeletedBinPage = lazy(()=>import('./pages/DeletedBinPage'));
 const DangerZonePage = lazy(()=>import('./pages/DangerZonePage'));
 const FinancePage = lazy(()=>import('./pages/FinancePage'));
@@ -88,6 +89,7 @@ function AppRoutes() {
         <Route path="sourcing-bin" element={<RequireSection section="sourcing-bin"><SourcingBinDrawerPage /></RequireSection>} />
         <Route path="procurement-bin" element={<RequireSection section="procurement-bin"><ProcurementBinPage /></RequireSection>} />
         <Route path="closed-bin" element={<RequireSection section="closed-bin"><ClosedBinPage /></RequireSection>} />
+        <Route path="audit-bin" element={<RequireSection section="audit-bin"><AuditBinPage /></RequireSection>} />
         <Route path="deleted-bin" element={<RequireSection section="deleted-bin" strictAdmin><DeletedBinPage /></RequireSection>} />
         <Route path="danger-zone" element={<RequireSection section="danger-zone" strictAdmin><DangerZonePage /></RequireSection>} />
         <Route path="finance" element={<RequireSection section="finance"><FinancePage /></RequireSection>} />

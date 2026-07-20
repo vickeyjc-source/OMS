@@ -10,6 +10,7 @@ export const SECTION_DEFINITIONS = [
   { key: 'delivery-hub', label: 'Delivery Hub', path: '/delivery-hub', group: 'Bins' },
   { key: 'inventory', label: 'Stock Inventory', path: '/inventory', group: 'Bins' },
   { key: 'closed-bin', label: 'Closed Bin', path: '/closed-bin', group: 'Bins' },
+  { key: 'audit-bin', label: 'Audit Bin', path: '/audit-bin', group: 'Bins' },
   { key: 'deleted-bin', label: 'Recycle Bin', path: '/deleted-bin', group: 'Admin', adminOnly: true, locked: true },
   { key: 'danger-zone', label: 'Danger Zone', path: '/danger-zone', group: 'Admin', adminOnly: true, locked: true },
   { key: 'finance', label: 'Finance', path: '/finance', group: 'Finance' },

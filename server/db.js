@@ -415,6 +415,25 @@ async function createSchema() {
       notes TEXT DEFAULT '', recorded_by TEXT, recorded_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS order_cost_audits (
+      id TEXT PRIMARY KEY, order_id TEXT NOT NULL UNIQUE,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT NOT NULL, submitted_at TEXT, submitted_by TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS order_cost_audit_items (
+      id TEXT PRIMARY KEY, audit_id TEXT NOT NULL, order_id TEXT NOT NULL,
+      supplier_order_id TEXT, supplier_id TEXT, supplier_name TEXT, scope TEXT DEFAULT 'domestic',
+      customer_total NUMERIC DEFAULT 0,
+      est_material NUMERIC DEFAULT 0, est_freight NUMERIC DEFAULT 0, est_insurance NUMERIC DEFAULT 0,
+      est_bcd NUMERIC DEFAULT 0, est_sws NUMERIC DEFAULT 0, est_cess NUMERIC DEFAULT 0, est_bank NUMERIC DEFAULT 0,
+      est_clearing NUMERIC DEFAULT 0, est_margin NUMERIC DEFAULT 0, est_total NUMERIC DEFAULT 0,
+      act_material NUMERIC, act_freight NUMERIC, act_insurance NUMERIC,
+      act_bcd NUMERIC, act_sws NUMERIC, act_cess NUMERIC, act_bank NUMERIC,
+      act_clearing NUMERIC, act_margin NUMERIC, act_total NUMERIC,
+      notes TEXT DEFAULT '', updated_by TEXT, updated_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS shipments (
       id TEXT PRIMARY KEY, order_id TEXT NOT NULL, shipment_no INTEGER DEFAULT 1,
       type TEXT DEFAULT 'full', status TEXT DEFAULT 'preparing',
@@ -838,6 +857,8 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiry_items ADD COLUMN tax_rate NUMERIC DEFAULT 0"); } catch(_) {}
   // ── Migrate order_items — add tax_rate so it flows from sourcing through every stage ──
   try { await pool.query("ALTER TABLE order_items ADD COLUMN tax_rate NUMERIC DEFAULT 0"); } catch(_) {}
+  // ── Migrate order_items — tag rows created by the Procurement split feature ──
+  try { await pool.query("ALTER TABLE order_items ADD COLUMN split_from_item_id TEXT DEFAULT NULL"); } catch(_) {}
   // ── Migrate customers + orders — shipment preference ──────────────────────
   try { await pool.query("ALTER TABLE customers ADD COLUMN allow_partial_shipment INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE customers ADD COLUMN shipment_notes TEXT DEFAULT ''"); } catch(_) {}
