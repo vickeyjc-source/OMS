@@ -112,10 +112,10 @@ function calcRow(src, item) {
 
 // ── landed cost calc — modes is a per-field object, each key is 'pct'|'amt' ───
 // fields: freight, insurance, transport, packaging, bcd, sws, cess, clearing, bank, margin, buffer
-const DEFAULT_MODES = { freight:'amt', insurance:'amt', transport:'amt', packaging:'amt', bcd:'amt', sws:'amt', cess:'amt', clearing:'amt', bank:'amt', margin:'amt', buffer:'amt' };
+const DEFAULT_MODES = { freight:'amt', insurance:'amt', transport:'amt', packaging:'amt', bcd:'amt', sws:'amt', cess:'amt', clearing:'amt', bank:'amt', margin:'pct', buffer:'amt' };
 const INTL_DEFAULT_MODES = { ...DEFAULT_MODES, insurance:'pct', bcd:'pct', sws:'pct', cess:'pct' };
 
-function calcLanded(src, item, modes = {}) {
+function calcLanded(src, item, modes = {}, shipType = 'DDP') {
   const m = { ...DEFAULT_MODES, ...modes };
   const qty        = Number(item?.quantity) || 1;
   const supType    = src._supType || 'domestic';
@@ -126,10 +126,15 @@ function calcLanded(src, item, modes = {}) {
   const raw = (v) => Number(v || 0);
   const applyMode = (mode, rawVal, base) => mode === 'pct' ? base * rawVal / 100 : rawVal;
 
-  const freightINR   = applyMode(m.freight,   raw(src.freight_pct),   materialValue);
-  const insuranceINR = isIntl ? applyMode(m.insurance, raw(src.insurance_pct), materialValue) : 0;
-  const transportINR = applyMode(m.transport, raw(src._transport),    materialValue);
-  const packagingINR = applyMode(m.packaging, raw(src._packaging),    materialValue);
+  // Incoterm gates — mirrors showFreightSection/showImportSection in ItemDrawer.
+  // Fields hidden from the user must also drop out of the math, not just the UI.
+  const showFreight = shipType === 'DDP' || shipType === 'CIF' || shipType === 'CFR';
+  const showImport  = shipType === 'DDP';
+
+  const freightINR   = showFreight ? applyMode(m.freight,   raw(src.freight_pct),   materialValue) : 0;
+  const insuranceINR = (isIntl && showFreight) ? applyMode(m.insurance, raw(src.insurance_pct), materialValue) : 0;
+  const transportINR = showFreight ? applyMode(m.transport, raw(src._transport),    materialValue) : 0;
+  const packagingINR = showFreight ? applyMode(m.packaging, raw(src._packaging),    materialValue) : 0;
   const cifValue     = materialValue + freightINR + insuranceINR;
 
   const bcdRaw      = raw(src.duty_pct);
@@ -137,7 +142,7 @@ function calcLanded(src, item, modes = {}) {
   const cessRaw     = raw(src.bank_fixed_foreign ?? (src.bank_fixed_usd || 0));
   const clearingRaw = raw(src.clearance_fixed_inr);
   let bcdAmount, swsAmount, cessAmount, clearingINR;
-  if (!isIntl) {
+  if (!isIntl || !showImport) {
     bcdAmount = 0; swsAmount = 0; cessAmount = 0; clearingINR = 0;
   } else {
     bcdAmount   = applyMode(m.bcd,      bcdRaw,      cifValue);
@@ -151,8 +156,15 @@ function calcLanded(src, item, modes = {}) {
   const bufferINR = applyMode(m.buffer, raw(src._buffer),        importCost);
 
   const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankINR;
-  const marginAmt = applyMode(m.margin, raw(src.margin_pct),     landedBeforeMargin);
-  const finalCost      = landedBeforeMargin + marginAmt + bufferINR;
+  // Margin in ₹ mode is a per-unit amount (same as calcDomesticQuote's s+m for
+  // domestic rows) — scale by qty rather than treating it as a batch total.
+  const marginAmt = m.margin === 'pct' ? applyMode(m.margin, raw(src.margin_pct), landedBeforeMargin) : raw(src.margin_pct) * qty;
+  // Additional Charges — a free-form named-charge list (e.g. "Customs Inspection
+  // Fee ₹500"), each a flat total amount added straight into the final cost.
+  const extraChargesTotal = Array.isArray(src._extraCharges)
+    ? src._extraCharges.reduce((sum, c) => sum + (Number(c?.amount) || 0), 0)
+    : 0;
+  const finalCost      = landedBeforeMargin + marginAmt + bufferINR + extraChargesTotal;
   const unitLandedCost = qty > 0 ? finalCost / qty : 0;
   const gstPct    = Number(src._gst_pct || 0);
   const gstAmount = finalCost * gstPct / 100;
@@ -161,7 +173,7 @@ function calcLanded(src, item, modes = {}) {
     materialValue, freightINR, insuranceINR, transportINR, packagingINR, cifValue,
     bcdAmount, swsAmount, cessAmount, importCost,
     clearingINR, bankINR, landedBeforeMargin,
-    marginAmt, bufferINR, finalCost, unitLandedCost,
+    marginAmt, bufferINR, extraChargesTotal, finalCost, unitLandedCost,
     gstPct, gstAmount, grandTotal, isIntl,
   };
 }
@@ -171,7 +183,7 @@ function calcLanded(src, item, modes = {}) {
 // ─────────────────────────────────────────────────────────────────────────────
 function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItems, isReadOnly,
                       onClose, onApply }) {
-  const [row,  setRow]  = useState({ ...srcRow, _transport: srcRow._transport ?? '', _packaging: srcRow._packaging ?? '', _buffer: srcRow._buffer ?? '', _gst_pct: srcRow._gst_pct ?? '' });
+  const [row,  setRow]  = useState({ ...srcRow, _transport: srcRow._transport ?? '', _packaging: srcRow._packaging ?? '', _buffer: srcRow._buffer ?? '', _gst_pct: srcRow._gst_pct ?? '', _extraCharges: Array.isArray(srcRow._extraCharges) ? srcRow._extraCharges : [] });
   const [qrow, setQrow] = useState({ ...qRow });
 
   const isInvStock  = !!row.supplier_id?.startsWith('__inv__');
@@ -180,25 +192,53 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
   const supType = isInvStock ? (invIsIntl ? 'international' : 'domestic') : (suppliers.find(s => s.id === row.supplier_id)?.type || 'domestic');
   const isIntl  = supType === 'international';
 
+  // Incoterm-driven section visibility — DDP is unchanged (both sections show,
+  // Ciflux bears freight + import duty). CIF/CFR already have freight baked into
+  // the seller's price, so only Import Charges (destination duty) is irrelevant.
+  // Every other incoterm (EXW, FCA, CPT, CIP, DAP, DPU, FAS, FOB) puts both
+  // freight and import duty on the buyer's side, so neither applies here.
+  const shipType = enq?.shipping_type || 'DDP';
+  const showFreightSection = shipType === 'DDP' || shipType === 'CIF' || shipType === 'CFR';
+  const showImportSection  = shipType === 'DDP';
+
+  // Sequential section numbers — recomputed from whichever sections are
+  // actually visible, so hiding Freight/Import Charges never leaves a gap.
+  const stepNum = (() => {
+    let n = 1;
+    const material = n++;
+    const freight = showFreightSection ? n++ : null;
+    const importCh = (isIntl && showImportSection) ? n++ : null;
+    const financial = n++;
+    const additional = n++;
+    const quote = n++;
+    return { material, freight, importCh, financial, additional, quote };
+  })();
+
   // per-field modes — international duty fields are percentage by default
   const [modes, setModes] = useState(() => ({ ...(isIntl ? INTL_DEFAULT_MODES : DEFAULT_MODES), ...(srcRow._fieldModes || {}) }));
 
   const cur = row.sourced_currency || (isIntl ? 'USD' : 'INR');
-  const lc  = calcLanded({ ...row, _supType: supType }, item, modes);
+  const lc  = calcLanded({ ...row, _supType: supType }, item, modes, shipType);
   const qty = Number(item.quantity) || 1;
 
   const updRow  = (k, v) => {
     setRow(p => {
       const updated = { ...p, [k]: v };
-      const lc2 = calcLanded({ ...updated, _supType: supType }, item, modes);
+      const lc2 = calcLanded({ ...updated, _supType: supType }, item, modes, shipType);
       if (lc2.unitLandedCost > 0) setQrow(q => ({ ...q, quote_price: lc2.unitLandedCost.toFixed(2) }));
       return updated;
     });
   };
   const updQrow = (k, v) => setQrow(p => ({ ...p, [k]: v }));
 
+  // Additional Charges — free-form named charges (e.g. "Customs Inspection Fee"),
+  // each a flat ₹ amount folded straight into the final landed cost.
+  const addExtraCharge   = () => updRow('_extraCharges', [...(row._extraCharges||[]), { name: '', amount: '' }]);
+  const updExtraCharge   = (i, k, v) => updRow('_extraCharges', (row._extraCharges||[]).map((c, j) => j === i ? { ...c, [k]: v } : c));
+  const removeExtraCharge = (i) => updRow('_extraCharges', (row._extraCharges||[]).filter((_, j) => j !== i));
+
   const recalcQuote = (newRow, newModes) => {
-    const lc2 = calcLanded({ ...newRow, _supType: supType }, item, newModes);
+    const lc2 = calcLanded({ ...newRow, _supType: supType }, item, newModes, shipType);
     if (lc2.unitLandedCost > 0) setQrow(q => ({ ...q, quote_price: lc2.unitLandedCost.toFixed(2) }));
   };
 
@@ -211,7 +251,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
         const er = field === 'exchange_rate' ? val : p.exchange_rate;
         updated.sourced_price = (Number(fp) > 0 && Number(er) > 0) ? String((Number(fp) * Number(er)).toFixed(4)) : '';
       }
-      const lc2 = calcLanded({ ...updated, _supType: supType }, item, modes);
+      const lc2 = calcLanded({ ...updated, _supType: supType }, item, modes, shipType);
       if (lc2.unitLandedCost > 0) setQrow(q => ({ ...q, quote_price: lc2.unitLandedCost.toFixed(2) }));
       else if (!Number(updated.sourced_price)) setQrow(q => ({ ...q, quote_price: '' }));
       return updated;
@@ -253,6 +293,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
               <span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>ENQ: {enq.id}</span>
               {enq.sourcing_no && <><span style={{fontSize:11,color:'var(--text3)'}}>→</span><span style={{fontSize:11,fontFamily:'monospace',fontWeight:700,padding:'2px 8px',borderRadius:6,background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}>SRC: {enq.sourcing_no}</span></>}
               <span style={{fontSize:10,color:'var(--text3)'}}>· Item #{itemIdx + 1}</span>
+              <span title="Shipping Type (Incoterm)" style={{fontSize:10,fontWeight:700,padding:'2px 8px',borderRadius:999,background:'var(--surface2)',color:'var(--text2)',border:'1px solid var(--border)'}}>🚢 {enq.shipping_type || 'DDP'}</span>
             </div>
             <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--text)', letterSpacing: '-.02em', marginBottom: 4 }}>
               {item.component}
@@ -371,7 +412,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
 
             {/* GROUP 1: Material Details — single row */}
             <div className="id-grp">
-              <div className="id-grp-title">1. Material Details</div>
+              <div className="id-grp-title">{stepNum.material}. Material Details</div>
               {/* Row 1: HSN | Lead Time */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '0 10px', alignItems: 'end', marginBottom: 8 }}>
                 <div className="id-fg">
@@ -437,29 +478,33 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
               })()}
             </div>
 
-            {/* GROUP 2: Freight & Logistics */}
-            <div className="id-grp">
-              <div className="id-grp-title">2. Freight &amp; Logistics</div>
-              <div className="id-grid2">
-                {[
-                  { field: 'freight',   label: 'Freight',   v: row.freight_pct  ?? '', onChange: e => handleRateChange('freight_pct', e.target.value),   perUnit: lc.freightINR / qty },
-                  ...(isIntl ? [{ field: 'insurance', label: 'Insurance', v: row.insurance_pct ?? '', onChange: e => handleRateChange('insurance_pct', e.target.value), perUnit: lc.insuranceINR / qty }] : []),
-                  { field: 'transport', label: 'Transport', v: row._transport   ?? '', onChange: e => updRow('_transport', e.target.value),               perUnit: lc.transportINR / qty },
-                  { field: 'packaging', label: 'Packaging', v: row._packaging   ?? '', onChange: e => updRow('_packaging', e.target.value),               perUnit: lc.packagingINR / qty },
-                ].map(f => (
-                  <div className="id-fg" key={f.field}>
-                    <FL label={`${f.label} (${u(f.field)})`} field={f.field} />
-                    <input className="input" style={{ height: 34, fontSize: 12 }} type="number" step="0.001" min="0" value={f.v} disabled={isReadOnly} onChange={f.onChange} />
-                    {f.perUnit > 0 && <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>₹{fmt(f.perUnit)} / unit</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* GROUP 3: Import Charges (intl only) */}
-            {isIntl && (
+            {/* GROUP: Freight & Logistics — hidden for incoterms where freight is
+                already the buyer's responsibility (everything except DDP/CIF/CFR) */}
+            {showFreightSection && (
               <div className="id-grp">
-                <div className="id-grp-title">3. Import Charges</div>
+                <div className="id-grp-title">{stepNum.freight}. Freight &amp; Logistics</div>
+                <div className="id-grid2">
+                  {[
+                    { field: 'freight',   label: 'Freight',   v: row.freight_pct  ?? '', onChange: e => handleRateChange('freight_pct', e.target.value),   perUnit: lc.freightINR / qty },
+                    ...(isIntl ? [{ field: 'insurance', label: 'Insurance', v: row.insurance_pct ?? '', onChange: e => handleRateChange('insurance_pct', e.target.value), perUnit: lc.insuranceINR / qty }] : []),
+                    { field: 'transport', label: 'Transport', v: row._transport   ?? '', onChange: e => updRow('_transport', e.target.value),               perUnit: lc.transportINR / qty },
+                    { field: 'packaging', label: 'Packaging', v: row._packaging   ?? '', onChange: e => updRow('_packaging', e.target.value),               perUnit: lc.packagingINR / qty },
+                  ].map(f => (
+                    <div className="id-fg" key={f.field}>
+                      <FL label={`${f.label} (${u(f.field)})`} field={f.field} />
+                      <input className="input" style={{ height: 34, fontSize: 12 }} type="number" step="0.001" min="0" value={f.v} disabled={isReadOnly} onChange={f.onChange} />
+                      {f.perUnit > 0 && <span style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 600 }}>₹{fmt(f.perUnit)} / unit</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* GROUP: Import Charges — international only, and only for incoterms
+                where Ciflux (not the buyer) is on the hook for import duty (DDP) */}
+            {isIntl && showImportSection && (
+              <div className="id-grp">
+                <div className="id-grp-title">{stepNum.importCh}. Import Charges</div>
                 <div className="id-grid2">
                   {[
                     { field: 'bcd',      label: 'BCD',      v: row.duty_pct          ?? '', onChange: e => handleRateChange('duty_pct', e.target.value),           perUnit: lc.bcdAmount / qty },
@@ -477,9 +522,9 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
               </div>
             )}
 
-            {/* GROUP 4: Financial */}
+            {/* GROUP: Financial */}
             <div className="id-grp">
-              <div className="id-grp-title">{isIntl ? '4.' : '3.'} Financial</div>
+              <div className="id-grp-title">{stepNum.financial}. Financial</div>
               <div className="id-grid2">
                 {[
                   { field: 'bank',   label: 'Bank Charges', v: row.bank_fixed_inr ?? '', onChange: e => updRow('bank_fixed_inr', e.target.value),           perUnit: lc.bankINR / qty },
@@ -495,9 +540,29 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
               </div>
             </div>
 
-            {/* GROUP 5: Quote Pricing */}
+            {/* GROUP: Additional Charges — free-form, add as many as needed */}
             <div className="id-grp">
-              <div className="id-grp-title">{isIntl ? '5.' : '4.'} Quote Pricing</div>
+              <div className="id-grp-title">{stepNum.additional}. Additional Charges</div>
+              {(row._extraCharges||[]).map((c, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <input className="input" style={{ height: 34, fontSize: 12, flex: 2 }} placeholder="Charge name — e.g. Customs Inspection Fee"
+                    value={c.name||''} disabled={isReadOnly} onChange={e => updExtraCharge(i, 'name', e.target.value)} />
+                  <input className="input" style={{ height: 34, fontSize: 12, flex: 1 }} type="number" step="0.01" min="0" placeholder="₹ Amount"
+                    value={c.amount??''} disabled={isReadOnly} onChange={e => updExtraCharge(i, 'amount', e.target.value)} />
+                  {!isReadOnly && (
+                    <button type="button" onClick={() => removeExtraCharge(i)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--red)', fontSize: 18, lineHeight: 1, flexShrink: 0 }}>×</button>
+                  )}
+                </div>
+              ))}
+              {!isReadOnly && (
+                <button type="button" className="btn btn-xs" onClick={addExtraCharge}>+ Add Charge</button>
+              )}
+            </div>
+
+            {/* GROUP: Quote Pricing */}
+            <div className="id-grp">
+              <div className="id-grp-title">{stepNum.quote}. Quote Pricing</div>
               <div className="id-grid2">
                 <div className="id-fg">
                   <label style={LBL}>Quote Currency</label>
@@ -550,11 +615,11 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
                 </div>
               ) : <>
                 <SumRow label="Material Value"         val={lc.materialValue} />
-                <SumRow label={`+ Freight (${row.freight_pct || 0}${u('freight')})`}   val={lc.freightINR} />
-                {isIntl && <SumRow label={`+ Insurance (${row.insurance_pct || 0}${u('insurance')})`} val={lc.insuranceINR} />}
+                {showFreightSection && <SumRow label={`+ Freight (${row.freight_pct || 0}${u('freight')})`}   val={lc.freightINR} />}
+                {isIntl && showFreightSection && <SumRow label={`+ Insurance (${row.insurance_pct || 0}${u('insurance')})`} val={lc.insuranceINR} />}
                 <SumRow label="= CIF Value"            val={lc.cifValue} bold />
                 <Divider />
-                {isIntl && <>
+                {isIntl && showImportSection && <>
                   <SumRow label={`+ BCD (${row.duty_pct || 0}${u('bcd')})`}              val={lc.bcdAmount} />
                   <SumRow label={`+ SWS (${row.cess_pct || 0}${u('sws')})`}              val={lc.swsAmount} />
                   <SumRow label={`+ CESS (${row.bank_fixed_foreign || 0}${u('cess')})`}  val={lc.cessAmount} />
@@ -569,6 +634,9 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
                 <Divider />
                 <SumRow label={`+ Margin (${row.margin_pct || 0}${u('margin')})`} val={lc.marginAmt} />
                 {lc.bufferINR > 0 && <SumRow label={`+ Buffer (${row._buffer || 0}${u('buffer')})`} val={lc.bufferINR} />}
+                {lc.extraChargesTotal > 0 && (row._extraCharges||[]).filter(c=>Number(c.amount)>0).map((c,i) => (
+                  <SumRow key={i} label={`+ ${c.name||'Additional Charge'}`} val={Number(c.amount)||0} />
+                ))}
                 <SumRow label="= Final Cost"           val={lc.finalCost} bold />
                 <SumRow label={`Unit Landed Cost (÷${qty})`}             val={lc.unitLandedCost} />
                 <Divider />
@@ -615,7 +683,7 @@ function ItemDrawer({ enq, item, itemIdx, srcRow, qRow, suppliers, inventoryItem
 // SOURCING MODAL  — full-screen modal, same as old design but items use
 //                   new card-table row with Calculate button at the end
 // ─────────────────────────────────────────────────────────────────────────────
-function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSaved, onSavedDraft, forceReadOnly = false, pageMode = false }) {
+function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSaved, onSavedDraft, onSplitSaved, forceReadOnly = false, pageMode = false }) {
   const { user } = useAuth();
 
   const { data: inventoryItems = [] } = useQuery({
@@ -652,6 +720,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           _transport: ex._transport ?? '', _packaging: ex._packaging ?? '',
           _buffer: ex._buffer ?? '', _gst_pct: ex._gst_pct ?? '',
           _fieldModes: parseFieldModes(ex.field_modes),
+          _extraCharges: (() => { try { const p = JSON.parse(ex.extra_charges||'[]'); return Array.isArray(p) ? p : []; } catch(_) { return []; } })(),
           src_dc: ex.src_dc || '', delivery_promise_date: ex.delivery_promise_date || '',
           item_status: ex.item_status || 'ready',
         };
@@ -691,6 +760,11 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
   // Send-to-ENQ reason modal
   const [sendModal, setSendModal] = useState(null); // { itemIdx: null|number, label: string }
   const [sendNote, setSendNote] = useState('');
+  // Split-into-second-line dialog — { item, qty }. Just asks how much quantity
+  // to move onto a brand-new line; supplier/price for that line are filled in
+  // afterward the normal way, via the same per-row fields any item has.
+  const [splitDialog, setSplitDialog] = useState(null);
+  const [splitBusy, setSplitBusy] = useState(false);
 
   const custName   = id => customers.find(c => c.id === id)?.name || id;
   const srcingUsers = users.filter(u => u.department === 'sourcing');
@@ -773,7 +847,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
       const invHitMd   = isInvRowMd ? inventoryItems.find(h => h.id === src.supplier_id.slice(7)) : null;
       const supType = isInvRowMd ? ((invHitMd?.target_currency || 'INR') !== 'INR' ? 'international' : 'domestic') : (suppliers.find(s => s.id === src.supplier_id)?.type || 'domestic');
       const savedModes = src._fieldModes || {};
-      const lc  = calcLanded({ ...src, _supType: supType }, item, savedModes);
+      const lc  = calcLanded({ ...src, _supType: supType }, item, savedModes, enq.shipping_type || 'DDP');
       const srcUnit   = Number(src.sourced_price) || 0;
       const quoteUnit = Number(qrow.quote_price)  || 0;
       const target    = Number(item.target_price) || 0;
@@ -859,7 +933,10 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         const calc = calcRow({ ...normalized, _supType: supType }, item || { quantity: 1 });
         const bankFixedUsd = supType === 'international' ? ((normalized.bank_fixed_foreign !== '' && normalized.bank_fixed_foreign != null) ? normalized.bank_fixed_foreign : (normalized.bank_fixed_usd ?? null)) : '0';
         const fieldModes = normalized._fieldModes ? JSON.stringify(normalized._fieldModes) : null;
-        return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, field_modes: fieldModes, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
+        const extraCharges = Array.isArray(normalized._extraCharges) && normalized._extraCharges.length
+          ? JSON.stringify(normalized._extraCharges.filter(c => c && (c.name || Number(c.amount) > 0)))
+          : null;
+        return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, field_modes: fieldModes, extra_charges: extraCharges, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
       });
       const hasCheckingItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'checking');
       const hasNoBidItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'no_bid');
@@ -959,6 +1036,45 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
     }
   };
 
+  // Add a second supplier for this item — a brand-new blank enquiry_items row
+  // is created server-side (tagged split_from_item_id), with no supplier/price
+  // yet. It shows up as an ordinary item row right below, and gets its own
+  // supplier/price filled in the normal way, same as any item.
+  const confirmSplit = async () => {
+    const li = splitDialog.item;
+    const offQty = Math.floor(Number(splitDialog.qty));
+    if (!Number.isFinite(offQty) || offQty <= 0 || offQty >= li.quantity) {
+      toast.error(`Enter a quantity between 1 and ${li.quantity - 1}`);
+      return;
+    }
+    setSplitBusy(true);
+    try {
+      await api.post(`/enquiries/${enq.id}/items/${li.id}/split`, { qty: offQty });
+      toast.success('Supplier line added — set its price below');
+      setSplitDialog(null);
+      onSplitSaved && onSplitSaved();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to add supplier line');
+    } finally {
+      setSplitBusy(false);
+    }
+  };
+
+  // Undo an added-supplier line — removes this row and adds its qty back onto
+  // the row it came from. Only offered on rows that actually came from a split.
+  const confirmRemoveSplit = async (li) => {
+    setSplitBusy(true);
+    try {
+      await api.post(`/enquiries/${enq.id}/items/${li.id}/merge-back`, {});
+      toast.success('Supplier line removed');
+      onSplitSaved && onSplitSaved();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Failed to remove supplier line');
+    } finally {
+      setSplitBusy(false);
+    }
+  };
+
   const md = marginData;
   const readyQuoteCount = quoteableIndexes().length;
   const quoteCountLabel = isRevision ? `${readyQuoteCount} quote item${readyQuoteCount === 1 ? '' : 's'}` : `${readyQuoteCount} ready`;
@@ -1021,6 +1137,8 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>Priority: <strong style={{ color: enq.priority === 'urgent' ? 'var(--red)' : enq.priority === 'high' ? 'var(--amber)' : 'var(--text2)' }}>{enq.priority}</strong></span>
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
           <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>Created {fmtDateTime(enq.created_at)}</span>
+          <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
+          <span title="Shipping Type (Incoterm)" style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', background: 'var(--surface2)', padding: '2px 7px', borderRadius: 999, border: '1px solid var(--border)', flexShrink: 0 }}>🚢 {enq.shipping_type || 'DDP'}</span>
           {enq.notes && <>
             <span style={{ fontSize: 11, color: 'var(--text3)', flexShrink: 0 }}>·</span>
             <span style={{ fontSize: 11, color: 'var(--text2)', flexShrink: 0 }}>📝 {enq.notes}</span>
@@ -1133,7 +1251,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const quoteTotal    = quoteUnit * qty;
               const quoteTotalGST = gstRate > 0 ? quoteTotal * (1 + gstRate / 100) : quoteTotal;
               const srcUnit       = Number(row.sourced_price) || 0;
-              const marginMode    = domesticMarginMode[idx] || 'amt';
+              const marginMode    = domesticMarginMode[idx] || 'pct';
               const aboveTarget   = Number(item.target_price) > 0 && srcUnit > 0 && srcUnit > Number(item.target_price);
               const hasIntlDetails = isIntlItem && (
                 srcUnit > 0 || quoteUnit > 0 || hasValue(row.src_price_foreign) || hasValue(row.exchange_rate)
@@ -1280,6 +1398,7 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                     <div style={{ textAlign:'center', paddingTop:6 }}>
                       <div style={{ fontWeight:800, fontSize:13, color:'var(--accent)', letterSpacing:'-.01em', wordBreak:'break-all', whiteSpace:'normal', lineHeight:1.3 }}>{item.component}</div>
                       {item.ipn && <div style={{ fontSize:9, fontFamily:'monospace', color:'#9ca3af', wordBreak:'break-all' }}>IPN: {item.ipn}</div>}
+                      {item.split_from_item_id && <div style={{ fontSize:9, color:'var(--text3)', marginTop:2 }}>+ additional supplier</div>}
                     </div>
 
                     {/* Manufacturer */}
@@ -1407,6 +1526,24 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
                         <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1.5 8s2.4-4 6.5-4 6.5 4 6.5 4-2.4 4-6.5 4-6.5-4-6.5-4z"/><circle cx="8" cy="8" r="2"/></svg>
                         View
                       </button>}
+                      {!isReadOnly && !hasEverBeenQuoted && !rowLocked && (
+                        <div style={{ display:'inline-flex', alignItems:'center', gap:4 }}>
+                          {qty > 1 && !item.split_from_item_id && (
+                            <button type="button" className="btn btn-xs btn-success" title="Add another supplier option for this item — creates a new line with its own price"
+                              onClick={() => setSplitDialog({ item, qty:'' })}
+                              style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
+                              + Add Supplier
+                            </button>
+                          )}
+                          {item.split_from_item_id && (
+                            <button type="button" className="btn btn-xs btn-danger" title="Remove this supplier line — merge its qty back"
+                              onClick={() => confirmRemoveSplit(item)}
+                              style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
+                              − Remove Supplier
+                            </button>
+                          )}
+                        </div>
+                      )}
                       {!isNoBidItem && !isReadOnly && !hasEverBeenQuoted && (!rowLocked ? (
                         <button className="btn btn-xs btn-secondary" onClick={() => handleSendToEnquiry(idx)} style={{ display:'inline-flex', alignItems:'center', gap:4, whiteSpace:'nowrap', padding:'4px 10px' }}>
                           Send to ENQ
@@ -1730,6 +1867,52 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
           onApply={(data) => handleDrawerApply(drawerItemIdx, data)}
         />
       )}
+
+      {/* Split-into-second-line dialog — quantity only; the new line's supplier
+          and price are filled in afterward, the normal way, same as any item */}
+      {splitDialog && (
+        <div className="overlay" style={{ zIndex: 700 }} onClick={() => !splitBusy && setSplitDialog(null)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{ maxWidth: 380 }}>
+            <div className="modal-header">
+              <h2 style={{ fontSize: 16 }}>+ Add Supplier</h2>
+              <button className="close-x" onClick={() => setSplitDialog(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 12 }}>
+                <strong style={{ color: 'var(--text)' }}>{splitDialog.item.component}</strong> — total qty {splitDialog.item.quantity}.
+                Enter how much quantity goes to the new supplier — it'll get its own line with its own price below.
+              </div>
+              {(() => {
+                const maxQty = splitDialog.item.quantity - 1;
+                const enteredQty = Number(splitDialog.qty);
+                const qtyInvalid = splitDialog.qty !== '' && (!Number.isFinite(enteredQty) || enteredQty <= 0 || enteredQty > maxQty);
+                return (
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="label">Qty for new supplier (of {splitDialog.item.quantity})</label>
+                    <input className="input" type="number" min={1} max={maxQty} autoFocus
+                      value={splitDialog.qty}
+                      style={qtyInvalid ? { borderColor:'var(--red)' } : {}}
+                      onChange={e => setSplitDialog(d => ({ ...d, qty: e.target.value }))}
+                      onKeyDown={e => { if (e.key === 'Enter' && !qtyInvalid && splitDialog.qty !== '') confirmSplit(); }} />
+                    {qtyInvalid && (
+                      <div style={{ fontSize: 11.5, color: 'var(--red)', marginTop: 4 }}>
+                        Enter a quantity between 1 and {maxQty} — total is only {splitDialog.item.quantity}.
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+            <div className="modal-footer" style={{ justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn" onClick={() => setSplitDialog(null)} disabled={splitBusy}>Cancel</button>
+              <button className="btn btn-primary" onClick={confirmSplit}
+                disabled={splitBusy || splitDialog.qty === '' || !Number.isFinite(Number(splitDialog.qty)) || Number(splitDialog.qty) <= 0 || Number(splitDialog.qty) > splitDialog.item.quantity - 1}>
+                {splitBusy ? 'Adding…' : '+ Add Supplier'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1820,6 +2003,7 @@ export default function SourcingBinDrawerPage() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         <SourcingModal
+          key={selected.id + ':' + (selected.items?.length || 0)}
           enq={selected}
           suppliers={suppliers}
           customers={customers}
@@ -1830,6 +2014,10 @@ export default function SourcingBinDrawerPage() {
           onClose={() => setSelected(null)}
           onSaved={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); qc.invalidateQueries(['summary']); setSelected(null); }}
           onSavedDraft={() => { qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['quotes']); }}
+          onSplitSaved={() => {
+            qc.invalidateQueries(['enquiries']); qc.invalidateQueries(['summary']);
+            api.get('/enquiries/'+selected.id).then(r=>setSelected(r.data)).catch(()=>{});
+          }}
         />
       </div>
     );
@@ -1942,6 +2130,11 @@ export default function SourcingBinDrawerPage() {
                   <td>
                     <div className="mono" style={{ fontSize: 12, color: 'var(--text3)' }}>{enq.id}</div>
                     {enq.sourcing_no && <div style={{ marginTop: 2 }}><span className="mono bold" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-lt)', padding: '1px 6px', borderRadius: 999, border: '1px solid var(--accent)33' }}>🔍 {enq.sourcing_no}</span></div>}
+                    {enq.absorbed_from?.length > 0 && (
+                      <div style={{ marginTop: 2, fontSize: 10, color: 'var(--text3)' }}>
+                        🔗 absorbed {enq.absorbed_from.map(m => m.absorbed_id).join(', ')}
+                      </div>
+                    )}
                   </td>
                   <td style={{ fontWeight: 600 }}>{maskName(custName(enq.customer_id))}</td>
                   <td>

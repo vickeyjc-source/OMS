@@ -1,10 +1,11 @@
 // client/src/pages/EnquiryDetailPage.js
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../utils/api';
 import { StatusBadge, fmtDateTime } from '../utils/helpers';
 import { printDoc, generateEnquiryPDF } from '../utils/pdfUtils';
+import MergeEnquiryModal, { MERGEABLE_ENQ_STATUSES } from '../components/MergeEnquiryModal';
 import toast from 'react-hot-toast';
 
 export default function EnquiryDetailPage() {
@@ -16,6 +17,7 @@ export default function EnquiryDetailPage() {
   const [confirmSubmit, setConfirmSubmit]   = useState(false);
   const [editPriority, setEditPriority]     = useState(null);
   const [savingPriority, setSavingPriority] = useState(false);
+  const [showMerge, setShowMerge]           = useState(false);
 
   const submitToSourcing = async () => {
     setConfirmSubmit(false);
@@ -148,6 +150,9 @@ export default function EnquiryDetailPage() {
         </div>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <StatusBadge s={enq.status} />
+          {!enq.merged_into && MERGEABLE_ENQ_STATUSES.includes(enq.status) && (
+            <button className="btn btn-sm" onClick={()=>setShowMerge(true)}>🔗 Merge</button>
+          )}
           <button className="btn btn-sm"
             onClick={()=>printDoc(generateEnquiryPDF(enq, customer))}
             style={{background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:600}}>
@@ -155,6 +160,38 @@ export default function EnquiryDetailPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Merge trail banners — nothing here is ever hidden or deleted ── */}
+      {enq.merged_into && (
+        <div style={{padding:'10px 16px',borderRadius:'var(--r-sm)',marginBottom:16,
+          background:'var(--surface2)',border:'1px solid var(--border-md)',fontSize:13,
+          display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:16}}>🔗</span>
+          <span>This enquiry was <strong>merged into</strong>{' '}
+            <span className="mono bold" style={{color:'var(--accent)',cursor:'pointer'}}
+              onClick={()=>navigate('/enquiries/'+enq.merged_into)}>{enq.merged_into}</span>
+            {' '}— its items now live there. This record is kept for reference and can't be edited.
+          </span>
+        </div>
+      )}
+      {enq.absorbed_from?.length > 0 && (
+        <div style={{padding:'10px 16px',borderRadius:'var(--r-sm)',marginBottom:16,
+          background:'var(--accent-lt)',border:'1px solid var(--accent)33',fontSize:13}}>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:16}}>🔗</span>
+            <span>This enquiry <strong>absorbed</strong>{' '}
+              {enq.absorbed_from.map((m,i) => (
+                <React.Fragment key={m.absorbed_id}>
+                  {i>0 && ', '}
+                  <span className="mono bold" style={{color:'var(--accent)',cursor:'pointer'}}
+                    onClick={()=>navigate('/enquiries/'+m.absorbed_id)}>{m.absorbed_id}</span>
+                </React.Fragment>
+              ))}
+              {' '}via merge — check {enq.absorbed_from.length===1?'that enquiry':'those enquiries'} for its original items.
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* ── Customer / Assigned Info Strip ── */}
       {customer && (
@@ -177,6 +214,12 @@ export default function EnquiryDetailPage() {
               <div><span className="badge badge-purple">{enq.buying_type}</span></div>
             </div>
           )}
+          {enq.shipping_type && (
+            <div>
+              <span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>SHIPPING TYPE</span>
+              <div><span className="badge badge-blue">{enq.shipping_type}</span></div>
+            </div>
+          )}
           {enq.assigned_to && (
             <div>
               <span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>ASSIGNED TO</span>
@@ -192,39 +235,56 @@ export default function EnquiryDetailPage() {
         </div>
       )}
 
-      {/* ── Line Items ── */}
-      <div className="card card-sm" style={{marginBottom:16}}>
-        <div className="card-title"><span>📋 Enquiry Items ({enq.items?.length || 0})</span></div>
-        <div style={{overflowX:'auto'}}>
-          <table className="li-table">
-            <thead>
-              <tr>
-                <th>#</th><th>Component</th><th>IPN</th><th>Manufacturer</th>
-                <th>Line Card</th><th>Qty</th><th>Target Price</th>
-                <th>Pref. Delivery</th><th>Date Code</th>
-              </tr>
-            </thead>
-            <tbody>
-              {enq.items?.length === 0 && (
-                <tr><td colSpan={9} style={{textAlign:'center',color:'var(--text3)',padding:'24px',fontSize:13}}>No items</td></tr>
-              )}
-              {enq.items?.map((li, i) => (
-                <tr key={li.id}>
-                  <td>{i+1}</td>
-                  <td className="bold">{li.component}</td>
-                  <td className="mono">{li.ipn||'—'}</td>
-                  <td>{li.manufacturer||'—'}</td>
-                  <td>{li.linecard_id ? lcName(li.linecard_id) : '—'}</td>
-                  <td>{li.quantity}</td>
-                  <td className="mono">{li.target_price ? `${li.target_currency} ${li.target_price}` : '—'}</td>
-                  <td>{li.preferred_delivery_date||'—'}</td>
-                  <td>{li.date_code||'—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* ── Line Items — always exactly what was submitted, unaffected by later
+           Sourcing-side supplier splits. Split-off portions are folded back
+           into the original line's quantity here; the real per-supplier
+           breakdown lives in Sourcing Updates below. ── */}
+      {(() => {
+        const itemsById = Object.fromEntries((enq.items||[]).map(it => [it.id, it]));
+        const rootOf = it => { let cur = it; while (cur?.split_from_item_id && itemsById[cur.split_from_item_id]) cur = itemsById[cur.split_from_item_id]; return cur; };
+        const originalItems = [];
+        const qtyByRoot = {};
+        (enq.items||[]).forEach(it => {
+          const root = rootOf(it);
+          qtyByRoot[root.id] = (qtyByRoot[root.id]||0) + (Number(it.quantity)||0);
+          if (!it.split_from_item_id) originalItems.push(it);
+        });
+        originalItems.sort((a,b) => (a.sort_order||0) - (b.sort_order||0));
+        return (
+          <div className="card card-sm" style={{marginBottom:16}}>
+            <div className="card-title"><span>📋 Enquiry Items ({originalItems.length})</span></div>
+            <div style={{overflowX:'auto'}}>
+              <table className="li-table">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Component</th><th>IPN</th><th>Manufacturer</th>
+                    <th>Line Card</th><th>Qty</th><th>Target Price</th>
+                    <th>Pref. Delivery</th><th>Date Code</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {originalItems.length === 0 && (
+                    <tr><td colSpan={9} style={{textAlign:'center',color:'var(--text3)',padding:'24px',fontSize:13}}>No items</td></tr>
+                  )}
+                  {originalItems.map((li, i) => (
+                    <tr key={li.id}>
+                      <td>{i+1}</td>
+                      <td className="bold">{li.component}</td>
+                      <td className="mono">{li.ipn||'—'}</td>
+                      <td>{li.manufacturer||'—'}</td>
+                      <td>{li.linecard_id ? lcName(li.linecard_id) : '—'}</td>
+                      <td>{qtyByRoot[li.id] ?? li.quantity}</td>
+                      <td className="mono">{li.target_price ? `${li.target_currency} ${li.target_price}` : '—'}</td>
+                      <td>{li.preferred_delivery_date||'—'}</td>
+                      <td>{li.date_code||'—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Sourcing Updates — read-only, shown once past new/draft ── */}
       {!['new','draft'].includes(enq.status) && (
@@ -511,6 +571,15 @@ export default function EnquiryDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {showMerge && (
+        <MergeEnquiryModal
+          enq={enq}
+          customers={customers}
+          onClose={()=>setShowMerge(false)}
+          onMerged={()=>setShowMerge(false)}
+        />
       )}
 
     </div>

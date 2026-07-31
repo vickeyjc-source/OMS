@@ -176,6 +176,9 @@ async function assembleEnquiry(enq) {
   if (e.charges && typeof e.charges === 'string') {
     try { e.charges = JSON.parse(e.charges); } catch(_) { e.charges = null; }
   }
+  // Merge trail — absorbed_from lists enquiries folded into this one (still visible,
+  // marked merged); merged_into (a plain column) points the other direction.
+  e.absorbed_from = await allAsync('SELECT absorbed_id, merged_by, merged_at FROM enquiry_merges WHERE survivor_id=?', [e.id]);
   return e;
 }
 
@@ -324,6 +327,10 @@ async function createSchema() {
       id TEXT PRIMARY KEY, enquiry_id TEXT NOT NULL,
       action TEXT NOT NULL, by_user TEXT, ts TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS enquiry_merges (
+      id TEXT PRIMARY KEY, survivor_id TEXT NOT NULL, absorbed_id TEXT NOT NULL,
+      merged_by TEXT, merged_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS quotes (
       id TEXT PRIMARY KEY, enquiry_id TEXT, customer_id TEXT NOT NULL,
       quote_no TEXT UNIQUE NOT NULL, zoho_quote_no TEXT, file_ref TEXT,
@@ -427,11 +434,40 @@ async function createSchema() {
       customer_total NUMERIC DEFAULT 0,
       est_material NUMERIC DEFAULT 0, est_freight NUMERIC DEFAULT 0, est_insurance NUMERIC DEFAULT 0,
       est_bcd NUMERIC DEFAULT 0, est_sws NUMERIC DEFAULT 0, est_cess NUMERIC DEFAULT 0, est_bank NUMERIC DEFAULT 0,
-      est_clearing NUMERIC DEFAULT 0, est_margin NUMERIC DEFAULT 0, est_total NUMERIC DEFAULT 0,
+      est_clearing NUMERIC DEFAULT 0, est_margin NUMERIC DEFAULT 0,
+      -- Sourcing's own named charges (entered in Sourcing Bin at pricing time).
+      est_extra_charges NUMERIC DEFAULT 0, est_extra_charges_detail TEXT DEFAULT NULL,
+      -- Finance's actual-paid ad-hoc charges (entered during payment processing)
+      -- — kept separate from Sourcing's, never blended: one is an estimate-time
+      -- guess, the other is real money that has actually moved.
+      est_finance_charges NUMERIC DEFAULT 0, est_finance_charges_detail TEXT DEFAULT NULL,
+      est_total NUMERIC DEFAULT 0,
       act_material NUMERIC, act_freight NUMERIC, act_insurance NUMERIC,
       act_bcd NUMERIC, act_sws NUMERIC, act_cess NUMERIC, act_bank NUMERIC,
-      act_clearing NUMERIC, act_margin NUMERIC, act_total NUMERIC,
+      act_clearing NUMERIC, act_margin NUMERIC, act_extra_charges NUMERIC,
+      act_extra_charges_detail TEXT DEFAULT NULL, act_field_modes TEXT DEFAULT NULL, act_total NUMERIC,
       notes TEXT DEFAULT '', updated_by TEXT, updated_at TEXT
+    );
+
+    -- Per-line-item Estimate detail — mirrors Sourcing exactly: same field, same
+    -- %/₹ mode, same raw value, plus the computed ₹ amount for this item's qty.
+    -- One row per (audit_item, component) so a PO that bundles several enquiry
+    -- items shows each one's own pricing basis, not a blended average.
+    CREATE TABLE IF NOT EXISTS order_cost_audit_item_lines (
+      id TEXT PRIMARY KEY, audit_item_id TEXT NOT NULL,
+      component TEXT, manufacturer TEXT, qty NUMERIC DEFAULT 0,
+      supplier_id TEXT, scope TEXT DEFAULT 'domestic',
+      unit_price NUMERIC DEFAULT 0, sourced_currency TEXT DEFAULT 'INR',
+      field_modes TEXT DEFAULT NULL,
+      -- Raw values exactly as Sourcing stored them (a % value when mode='pct',
+      -- otherwise a flat ₹ amount) — for display, matching Sourcing's own UI.
+      freight_raw NUMERIC, insurance_raw NUMERIC, bcd_raw NUMERIC, sws_raw NUMERIC,
+      cess_raw NUMERIC, bank_raw NUMERIC, clearing_raw NUMERIC, margin_raw NUMERIC,
+      -- Computed ₹ amounts for this line's qty (what actually adds up into the
+      -- audit item's aggregated est_* totals).
+      freight_inr NUMERIC DEFAULT 0, insurance_inr NUMERIC DEFAULT 0, bcd_inr NUMERIC DEFAULT 0,
+      sws_inr NUMERIC DEFAULT 0, cess_inr NUMERIC DEFAULT 0, bank_inr NUMERIC DEFAULT 0,
+      clearing_inr NUMERIC DEFAULT 0, margin_inr NUMERIC DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS shipments (
@@ -622,6 +658,46 @@ async function initDb() {
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN send_to_enq_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiries ADD COLUMN modify_reason TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE enquiries ADD COLUMN shipping_type TEXT DEFAULT 'DDP'"); } catch(_) {}
+  // Tags the absorbed side of a merge so it stays visible but traceable forward.
+  try { await pool.query("ALTER TABLE enquiries ADD COLUMN merged_into TEXT DEFAULT NULL"); } catch(_) {}
+  // Tags a line item created by splitting one enquiry item across multiple
+  // suppliers, mirroring order_items.split_from_item_id at the Procurement stage.
+  try { await pool.query("ALTER TABLE enquiry_items ADD COLUMN split_from_item_id TEXT DEFAULT NULL"); } catch(_) {}
+  // Free-form named charges (e.g. "Customs Inspection Fee") added on top of an
+  // international sourcing row's landed cost — JSON array of {name, amount}.
+  try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN extra_charges TEXT DEFAULT NULL"); } catch(_) {}
+  // Audit Bin — Estimate side snapshots Sourcing's named extra charges (the fix
+  // for the estimate/sourcing total mismatch); Actual side gets its own
+  // independently-entered named charges plus %/₹ mode memory per field, mirroring
+  // Sourcing's calcLanded() so a % entry computes the same way in both places.
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_extra_charges NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_extra_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_extra_charges NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_extra_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_field_modes TEXT DEFAULT NULL"); } catch(_) {}
+  // Finance's actual-paid ad-hoc charges, kept separate from Sourcing's own —
+  // never blended into one guess.
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
+  // Per-line-item Estimate detail mirroring Sourcing exactly (see schema comment
+  // on order_cost_audit_item_lines above).
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS order_cost_audit_item_lines (
+        id TEXT PRIMARY KEY, audit_item_id TEXT NOT NULL,
+        component TEXT, manufacturer TEXT, qty NUMERIC DEFAULT 0,
+        supplier_id TEXT, scope TEXT DEFAULT 'domestic',
+        unit_price NUMERIC DEFAULT 0, sourced_currency TEXT DEFAULT 'INR',
+        field_modes TEXT DEFAULT NULL,
+        freight_raw NUMERIC, insurance_raw NUMERIC, bcd_raw NUMERIC, sws_raw NUMERIC,
+        cess_raw NUMERIC, bank_raw NUMERIC, clearing_raw NUMERIC, margin_raw NUMERIC,
+        freight_inr NUMERIC DEFAULT 0, insurance_inr NUMERIC DEFAULT 0, bcd_inr NUMERIC DEFAULT 0,
+        sws_inr NUMERIC DEFAULT 0, cess_inr NUMERIC DEFAULT 0, bank_inr NUMERIC DEFAULT 0,
+        clearing_inr NUMERIC DEFAULT 0, margin_inr NUMERIC DEFAULT 0
+      );
+    `);
+  } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN tax_rate NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN item_status TEXT DEFAULT 'ready'"); } catch(_) {}
   // ── Migrate quotes — add approval tracking + revision columns ───────────────

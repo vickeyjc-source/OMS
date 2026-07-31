@@ -1,14 +1,12 @@
 // client/src/pages/AuditBinPage.js
-// Audit Bin — estimate vs actual landed cost, per supplier PO, once an order closes.
-// Auto-populated server-side (see createCostAudit() in server/index.js) the moment
-// an order's status becomes 'closed'. Never locked: actuals can be viewed and
-// re-edited at any time via the same view/edit toggle pattern used in Procurement's
-// split dialog.
+// Audit Bin — simple view: Sourcing total estimate vs what was actually paid
+// (Customer Paid, Supplier Paid from Finance), plus a plain manual-entry form
+// for the real final amounts. No percentages, no formulas — just numbers in,
+// numbers out.
 import React, { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { printDoc, generateAuditReportPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 
 const FIELDS = [
@@ -29,43 +27,38 @@ function fmtM(n) {
   return '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
-function SumRow({ label, val, bold, highlight }) {
-  return (
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'3px 0',
-      fontSize:highlight?14:bold?11.5:11,fontWeight:highlight?800:bold?700:400,gap:6,
-      color:highlight?'#4ade80':bold?'#fff':'rgba(255,255,255,.65)'}}>
-      <span>{label}</span>
-      <span style={{fontFamily:'monospace',whiteSpace:'nowrap'}}>{fmtM(val)}</span>
-    </div>
-  );
-}
-const SumDivider = () => <div style={{borderTop:'1px solid rgba(255,255,255,.1)',margin:'6px 0'}}/>;
-
-// ── Per-PO estimate vs actual card ────────────────────────────────────────────
-function AuditItemCard({ item, viewOnly, onSaved }) {
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
+// ── Per-supplier-PO card — plain amount fields, all blank by default ─────────
+function AuditItemCard({ item, onSaved }) {
   const [form, setForm] = useState(() => {
     const f = {};
     FIELDS.forEach(({key}) => { f[key] = item['act_'+key] ?? ''; });
     f.notes = item.notes || '';
     return f;
   });
+  const [charges, setCharges] = useState(() => {
+    try {
+      const p = item.act_extra_charges_detail ? (typeof item.act_extra_charges_detail==='string' ? JSON.parse(item.act_extra_charges_detail) : item.act_extra_charges_detail) : [];
+      return Array.isArray(p) ? p : [];
+    } catch(_) { return []; }
+  });
+  const [saving, setSaving] = useState(false);
 
-  const actTotal = FIELDS.reduce((s,{key}) => s + (Number(form[key])||0), 0);
-  const estTotal = Number(item.est_total) || 0;
-  const hasActual = FIELDS.some(({key}) => item['act_'+key] !== null && item['act_'+key] !== undefined);
-  const variance = hasActual || editing ? actTotal - estTotal : null;
+  const chargesTotal = charges.reduce((s,c) => s + (Number(c.amount)||0), 0);
+  const actTotal = FIELDS.reduce((s,{key}) => s + (Number(form[key])||0), 0) + chargesTotal;
 
-  const save = async () => {
+  const addCharge = () => setCharges(c => [...c, { name:'', amount:'' }]);
+  const updCharge = (i,k,v) => setCharges(c => c.map((x,j) => j===i ? {...x,[k]:v} : x));
+  const removeCharge = (i) => setCharges(c => c.filter((_,j) => j!==i));
+
+  const submit = async () => {
     setSaving(true);
     try {
       const payload = {};
       FIELDS.forEach(({key}) => { payload['act_'+key] = Number(form[key])||0; });
+      payload.act_extra_charges_detail = charges.filter(c => c.name || Number(c.amount)>0);
       payload.notes = form.notes || '';
       await api.put(`/audit-items/${item.id}`, payload);
-      toast.success('Actual cost saved');
-      setEditing(false);
+      toast.success('Actual amount saved');
       onSaved();
     } catch(e) {
       toast.error(e.response?.data?.error || 'Failed to save');
@@ -74,72 +67,63 @@ function AuditItemCard({ item, viewOnly, onSaved }) {
     }
   };
 
-  const locked = viewOnly && !editing;
-
   return (
     <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden',marginBottom:14}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 16px',
         background:'var(--surface2)',borderBottom:'1px solid var(--border)'}}>
-        <div>
-          <span style={{fontWeight:700,fontSize:13}}>{item.supplier_name || item.supplier_id || '—'}</span>
-          <span style={{marginLeft:8,fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,
-            color:item.scope==='international'?'var(--accent)':'var(--green)',
-            background:item.scope==='international'?'var(--accent-lt)':'var(--green-lt)',
-            border:`1px solid ${item.scope==='international'?'var(--accent)':'var(--green)'}44`}}>
-            {item.scope==='international' ? '🌐 International' : '🇮🇳 Domestic'}
-          </span>
-        </div>
-        {!locked && (
-          <button className="btn btn-sm btn-primary" disabled={saving} onClick={save}>
-            {saving ? 'Saving…' : '💾 Save'}
-          </button>
-        )}
-        {locked && (
-          <button className="btn btn-sm" style={{color:'var(--accent)',borderColor:'var(--accent)'}}
-            onClick={()=>setEditing(true)}>
-            ✏ Edit
-          </button>
-        )}
+        <span style={{fontWeight:700,fontSize:13}}>{item.supplier_name || item.supplier_id || '—'}</span>
+        <button className="btn btn-sm btn-primary" disabled={saving} onClick={submit}>
+          {saving ? 'Saving…' : '💾 Submit'}
+        </button>
       </div>
 
       <div style={{display:'grid',gridTemplateColumns:'2fr 1fr'}}>
-        {/* Left — editable actuals, estimate shown inline as reference */}
         <div style={{padding:'14px 16px',borderRight:'1px solid var(--border)'}}>
-          <div className="id-grp">
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px 14px'}}>
-              {FIELDS.map(({key,label}) => (
-                <div key={key} className="form-group" style={{marginBottom:0}}>
-                  <label className="label" style={{display:'flex',justifyContent:'space-between'}}>
-                    <span>{label}</span>
-                    <span style={{color:'var(--text3)',fontWeight:600}}>Est: {fmtM(item['est_'+key])}</span>
-                  </label>
-                  <fieldset disabled={locked} style={{border:'none',margin:0,padding:0}}>
-                    <input className="input" type="number" step="0.01" value={form[key]}
-                      onChange={e=>setForm(f=>({...f,[key]:e.target.value}))} placeholder="0.00"/>
-                  </fieldset>
-                </div>
-              ))}
-            </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px 14px'}}>
+            {FIELDS.map(({key,label}) => (
+              <div key={key} className="form-group" style={{marginBottom:0}}>
+                <label className="label">{label}</label>
+                <input className="input" type="number" step="0.01" value={form[key]}
+                  onChange={e=>setForm(f=>({...f,[key]:e.target.value}))} placeholder="₹ Amount"/>
+              </div>
+            ))}
           </div>
-          <div className="form-group" style={{marginTop:12,marginBottom:0}}>
+
+          <div className="form-group" style={{marginTop:14,marginBottom:0}}>
+            <label className="label">Additional Charges</label>
+            {charges.map((c,i) => (
+              <div key={i} style={{display:'flex',gap:8,alignItems:'center',marginBottom:6}}>
+                <input className="input" style={{flex:2}} placeholder="Charge name"
+                  value={c.name||''} onChange={e=>updCharge(i,'name',e.target.value)}/>
+                <input className="input" style={{flex:1}} type="number" step="0.01" min="0" placeholder="₹ Amount"
+                  value={c.amount??''} onChange={e=>updCharge(i,'amount',e.target.value)}/>
+                <button type="button" className="btn btn-xs btn-danger" onClick={()=>removeCharge(i)}>Remove</button>
+              </div>
+            ))}
+            <button type="button" className="btn btn-sm btn-success" onClick={addCharge} style={{display:'inline-flex',width:'auto',alignSelf:'flex-start'}}>+ Add Charge</button>
+          </div>
+
+          <div className="form-group" style={{marginTop:14,marginBottom:0}}>
             <label className="label">Notes</label>
-            <fieldset disabled={locked} style={{border:'none',margin:0,padding:0}}>
-              <input className="input" value={form.notes}
-                onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="e.g. reason for variance"/>
-            </fieldset>
+            <input className="input" value={form.notes}
+              onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="e.g. reason for variance"/>
           </div>
         </div>
 
-        {/* Right — live summary */}
         <div style={{padding:'14px 16px',background:'#0f172a'}}>
           <div style={{fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.1em',color:'rgba(255,255,255,.4)',marginBottom:10}}>
-            Estimate vs Actual
+            Actual Total
           </div>
-          <SumRow label="Estimated Total" val={estTotal}/>
-          <SumRow label="Actual Total" val={actTotal} bold/>
-          <SumDivider/>
-          <SumRow label={variance===null?'Variance':(variance>0?'⚠ Over Estimate':'✅ Under Estimate')}
-            val={variance===null?0:Math.abs(variance)} highlight/>
+          {chargesTotal > 0 && (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:11.5,fontWeight:600,color:'rgba(255,255,255,.65)'}}>
+              <span>+ Additional Charges</span><span style={{fontFamily:'monospace'}}>{fmtM(chargesTotal)}</span>
+            </div>
+          )}
+          <div style={{borderTop:'1px solid rgba(255,255,255,.1)',margin:'6px 0'}}/>
+          <div style={{display:'flex',justifyContent:'space-between',padding:'3px 0',fontSize:14,fontWeight:800,color:'#4ade80'}}>
+            <span>Total</span>
+            <span style={{fontFamily:'monospace'}}>{fmtM(actTotal)}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -155,28 +139,15 @@ function AuditDetailModal({ order, onClose, onSaved }) {
   });
 
   const items = audit?.items || [];
-  const estTotal = items.reduce((s,it)=>s+(Number(it.est_total)||0),0);
-  const actTotal = items.reduce((s,it)=>{
-    const hasActual = FIELDS.some(({key})=>it['act_'+key]!==null && it['act_'+key]!==undefined);
-    return s + (hasActual ? (Number(it.act_total)||0) : 0);
-  },0);
 
   const refresh = () => { qc.invalidateQueries(['audit', order.id]); qc.invalidateQueries(['audit-bin']); onSaved(); };
 
-  const genReport = () => {
-    printDoc(generateAuditReportPDF(order, audit, items, null));
-  };
-
   return (
     <div className="overlay" style={{zIndex:60}}>
-      <div className="modal modal-xl" style={{width:'92vw',maxWidth:1400,height:'92vh',maxHeight:'92vh'}}>
+      <div className="modal modal-xl" style={{width:'92vw',maxWidth:1200,height:'92vh',maxHeight:'92vh'}}>
         <div className="modal-header">
           <div>
             <h2>📋 Audit — {order.id}</h2>
-            <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
-              Status: <span style={{textTransform:'capitalize',fontWeight:700}}>{audit?.status||'pending'}</span>
-              {audit?.submitted_by && <> · Last updated by {audit.submitted_by}</>}
-            </div>
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
@@ -189,18 +160,12 @@ function AuditDetailModal({ order, onClose, onSaved }) {
           )}
           {!isLoading && items.length > 0 && (<>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,
-              padding:'10px 16px',borderRadius:'var(--r)',background:'var(--surface2)',border:'1px solid var(--border)'}}>
-              <div style={{fontSize:12,color:'var(--text2)'}}>
-                <b>{items.length}</b> supplier PO{items.length!==1?'s':''} on this order
-              </div>
-              <div style={{display:'flex',gap:18,alignItems:'center'}}>
-                <div style={{fontSize:12}}>Estimate: <b style={{color:'var(--accent)'}}>{fmtM(estTotal)}</b></div>
-                <div style={{fontSize:12}}>Actual: <b style={{color:'var(--green)'}}>{fmtM(actTotal)}</b></div>
-                <button className="btn btn-sm" onClick={genReport}>📄 Generate Report</button>
-              </div>
+              padding:'10px 16px',borderRadius:'var(--r)',background:'var(--surface2)',border:'1px solid var(--border)',flexWrap:'wrap',gap:10}}>
+              <div style={{fontSize:12}}>Customer Paid: <b style={{color:'var(--green)'}}>{fmtM(audit?.customer_paid_total)}</b></div>
+              <div style={{fontSize:12}}>Supplier Paid: <b style={{color:'var(--red)'}}>{fmtM(audit?.supplier_paid_total)}</b></div>
             </div>
             {items.map(item => (
-              <AuditItemCard key={item.id} item={item} viewOnly onSaved={refresh}/>
+              <AuditItemCard key={item.id} item={item} onSaved={refresh}/>
             ))}
           </>)}
         </div>
@@ -238,26 +203,16 @@ export default function AuditBinPage() {
   }, [audits, search, customers]);
 
   const totalAudits = audits.length;
-  const pending = audits.filter(a=>a.status==='pending').length;
-  const submitted = audits.filter(a=>a.status==='submitted').length;
-  const totalVariance = audits.reduce((sum,a) => {
-    const items = a.items || [];
-    const est = items.reduce((s,it)=>s+(Number(it.est_total)||0),0);
-    const act = items.reduce((s,it)=>{
-      const hasActual = FIELDS.some(({key})=>it['act_'+key]!==null && it['act_'+key]!==undefined);
-      return s + (hasActual ? (Number(it.act_total)||0) : (Number(it.est_total)||0));
-    },0);
-    return sum + (act - est);
-  }, 0);
+  const totalCustomerPaid = audits.reduce((s,a) => s + (Number(a.customer_paid_total)||0), 0);
+  const totalSupplierPaid = audits.reduce((s,a) => s + (Number(a.supplier_paid_total)||0), 0);
 
   return (
     <div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:18}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:18}}>
         {[
           {label:'Total Audits', val:totalAudits, color:'var(--accent)'},
-          {label:'⏳ Pending Review', val:pending, color:'var(--amber,#d97706)'},
-          {label:'✅ Reviewed', val:submitted, color:'var(--green)'},
-          {label:'Net Variance', val:fmtM(totalVariance), color:totalVariance>0?'var(--red)':'var(--green)'},
+          {label:'Customer Paid', val:fmtM(totalCustomerPaid), color:'var(--green)'},
+          {label:'Supplier Paid', val:fmtM(totalSupplierPaid), color:'var(--red)'},
         ].map(s=>(
           <div key={s.label} className="stat-card" style={{borderLeft:`3px solid ${s.color}`}}>
             <div className="stat-label" style={{fontSize:10}}>{s.label}</div>
@@ -282,25 +237,16 @@ export default function AuditBinPage() {
 
       {filtered.length > 0 && (
         <div style={{border:'1px solid var(--border)',borderRadius:'var(--r)',overflow:'hidden'}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 160px 120px 120px 120px 100px',
+          <div style={{display:'grid',gridTemplateColumns:'1fr 160px 160px 100px',
             gap:0,background:'var(--surface2)',borderBottom:'1px solid var(--border)',
             padding:'7px 12px',fontSize:11,fontWeight:700,color:'var(--text2)',letterSpacing:.4}}>
             <div>ORDER / CUSTOMER</div>
-            <div>STATUS</div>
-            <div>ESTIMATE</div>
-            <div>ACTUAL</div>
-            <div>VARIANCE</div>
+            <div>CUSTOMER PAID</div>
+            <div>SUPPLIER PAID</div>
             <div style={{textAlign:'right'}}>ACTION</div>
           </div>
-          {filtered.map(a => {
-            const items = a.items || [];
-            const est = items.reduce((s,it)=>s+(Number(it.est_total)||0),0);
-            const hasAnyActual = items.some(it=>FIELDS.some(({key})=>it['act_'+key]!==null && it['act_'+key]!==undefined));
-            const act = items.reduce((s,it)=>s+(Number(it.act_total)||0),0);
-            const variance = act - est;
-            const varColor = !hasAnyActual ? 'var(--text3)' : variance>0 ? 'var(--red)' : variance<0 ? 'var(--green)' : 'var(--text2)';
-            return (
-              <div key={a.id} style={{display:'grid',gridTemplateColumns:'1fr 160px 120px 120px 120px 100px',
+          {filtered.map(a => (
+              <div key={a.id} style={{display:'grid',gridTemplateColumns:'1fr 160px 160px 100px',
                 gap:0,padding:'10px 12px',borderBottom:'1px solid var(--border)',alignItems:'center',cursor:'pointer'}}
                 onClick={()=>setSelected(a)}>
                 <div>
@@ -308,23 +254,13 @@ export default function AuditBinPage() {
                   {a.order?.po_number && <span className="mono" style={{fontSize:11,color:'var(--text3)',marginLeft:8}}>PO:{a.order.po_number}</span>}
                   <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>{custName(a.order?.customer_id)}</div>
                 </div>
-                <div>
-                  <span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,textTransform:'capitalize',
-                    color:a.status==='submitted'?'var(--green)':'var(--amber,#d97706)',
-                    background:a.status==='submitted'?'var(--green-lt)':'var(--amber-lt,#fffbeb)',
-                    border:`1px solid ${a.status==='submitted'?'var(--green)':'var(--amber,#d97706)'}44`}}>
-                    {a.status==='submitted'?'✅ Reviewed':'⏳ Pending'}
-                  </span>
-                </div>
-                <div style={{fontSize:12,fontWeight:700,color:'var(--accent)'}}>{fmtM(est)}</div>
-                <div style={{fontSize:12,fontWeight:600,color:'var(--text2)'}}>{hasAnyActual?fmtM(act):<span style={{color:'var(--text3)'}}>—</span>}</div>
-                <div style={{fontSize:12,fontWeight:800,color:varColor}}>{hasAnyActual?(variance>0?'+':'')+fmtM(variance):'—'}</div>
+                <div style={{fontSize:12,fontWeight:700,color:'var(--green)'}}>{fmtM(a.customer_paid_total)}</div>
+                <div style={{fontSize:12,fontWeight:700,color:'var(--red)'}}>{fmtM(a.supplier_paid_total)}</div>
                 <div style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                   <button className="btn btn-xs btn-primary" onClick={()=>setSelected(a)}>👁 View</button>
                 </div>
               </div>
-            );
-          })}
+          ))}
         </div>
       )}
 

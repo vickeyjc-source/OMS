@@ -17,6 +17,7 @@ const MODULES = [
   { key:'approvals', label:'All Approvals',     icon:'✅', desc:'Restores all approval workflows, requests and actions.',                                   color:'var(--amber,#d97706)' },
   { key:'finance',   label:'All Finance Data',  icon:'💰', desc:'Restores all customer payments, supplier finance queue entries and PO requests.',           color:'var(--amber,#d97706)' },
   { key:'inventory', label:'All Inventory',     icon:'🏭', desc:'Restores all stock inventory records — warehouse and customer-held stock entries.',         color:'var(--amber,#d97706)' },
+  { key:'audit',     label:'All Audit Bin Data', icon:'🧾', desc:'Restores all cost audit records — estimate vs actual landed cost tracking and per-line breakdowns.', color:'var(--amber,#d97706)' },
 ];
 
 const tabStyle = active => ({
@@ -57,7 +58,7 @@ export default function DeletedBinPage() {
 
   const refresh = () => {
     ['deleted-bin','deleted-users','deleted-customers','deleted-suppliers','activity-log'].forEach(k=>qc.invalidateQueries([k]));
-    ['orders','enquiries','quotes','approvals','inventory','users','customers','suppliers'].forEach(k=>qc.invalidateQueries([k]));
+    ['orders','enquiries','quotes','approvals','inventory','audit-bin','users','customers','suppliers'].forEach(k=>qc.invalidateQueries([k]));
   };
 
   const restore = useMutation({
@@ -174,7 +175,7 @@ export default function DeletedBinPage() {
                       <span style={{fontSize:24}}>💣</span>
                       <div>
                         <div style={{fontWeight:800,fontSize:15,color:'var(--red)'}}>Master Delete — Restore Everything</div>
-                        <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Restores ALL Orders, Enquiries, Quotes, Sourcing data, Approvals, Finance and Inventory wiped by a Master Delete — in one shot.</div>
+                        <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Restores ALL Orders, Enquiries, Quotes, Sourcing data, Approvals, Finance, Audit Bin data and Inventory wiped by a Master Delete — in one shot.</div>
                       </div>
                     </div>
                     {!has ? (

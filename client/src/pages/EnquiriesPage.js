@@ -2,10 +2,10 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
 import { printDoc, generateEnquiryPDF } from '../utils/pdfUtils';
+import MergeEnquiryModal, { MERGEABLE_ENQ_STATUSES } from '../components/MergeEnquiryModal';
 
 function EnquiryDetailModal({ enq, onClose, customers, suppliers, linecards, users }) {
   const qc = useQueryClient();
@@ -199,10 +199,16 @@ function EnquiryDetailModal({ enq, onClose, customers, suppliers, linecards, use
   );
 }
 
+// An enquiry can be picked for merging only while it's still pre-Quote and
+// hasn't already been merged into (or out of) something else.
+const isMergeableEnq = e => !e.merged_into && MERGEABLE_ENQ_STATUSES.includes(e.status);
+
 export default function EnquiriesPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
+  const [mergeSelection, setMergeSelection] = useState([]); // 2+ enquiry ids, all same customer
+  const [showMerge, setShowMerge] = useState(false);
   const { data: enqs=[] }       = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>r.data) });
   const { data: customers=[] }  = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data) });
   const { data: users=[] }      = useQuery({ queryKey:['users'],     queryFn:()=>api.get('/users').then(r=>r.data) });
@@ -217,6 +223,20 @@ export default function EnquiriesPage() {
     return e.id.toLowerCase().includes(q) || custName(e.customer_id).toLowerCase().includes(q);
   }).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
 
+  const toggleMergeSelect = (id) => {
+    setMergeSelection(sel => sel.includes(id) ? sel.filter(x=>x!==id) : [...sel, id]);
+  };
+  const selectedEnqs   = mergeSelection.map(id => enqs.find(e=>e.id===id)).filter(Boolean);
+  const mergeCustomerId = selectedEnqs[0]?.customer_id || null;
+  // Once one enquiry is picked, only same-customer checkboxes stay visible —
+  // merging only ever makes sense within one customer's enquiries.
+  const canShowCheckbox = e => isMergeableEnq(e) && (!mergeCustomerId || e.customer_id === mergeCustomerId);
+  // Survivor is always the highest enquiry number among everything picked —
+  // no manual choice, the rest all get absorbed into it in one go.
+  const sortedSelected  = [...selectedEnqs].sort((a,b)=>b.id.localeCompare(a.id));
+  const mergeEnq        = sortedSelected[0];
+  const mergeOtherIds   = sortedSelected.slice(1).map(e=>e.id);
+
   return (
     <div>
       <div className="flex-between" style={{marginBottom:14}}>
@@ -224,18 +244,37 @@ export default function EnquiriesPage() {
           <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
           <input className="search-input" placeholder="Search enquiries…" value={search} onChange={e=>setSearch(e.target.value)} />
         </div>
-        <button className="btn btn-primary" onClick={()=>navigate('/enquiries/new')}>+ New Enquiry</button>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {mergeSelection.length > 0 && (
+            <>
+              <span style={{fontSize:12,color:'var(--text3)'}}>{mergeSelection.length} selected to merge</span>
+              <button className="btn btn-sm" onClick={()=>setMergeSelection([])}>Clear</button>
+              <button className="btn btn-sm btn-primary" disabled={mergeSelection.length<2}
+                onClick={()=>setShowMerge(true)}>🔗 Merge Selected</button>
+            </>
+          )}
+          <button className="btn btn-primary" onClick={()=>navigate('/enquiries/new')}>+ New Enquiry</button>
+        </div>
       </div>
       <div className="filter-row">
         {FILTERS.map(f=><span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>{f==='all'?'All':(FILTER_LABELS[f]||f.charAt(0).toUpperCase()+f.slice(1))}</span>)}
       </div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Enquiry ID</th><th>Customer</th><th>Items</th><th>Buying Type</th><th>Priority</th><th>Status</th><th style={{textAlign:'center'}}>Days in Stage</th><th>Assigned To</th><th>Created</th></tr></thead>
+          <thead><tr><th style={{width:30}}></th><th>Enquiry ID</th><th>Customer</th><th>Items</th><th>Buying Type</th><th>Priority</th><th>Status</th><th style={{textAlign:'center'}}>Days in Stage</th><th>Assigned To</th><th>Created</th></tr></thead>
           <tbody>
-            {filtered.length===0 && <tr><td colSpan={9}><div className="empty-state"><div className="empty-icon">📋</div><div>No enquiries found</div></div></td></tr>}
-            {filtered.map(e=>(
+            {filtered.length===0 && <tr><td colSpan={10}><div className="empty-state"><div className="empty-icon">📋</div><div>No enquiries found</div></div></td></tr>}
+            {filtered.map(e=>{
+              const showCheckbox = canShowCheckbox(e);
+              const checked      = mergeSelection.includes(e.id);
+              return (
               <tr key={e.id} className="clickable" onClick={()=>navigate('/enquiries/'+e.id)}>
+                <td onClick={ev=>ev.stopPropagation()}>
+                  {showCheckbox && (
+                    <input type="checkbox" checked={checked} onChange={()=>toggleMergeSelect(e.id)}
+                      title="Select for merge" style={{cursor:'pointer'}} />
+                  )}
+                </td>
                 <td>
                   <span className="mono" style={{fontSize:12,color:'var(--text3)'}}>{e.id}</span>
                   {e.sourcing_no && (
@@ -248,6 +287,11 @@ export default function EnquiriesPage() {
                       </span>
                     </span>
                   )}
+                  {e.merged_into && (
+                    <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+                      🔗 merged with <span className="mono bold">{e.merged_into}</span>
+                    </div>
+                  )}
                 </td>
                 <td>{custName(e.customer_id)}</td>
                 <td><span className="badge badge-blue">{e.items?.length||0}</span></td>
@@ -258,10 +302,21 @@ export default function EnquiriesPage() {
                 <td>{e.assigned_to ? users.find(u=>u.id===e.assigned_to)?.name||'—' : <span className="muted">Unassigned</span>}</td>
                 <td>{fmtDateTime(e.created_at)}</td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {showMerge && mergeEnq && mergeOtherIds.length > 0 && (
+        <MergeEnquiryModal
+          enq={mergeEnq}
+          customers={customers}
+          preselectedOtherIds={mergeOtherIds}
+          onClose={()=>setShowMerge(false)}
+          onMerged={()=>{ setShowMerge(false); setMergeSelection([]); }}
+        />
+      )}
     </div>
   );
 }

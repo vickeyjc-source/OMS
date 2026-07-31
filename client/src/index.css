@@ -70,6 +70,7 @@ input, select, textarea { font-family: 'DM Sans', sans-serif; }
 .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .btn-primary:hover { background: #163f82; }
 .btn-success { background: var(--green); color: #fff; border-color: var(--green); }
+.btn-success:hover { background: #15803d; border-color: #15803d; color: #fff; }
 .btn-danger { background: var(--red); color: #fff !important; border-color: var(--red); }
 .btn-danger:hover { background: #b91c1c; border-color: #b91c1c; color: #fff !important; }
 .btn-danger:active { background: #991b1b; border-color: #991b1b; color: #fff !important; }

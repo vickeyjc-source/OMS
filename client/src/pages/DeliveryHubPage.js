@@ -468,11 +468,15 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
 // ── Main Delivery Hub Page ────────────────────────────────────────────────────
 
 // ── CreateShipmentModal ───────────────────────────────────────────────────────
-function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
+function CreateShipmentModal({ order, soId, customers, shippers, onClose, onSaved }) {
   const qc = useQueryClient();
   const custObj  = customers.find(c=>c.id===order.customer_id)||{};
   const custName = custObj.name||order.customer_id;
-  const allItems = (order.lineItems||[]).filter(li=>['ready_to_ship','grn_partial','delivered_hub'].includes(li.line_status));
+  const soScope = soId ? (order.supplierOrders||[]).find(so=>so.id===soId) : null;
+  const scopedIds = soScope ? new Set(soScope.items||[]) : null;
+  const allItems = (order.lineItems||[])
+    .filter(li=>['ready_to_ship','grn_partial','delivered_hub'].includes(li.line_status))
+    .filter(li=>!scopedIds || scopedIds.has(li.id));
   const existingShipNos = (order.shipments||[]).length;
   const [step, setStep]         = useState(1);
   const [saving, setSaving]     = useState(false);
@@ -598,7 +602,10 @@ function CreateShipmentModal({ order, customers, shippers, onClose, onSaved }) {
       <div className="modal modal-xl">
         <div className="modal-header">
           <div><h2>📦 Create Shipment — {order.id}</h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>Shipment {shipNo} · {custName}</div></div>
+            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
+              Shipment {shipNo} · {custName}
+              {soScope && <span style={{marginLeft:8,color:'var(--accent)',fontWeight:700}}>· PO {soScope.internal_po_no||soScope.id}</span>}
+            </div></div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div style={{display:'flex',gap:0,borderBottom:'1px solid var(--border)',padding:'0 20px'}}>
@@ -1372,7 +1379,7 @@ export default function DeliveryHubPage() {
                                         style={{fontSize:10,padding:'2px 8px',
                                           background:'var(--teal,#0d9488)',color:'#fff',
                                           borderColor:'var(--teal,#0d9488)',fontWeight:700}}
-                                        onClick={()=>setDispatch(order)}>
+                                        onClick={()=>setDispatch({ order, soId: so.id })}>
                                         📦 Ship Now →
                                       </button>
                                     )}
@@ -1505,7 +1512,7 @@ export default function DeliveryHubPage() {
         </div>
       )}
       {dispatch && (
-        <CreateShipmentModal order={dispatch} customers={customers} shippers={shippers}
+        <CreateShipmentModal order={dispatch.order} soId={dispatch.soId} customers={customers} shippers={shippers}
           onClose={()=>setDispatch(null)}
           onSaved={()=>setDispatch(null)}/>
       )}

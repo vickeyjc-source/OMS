@@ -443,16 +443,26 @@ async function createCostAudit(orderId) {
       // breakdown still comes from enquiry_sourcing, since the PO itself has
       // no per-charge columns — only its confirmed_price/buying_price_per_unit.
       const bpu = parseFloat(so.buying_price_per_unit);
-      const poMaterialTotal = bpu > 0 ? bpu * items.reduce((s,li)=>s+(Number(li.qty)||0),0)
-        : (parseFloat(so.confirmed_price) || 0);
+      const qtySum = items.reduce((s,li)=>s+(Number(li.qty)||0),0);
+      const poMaterialTotal = bpu > 0 ? bpu * qtySum : (parseFloat(so.confirmed_price) || 0);
+      // Per-item material share (proportional to qty) — only used to seed each
+      // line's own snapshot below; the aggregated est_material stays the PO's
+      // real confirmed total either way.
+      const materialPerUnit = qtySum > 0 ? poMaterialTotal / qtySum : 0;
 
       const totals = { material: poMaterialTotal, freight:0, insurance:0, bcd:0, sws:0, cess:0, bank:0, clearing:0, margin:0 };
+      // Sourcing's own free-form named charges (e.g. "Customs Inspection Fee") —
+      // kept strictly separate from Finance's actual-paid charges below; one is
+      // an estimate-time guess, the other is real money that has moved.
+      const estExtraChargesDetail = [];
+      const lineSnapshots = [];
       let scope = 'domestic';
       for (const li of items) {
         const rid = resolvedSourcingId[li.id];
         const src = rid ? srcByResolvedId[rid] : null;
         if (!src) continue;
         const isIntl = (src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0;
+        const lineScope = isIntl ? 'international' : 'domestic';
         if (isIntl) scope = 'international';
         totals.freight   += Number(src.freight_inr) || 0;
         totals.insurance += Number(src.insurance_inr) || 0;
@@ -461,7 +471,19 @@ async function createCostAudit(orderId) {
         totals.bank      += Number(src.bank_inr) || 0;
         totals.clearing  += Number(src.clearance_inr) || 0;
         totals.margin    += Number(src.margin_inr) || 0;
+        const srcExtra = parseJsonSafe(src.extra_charges, []);
+        if (Array.isArray(srcExtra)) estExtraChargesDetail.push(...srcExtra);
+
+        // Snapshot this line exactly as Sourcing had it — same raw %/₹ value,
+        // same mode, same per-item computed ₹ amounts — so Audit Bin can render
+        // this component's row identically to how Sourcing showed it.
+        lineSnapshots.push({
+          li, src, scope: lineScope,
+          qty: Number(li.qty)||0,
+          unit_price: materialPerUnit,
+        });
       }
+      const estExtraChargesTotal = estExtraChargesDetail.reduce((s,c) => s + (Number(c?.amount)||0), 0);
       // CESS reuses bank_fixed_usd on enquiry_sourcing (same convention as the split feature) — no separate *_inr column exists for it, so back it out of the raw pct/amt the same way the split route computes it, using cif value = material+freight+insurance.
       const cifValue = totals.material + totals.freight + totals.insurance;
       let cessTotal = 0;
@@ -475,28 +497,52 @@ async function createCostAudit(orderId) {
       }
       totals.cess = cessTotal;
 
-      // Ad-hoc additional charges already committed to this PO before delivery
-      // (entered during payment processing) — real money, folds into the estimate total.
+      // Finance's own ad-hoc charges already committed to this PO before
+      // delivery (entered during payment processing) — real money, kept as its
+      // OWN section, never merged into Sourcing's estimate-time charges.
       let fq = null;
       try { fq = await getAsync('SELECT additional_charges FROM finance_queue WHERE supplier_order_id=?', [so.id]); } catch(_) {}
       const netCharges = parseJsonSafe(so.net_additional_charges, []);
       const advCharges = parseJsonSafe(fq?.additional_charges, []);
-      const charges = advCharges.length ? advCharges : netCharges;
-      const chargesTotal = charges.reduce((s,c) => s + (parseFloat(c.amount)||0), 0);
+      const financeCharges = (advCharges.length ? advCharges : netCharges)
+        .map(c => ({ name: c?.name || c?.label || 'PO charge', amount: parseFloat(c?.amount)||0 }));
+      const financeChargesTotal = financeCharges.reduce((s,c) => s + c.amount, 0);
 
       const estTotal = totals.material + totals.freight + totals.insurance + totals.bcd + totals.sws
-        + totals.cess + totals.bank + totals.clearing + totals.margin + chargesTotal;
+        + totals.cess + totals.bank + totals.clearing + totals.margin + estExtraChargesTotal + financeChargesTotal;
 
       const supplier = so.supplier_id ? await getAsync('SELECT name FROM suppliers WHERE id=?', [so.supplier_id]) : null;
 
+      const auditItemId = uuid();
       await runAsync(
         `INSERT INTO order_cost_audit_items
            (id, audit_id, order_id, supplier_order_id, supplier_id, supplier_name, scope, customer_total,
-            est_material, est_freight, est_insurance, est_bcd, est_sws, est_cess, est_bank, est_clearing, est_margin, est_total)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [uuid(), auditId, orderId, so.id, so.supplier_id||'', supplier?.name||'', scope, customerTotal,
-         totals.material, totals.freight, totals.insurance, totals.bcd, totals.sws, totals.cess, totals.bank, totals.clearing, totals.margin, estTotal]
+            est_material, est_freight, est_insurance, est_bcd, est_sws, est_cess, est_bank, est_clearing, est_margin,
+            est_extra_charges, est_extra_charges_detail, est_finance_charges, est_finance_charges_detail, est_total)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [auditItemId, auditId, orderId, so.id, so.supplier_id||'', supplier?.name||'', scope, customerTotal,
+         totals.material, totals.freight, totals.insurance, totals.bcd, totals.sws, totals.cess, totals.bank, totals.clearing, totals.margin,
+         estExtraChargesTotal, estExtraChargesDetail.length ? JSON.stringify(estExtraChargesDetail) : null,
+         financeChargesTotal, financeCharges.length ? JSON.stringify(financeCharges) : null, estTotal]
       );
+
+      for (const snap of lineSnapshots) {
+        const { li, src, scope: lineScope, qty, unit_price } = snap;
+        const modesObj = (() => { try { return typeof src.field_modes === 'string' ? JSON.parse(src.field_modes||'{}') : (src.field_modes||{}); } catch(_) { return {}; } })();
+        await runAsync(
+          `INSERT INTO order_cost_audit_item_lines
+             (id, audit_item_id, component, manufacturer, qty, supplier_id, scope, unit_price, sourced_currency, field_modes,
+              freight_raw, insurance_raw, bcd_raw, sws_raw, cess_raw, bank_raw, clearing_raw, margin_raw,
+              freight_inr, insurance_inr, bcd_inr, sws_inr, cess_inr, bank_inr, clearing_inr, margin_inr)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [uuid(), auditItemId, li.component||'', li.manufacturer||'', qty, src.supplier_id||'', lineScope, unit_price, src.sourced_currency||'INR',
+           Object.keys(modesObj).length ? JSON.stringify(modesObj) : null,
+           src.freight_pct, src.insurance_pct, src.duty_pct, src.cess_pct, src.bank_fixed_foreign, src.bank_fixed_inr, src.clearance_fixed_inr, src.margin_pct,
+           Number(src.freight_inr)||0, Number(src.insurance_inr)||0, Number(src.duty_inr)||0, Number(src.cess_inr)||0,
+           Number(src.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src.bank_fixed_usd)||0)/100) : 0)||0,
+           Number(src.bank_inr)||0, Number(src.clearance_inr)||0, Number(src.margin_inr)||0]
+        );
+      }
     }
   } catch(err) {
     console.error('[createCostAudit] failed for order', orderId, err.message);
@@ -1163,6 +1209,218 @@ app.get('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   if (!e) return res.status(404).json({ error: 'Not found' });
   res.json(await assembleEnquiry(e));
 }));
+
+// ── Enquiry Merge — same customer, pre-Quote only. Merging after a Quote/Order
+// exists would mean reconciling two downstream records, which this isn't for.
+const MERGEABLE_ENQ_STATUSES = ['draft', 'new', 'modify_requested', 'sourcing'];
+const normEnqCompare = s => String(s||'').trim().toLowerCase();
+
+app.get('/api/enquiries/:id/merge-preview', auth, asyncRoute(async (req, res) => {
+  const otherId = req.query.other_id;
+  if (!otherId) return res.status(400).json({ error: 'other_id is required' });
+  const eA = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
+  const eB = await getAsync('SELECT * FROM enquiries WHERE id=?', [otherId]);
+  if (!eA || !eB) return res.status(404).json({ error: 'One or both enquiries not found' });
+  if (eA.id === eB.id) return res.status(400).json({ error: 'Choose two different enquiries' });
+  if (eA.customer_id !== eB.customer_id) return res.status(400).json({ error: 'Both enquiries must belong to the same customer' });
+  if (eA.merged_into || eB.merged_into) return res.status(400).json({ error: 'One of these enquiries has already been merged into another' });
+  if (!MERGEABLE_ENQ_STATUSES.includes(eA.status) || !MERGEABLE_ENQ_STATUSES.includes(eB.status)) {
+    return res.status(400).json({ error: 'Both enquiries must be pre-Quote (Draft/New/Sourcing) to merge' });
+  }
+
+  const fullA = await assembleEnquiry(eA);
+  const fullB = await assembleEnquiry(eB);
+
+  const warnings = [];
+  if (normEnqCompare(eA.buying_type) !== normEnqCompare(eB.buying_type)) {
+    warnings.push(`Buying Type differs: "${eA.buying_type||'—'}" vs "${eB.buying_type||'—'}"`);
+  }
+  if (normEnqCompare(eA.priority) !== normEnqCompare(eB.priority)) {
+    warnings.push(`Priority differs: "${eA.priority||'—'}" vs "${eB.priority||'—'}"`);
+  }
+
+  // Same-component/manufacturer duplicates, matched symmetrically — which side
+  // survives is chosen by the user on the review screen, not decided here.
+  const duplicatePairs = [];
+  for (const itemA of (fullA.items||[])) {
+    for (const itemB of (fullB.items||[])) {
+      if (normEnqCompare(itemA.component) === normEnqCompare(itemB.component) &&
+          normEnqCompare(itemA.manufacturer) === normEnqCompare(itemB.manufacturer)) {
+        duplicatePairs.push({
+          a_item_id: itemA.id, b_item_id: itemB.id,
+          component: itemA.component, manufacturer: itemA.manufacturer,
+          a_qty: itemA.quantity, b_qty: itemB.quantity,
+          combined_qty: (Number(itemA.quantity)||0) + (Number(itemB.quantity)||0),
+          a_delivery: itemA.preferred_delivery_date, b_delivery: itemB.preferred_delivery_date,
+          combined_delivery: [itemA.preferred_delivery_date, itemB.preferred_delivery_date].filter(Boolean).sort().pop() || null,
+        });
+      }
+    }
+  }
+
+  // Default survivor = the higher enquiry number (ENQ-<year>-<seq> sorts correctly
+  // as a plain string within a year) — the newer enquiry keeps going, the older
+  // one gets absorbed into it.
+  res.json({
+    enquiry_a: fullA, enquiry_b: fullB,
+    default_survivor_id: eA.id >= eB.id ? eA.id : eB.id,
+    warnings, duplicate_pairs: duplicatePairs,
+  });
+}));
+
+app.post('/api/enquiries/merge', auth, asyncRoute(async (req, res) => {
+  const { survivor_id, absorbed_id, combine_pairs = [] } = req.body || {};
+  if (!survivor_id || !absorbed_id) return res.status(400).json({ error: 'survivor_id and absorbed_id are required' });
+  if (survivor_id === absorbed_id) return res.status(400).json({ error: 'Choose two different enquiries' });
+
+  const survivor = await getAsync('SELECT * FROM enquiries WHERE id=?', [survivor_id]);
+  const absorbed = await getAsync('SELECT * FROM enquiries WHERE id=?', [absorbed_id]);
+  if (!survivor || !absorbed) return res.status(404).json({ error: 'One or both enquiries not found' });
+  if (survivor.customer_id !== absorbed.customer_id) return res.status(400).json({ error: 'Both enquiries must belong to the same customer' });
+  if (survivor.merged_into || absorbed.merged_into) return res.status(400).json({ error: 'One of these enquiries has already been merged into another' });
+  if (!MERGEABLE_ENQ_STATUSES.includes(survivor.status) || !MERGEABLE_ENQ_STATUSES.includes(absorbed.status)) {
+    return res.status(400).json({ error: 'Both enquiries must be pre-Quote (Draft/New/Sourcing) to merge' });
+  }
+
+  const absorbedItems = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [absorbed_id]);
+  for (const item of absorbedItems) {
+    const pair = (combine_pairs||[]).find(p => p.absorbed_item_id === item.id);
+    if (pair) {
+      // Combine into the matching survivor item — bump its qty/delivery there.
+      // The absorbed item itself is left in place (not deleted, not re-parented)
+      // so it still shows on the absorbed enquiry's own page for reference.
+      await runAsync('UPDATE enquiry_items SET quantity=?, preferred_delivery_date=? WHERE id=? AND enquiry_id=?',
+        [pair.qty, pair.delivery_date || null, pair.survivor_item_id, survivor_id]);
+      // Only re-point this item's sourcing onto the survivor item if it has none
+      // of its own yet — never overwrite pricing that's already there.
+      const survivorHasSourcing = await getAsync('SELECT id FROM enquiry_sourcing WHERE enquiry_item_id=?', [pair.survivor_item_id]);
+      if (!survivorHasSourcing) {
+        await runAsync('UPDATE enquiry_sourcing SET enquiry_id=?, enquiry_item_id=? WHERE enquiry_item_id=?',
+          [survivor_id, pair.survivor_item_id, item.id]);
+      }
+    } else {
+      // Copy onto the survivor with a new id — the original row is left in
+      // place on the absorbed enquiry (not deleted, not re-parented) so it
+      // still shows there for reference, exactly as it did before the merge.
+      const newItemId = uuid();
+      await runAsync(
+        'INSERT INTO enquiry_items(id,enquiry_id,component,linecard_id,ipn,manufacturer,target_price,target_currency,quantity,preferred_delivery_date,date_code,sort_order,tax_rate) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        [newItemId, survivor_id, item.component, item.linecard_id, item.ipn, item.manufacturer,
+         item.target_price, item.target_currency, item.quantity, item.preferred_delivery_date,
+         item.date_code, item.sort_order, item.tax_rate]
+      );
+      await runAsync('UPDATE enquiry_sourcing SET enquiry_id=?, enquiry_item_id=? WHERE enquiry_item_id=?', [survivor_id, newItemId, item.id]);
+    }
+  }
+
+  const now = nowStr();
+  await runAsync('INSERT INTO enquiry_merges(id, survivor_id, absorbed_id, merged_by, merged_at) VALUES (?,?,?,?,?)',
+    [uuid(), survivor_id, absorbed_id, req.session.user?.name || '', now]);
+  await runAsync('UPDATE enquiries SET status=?, merged_into=?, updated_at=? WHERE id=?', ['merged', survivor_id, now, absorbed_id]);
+  await runAsync('UPDATE enquiries SET updated_at=? WHERE id=?', [now, survivor_id]);
+
+  await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+    [uuid(), survivor_id, `Absorbed ${absorbed_id} (${absorbedItems.length} item${absorbedItems.length===1?'':'s'}) — merged by ${req.session.user?.name||''}`, req.session.user?.name||'', now]);
+  await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+    [uuid(), absorbed_id, `Merged into ${survivor_id}`, req.session.user?.name||'', now]);
+
+  saveNow();
+  const updatedSurvivor = await getAsync('SELECT * FROM enquiries WHERE id=?', [survivor_id]);
+  res.json(await assembleEnquiry(updatedSurvivor));
+}));
+
+// ── Split a sourcing line item into a second one — same component, so it can
+// go to a different supplier at its own price. The original row is shrunk by
+// the split-off qty; the new row starts blank (no supplier/price yet), filled
+// in afterward through the exact same per-row fields as any other item. Since
+// each split-off portion is a genuine separate enquiry_items row, Quote/Order
+// see them as independent line items automatically — no downstream changes.
+app.post('/api/enquiries/:id/items/:itemId/split', auth, asyncRoute(async (req, res) => {
+  const eid = req.params.id;
+  const itemId = req.params.itemId;
+  const qty = Number(req.body?.qty);
+
+  const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [eid]);
+  if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
+  if (enq.merged_into) return res.status(400).json({ error: 'This enquiry was merged into ' + enq.merged_into + ' — edit that one instead' });
+
+  const existingQuoteCount = await getAsync("SELECT COUNT(*) as c FROM quotes WHERE enquiry_id=? AND status IN ('active','returned_to_sourcing')", [eid]);
+  if ((existingQuoteCount?.c || 0) > 0) {
+    return res.status(400).json({ error: 'This enquiry already has a quote — splitting a line item is only available before it has been quoted.' });
+  }
+
+  const item = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [itemId, eid]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this enquiry' });
+
+  if (!Number.isFinite(qty) || qty <= 0 || qty >= Number(item.quantity)) {
+    return res.status(400).json({ error: `Enter a quantity between 1 and ${Number(item.quantity) - 1}` });
+  }
+
+  // Shrink the original row — it keeps its id, so its sourcing data stays intact.
+  await runAsync('UPDATE enquiry_items SET quantity = quantity - ? WHERE id=?', [qty, itemId]);
+
+  // The new row is always appended after the highest-numbered item, no matter
+  // which item it was split from — plain append-only numbering, never
+  // re-sequencing/shifting the rows that already exist.
+  const maxSort = await getAsync('SELECT MAX(sort_order) as m FROM enquiry_items WHERE enquiry_id=?', [eid]);
+  const nextSort = (Number(maxSort?.m) || 0) + 1;
+
+  // New row starts blank — no supplier/price copied over. Sourcing fills it in
+  // the normal way, same as any freshly-added item.
+  const newId = uuid();
+  await runAsync(
+    `INSERT INTO enquiry_items
+       (id, enquiry_id, component, linecard_id, ipn, manufacturer, target_price, target_currency,
+        quantity, preferred_delivery_date, date_code, sort_order, tax_rate, split_from_item_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [newId, eid, item.component, item.linecard_id||null, item.ipn||'', item.manufacturer||'',
+     item.target_price||null, item.target_currency||'INR', qty, item.preferred_delivery_date||'',
+     item.date_code||'', nextSort, item.tax_rate||0, itemId]
+  );
+
+  await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+    [uuid(), eid, `Split "${item.component}" into a second supplier line (qty ${qty})`, req.session.user?.name||'', nowStr()]);
+
+  saveNow();
+  const updated = await getAsync('SELECT * FROM enquiries WHERE id=?', [eid]);
+  res.json({ ok: true, enquiry: await assembleEnquiry(updated), newItemId: newId });
+}));
+
+// ── Merge a split-off item back into the row it was split from ────────────────
+app.post('/api/enquiries/:id/items/:itemId/merge-back', auth, asyncRoute(async (req, res) => {
+  const eid = req.params.id;
+  const itemId = req.params.itemId; // the split-off row being removed
+  const { merge_into_item_id } = req.body || {};
+
+  const enq = await getAsync('SELECT * FROM enquiries WHERE id=?', [eid]);
+  if (!enq) return res.status(404).json({ error: 'Enquiry not found' });
+
+  const existingQuoteCount = await getAsync("SELECT COUNT(*) as c FROM quotes WHERE enquiry_id=? AND status IN ('active','returned_to_sourcing')", [eid]);
+  if ((existingQuoteCount?.c || 0) > 0) {
+    return res.status(400).json({ error: 'This enquiry already has a quote — merging line items is only available before it has been quoted.' });
+  }
+
+  const item = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [itemId, eid]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this enquiry' });
+
+  const targetId = merge_into_item_id || item.split_from_item_id;
+  if (!targetId) return res.status(400).json({ error: 'This item has no recorded split origin — specify merge_into_item_id' });
+
+  const target = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [targetId, eid]);
+  if (!target) return res.status(404).json({ error: 'Target line item not found on this enquiry' });
+  if (target.component !== item.component) {
+    return res.status(400).json({ error: 'Can only merge a split back into the line item it was split from' });
+  }
+
+  await runAsync('UPDATE enquiry_items SET quantity = quantity + ? WHERE id=?', [item.quantity, targetId]);
+  await runAsync('DELETE FROM enquiry_sourcing WHERE enquiry_item_id=?', [itemId]);
+  await runAsync('DELETE FROM enquiry_items WHERE id=?', [itemId]);
+
+  saveNow();
+  const updated = await getAsync('SELECT * FROM enquiries WHERE id=?', [eid]);
+  res.json({ ok: true, enquiry: await assembleEnquiry(updated) });
+}));
+
 app.post('/api/enquiries', auth, asyncRoute(async (req, res) => {
   const d = req.body;
   if (!d.customer_id) return res.status(400).json({ error: 'Customer required' });
@@ -1170,8 +1428,8 @@ app.post('/api/enquiries', auth, asyncRoute(async (req, res) => {
   const now = nowStr();
   const initStatus = ['sourcing','draft'].includes(d.status) ? d.status : 'new';
   const initSourNo = initStatus === 'sourcing' ? await nextSourNoAsync() : '';
-  await runAsync('INSERT INTO enquiries(id,customer_id,created_by,assigned_to,status,priority,notes,sourcing_no,buying_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-    [id, d.customer_id, req.session.user.id, d.assigned_to||null, initStatus, d.priority||'normal', d.notes||'', initSourNo, d.buying_type||'', now, now]);
+  await runAsync('INSERT INTO enquiries(id,customer_id,created_by,assigned_to,status,priority,notes,sourcing_no,buying_type,shipping_type,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    [id, d.customer_id, req.session.user.id, d.assigned_to||null, initStatus, d.priority||'normal', d.notes||'', initSourNo, d.buying_type||'', d.shipping_type||'DDP', now, now]);
   if (initStatus === 'sourcing') {
     await runAsync('INSERT INTO enquiry_history VALUES(?,?,?,?,?)', [uuid(),id,'Submitted to Sourcing — '+initSourNo,req.session.user.name,now]);
   }
@@ -1291,6 +1549,7 @@ app.put('/api/sourcing/:id/supplier', auth, asyncRoute(async (req, res) => {
 app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   const e = await getAsync('SELECT * FROM enquiries WHERE id=?', [req.params.id]);
   if (!e) return res.status(404).json({ error: 'Not found' });
+  if (e.merged_into) return res.status(400).json({ error: 'This enquiry was merged into ' + e.merged_into + ' — edit that one instead' });
   const d   = req.body;
   const now = nowStr();
   // Assign sourcing_no when status first moves to 'sourcing'
@@ -1316,9 +1575,10 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   const clearOnSourcing  = resolvedStatus === 'sourcing' || resolvedStatus === 'returned_to_sourcing';
   const resolvedSendToEnqNote = clearOnSourcing ? null : newSendToEnqNote;
   const resolvedModifyReason  = clearOnSourcing ? null : (e.modify_reason || null);
-  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,charges=?,existing_order_id=?,send_to_enq_note=?,modify_reason=?,updated_at=? WHERE id=?',
+  await runAsync('UPDATE enquiries SET status=?,assigned_to=?,priority=?,notes=?,sourcing_no=?,buying_type=?,shipping_type=?,charges=?,existing_order_id=?,send_to_enq_note=?,modify_reason=?,updated_at=? WHERE id=?',
     [resolvedStatus, d.assigned_to??e.assigned_to, d.priority||e.priority, d.notes??e.notes, sourNo,
-     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''), newCharges, newExistingOrderId, resolvedSendToEnqNote, resolvedModifyReason, now, req.params.id]);
+     d.buying_type!==undefined ? d.buying_type : (e.buying_type||''),
+     d.shipping_type!==undefined ? d.shipping_type : (e.shipping_type||'DDP'), newCharges, newExistingOrderId, resolvedSendToEnqNote, resolvedModifyReason, now, req.params.id]);
   if (d.items !== undefined) {
     await runAsync('DELETE FROM enquiry_items WHERE enquiry_id=?', [req.params.id]);
     for (let idx = 0; idx < d.items.length; idx++) {
@@ -1381,8 +1641,9 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
         }
         // Full sourcing data UPSERT
         const fieldModes = s.field_modes || (s._fieldModes ? JSON.stringify(s._fieldModes) : null);
-        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,item_status,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        const extraCharges = s.extra_charges || (Array.isArray(s._extraCharges) && s._extraCharges.length ? JSON.stringify(s._extraCharges) : null);
+        await runAsync(`INSERT INTO enquiry_sourcing(id,enquiry_id,enquiry_item_id,supplier_id,sourced_price,sourced_currency,src_price_foreign,exchange_rate,hsn_code,freight_pct,insurance_pct,duty_pct,cess_pct,bank_fixed_usd,clearance_fixed_inr,margin_pct,freight_inr,insurance_inr,duty_inr,cess_inr,bank_inr,clearance_inr,margin_inr,availability,lead_time,notes,item_status,sent_to_enquiry,sent_to_enquiry_note,quote_price,quote_currency,tax_rate,field_modes,extra_charges,updated_by,updated_at,sourcing_revision_notes,sales_comment,src_dc,delivery_promise_date)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(id) DO UPDATE SET
                supplier_id=EXCLUDED.supplier_id,
                sourced_price=EXCLUDED.sourced_price, sourced_currency=EXCLUDED.sourced_currency,
@@ -1401,6 +1662,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
                quote_price=EXCLUDED.quote_price,
                quote_currency=EXCLUDED.quote_currency, tax_rate=EXCLUDED.tax_rate,
                field_modes=EXCLUDED.field_modes,
+               extra_charges=EXCLUDED.extra_charges,
                updated_by=EXCLUDED.updated_by,
                updated_at=EXCLUDED.updated_at,
                sourcing_revision_notes=EXCLUDED.sourcing_revision_notes,
@@ -1424,6 +1686,7 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
            s.quote_currency||'INR',
            toNum(s.tax_rate),
            fieldModes,
+           extraCharges,
            req.session.user.id, now,
            s.sourcing_revision_notes||null, s.sales_comment||null,
            s.src_dc||'', s.delivery_promise_date||'']);
@@ -2031,6 +2294,7 @@ const DELETABLE_MODULES = {
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
   finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
   inventory: { label:'All Inventory',     tables:['stock_inventory'] },
+  audit:     { label:'All Audit Bin Data', tables:['order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits'] },
 };
 
 // Modules surfaced in the Recycle Bin grid. "users" is handled by per-record
@@ -2158,6 +2422,7 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
   if (req.body?.confirm_text !== 'DELETE ALL DATA') return res.status(400).json({ error:'Confirmation text mismatch' });
   const tables = ['shipment_items','shipments','grn_records',
+    'order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits',
     'order_history','order_documents','customer_shipping','supplier_order_items',
     'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
     'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
@@ -3000,7 +3265,9 @@ app.post('/api/orders/:id/items/:itemId/split', auth, asyncRoute(async (req, res
       const importCost         = cifValue + dutyInr + cessInr + bankInr;
       const clearanceInr        = isIntl ? amtOf('clearing', pricing.clearance_fixed_inr, cifValue) : 0;
       const landedBeforeMargin   = importCost + clearanceInr;
-      const marginInr             = amtOf('margin', pricing.margin_pct, landedBeforeMargin);
+      // Margin in ₹ mode is a per-unit amount, not a batch total — scale by qty
+      // so it matches calcDomesticQuote's s+m semantics in Sourcing Bin.
+      const marginInr             = modes.margin === 'pct' ? amtOf('margin', pricing.margin_pct, landedBeforeMargin) : (Number(pricing.margin_pct)||0) * qtys[i];
 
       await runAsync(
         `INSERT INTO enquiry_sourcing
@@ -3113,7 +3380,8 @@ app.put('/api/orders/:id/items/:itemId/split-pricing', auth, asyncRoute(async (r
   const importCost         = cifValue + dutyInr + cessInr + bankInr;
   const clearanceInr        = isIntl ? amtOf('clearing', pricing.clearance_fixed_inr, cifValue) : 0;
   const landedBeforeMargin   = importCost + clearanceInr;
-  const marginInr             = amtOf('margin', pricing.margin_pct, landedBeforeMargin);
+  // Margin in ₹ mode is a per-unit amount, not a batch total — scale by qty.
+  const marginInr             = modes.margin === 'pct' ? amtOf('margin', pricing.margin_pct, landedBeforeMargin) : (Number(pricing.margin_pct)||0) * item.qty;
 
   await runAsync('UPDATE order_items SET supplier_id=? WHERE id=?', [supplier_id, itemId]);
 
@@ -3163,6 +3431,17 @@ app.put('/api/orders/:id/items/:itemId/split-pricing', auth, asyncRoute(async (r
 // Orders land here automatically the moment they close (see createCostAudit(),
 // called from both places orders.status becomes 'closed'). Never locked —
 // actuals can be entered/edited any time after the audit is created.
+// Sum whatever was actually paid for an order, on each side of the deal —
+// customer_payments (money IN) and finance_queue (money OUT to suppliers).
+// Falls back actual_amount -> paid_amount -> amount, same convention Finance
+// itself uses to decide what "actually paid" means.
+async function paidTotalsForOrder(orderId) {
+  const custRows = await allAsync('SELECT actual_amount, amount FROM customer_payments WHERE order_id=?', [orderId]);
+  const supRows  = await allAsync('SELECT actual_amount, paid_amount, amount FROM finance_queue WHERE order_id=?', [orderId]);
+  const sum = rows => rows.reduce((s,r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
+  return { customer_paid_total: sum(custRows), supplier_paid_total: sum(supRows) };
+}
+
 app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
   const u = req.session.user;
   const perms = getPerms(u);
@@ -3182,10 +3461,13 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     ? await allAsync('SELECT id, po_number, customer_id, customer_ref, closed_at FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
     : [];
   const orderById = {}; orders.forEach(o => { orderById[o.id] = o; });
+  const paidByOrder = {};
+  for (const oid of orderIds) paidByOrder[oid] = await paidTotalsForOrder(oid);
   res.json(audits.map(a => ({
     ...a,
     order: orderById[a.order_id] || null,
     items: items.filter(i => i.audit_id === a.id),
+    ...(paidByOrder[a.order_id] || { customer_paid_total: 0, supplier_paid_total: 0 }),
   })));
 }));
 
@@ -3193,6 +3475,9 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
   audit.items = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
+  const paid = await paidTotalsForOrder(req.params.id);
+  audit.customer_paid_total = paid.customer_paid_total;
+  audit.supplier_paid_total = paid.supplier_paid_total;
   res.json(audit);
 }));
 
@@ -3201,16 +3486,27 @@ app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
   const item = await getAsync('SELECT * FROM order_cost_audit_items WHERE id=?', [req.params.id]);
   if (!item) return res.status(404).json({ error: 'Audit item not found' });
 
+  // Simple mode: every field is a plain ₹ amount, manually entered — no
+  // percentage toggles, no chained CIF/import-cost math. The total is just
+  // the sum of whatever was typed in, plus any named Additional Charges.
   const fields = ['act_material','act_freight','act_insurance','act_bcd','act_sws','act_cess','act_bank','act_clearing','act_margin'];
-  const vals = fields.map(f => d[f] !== undefined ? (Number(d[f])||0) : item[f]);
-  const actTotal = vals.reduce((s,v) => s + (Number(v)||0), 0);
+  const vals = fields.map(f => d[f] !== undefined ? (Number(d[f])||0) : (Number(item[f])||0));
+
+  const actExtraCharges = Array.isArray(d.act_extra_charges_detail)
+    ? d.act_extra_charges_detail.filter(c => c && (c.name || Number(c.amount) > 0))
+    : (Array.isArray(item.act_extra_charges_detail) ? item.act_extra_charges_detail : []);
+  const actExtraChargesTotal = actExtraCharges.reduce((s,c) => s + (Number(c?.amount)||0), 0);
+
+  const actTotal = vals.reduce((s,v) => s + (Number(v)||0), 0) + actExtraChargesTotal;
 
   await runAsync(
     `UPDATE order_cost_audit_items SET
        act_material=?, act_freight=?, act_insurance=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?,
+       act_extra_charges=?, act_extra_charges_detail=?,
        act_total=?, notes=?, updated_by=?, updated_at=?
      WHERE id=?`,
-    [...vals, actTotal, d.notes ?? item.notes ?? '', req.session.user.name, nowStr(), req.params.id]
+    [...vals, actExtraChargesTotal, actExtraCharges.length ? JSON.stringify(actExtraCharges) : null,
+     actTotal, d.notes ?? item.notes ?? '', req.session.user.name, nowStr(), req.params.id]
   );
 
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [item.audit_id]);

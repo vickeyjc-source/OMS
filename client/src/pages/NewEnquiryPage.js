@@ -8,6 +8,23 @@ import { today } from '../utils/helpers';
 import { ALL_MANUFACTURERS, MANUFACTURERS_BY_CAT, CATS } from './LineCardsPage';
 
 const BUYING_TYPES = ['Shortage','Tactical','NPI','R&D','Production','Testing'];
+// Incoterms — grouped by transport mode. DDP is the default since pricing has
+// always assumed Ciflux bears freight/insurance/duty (a DDP-style landed cost).
+const SHIPPING_TYPES_ANY_MODE = [
+  { code:'DDP', label:'DDP — Delivered Duty Paid' },
+  { code:'EXW', label:'EXW — Ex Works' },
+  { code:'FCA', label:'FCA — Free Carrier' },
+  { code:'CPT', label:'CPT — Carriage Paid To' },
+  { code:'CIP', label:'CIP — Carriage and Insurance Paid To' },
+  { code:'DAP', label:'DAP — Delivered At Place' },
+  { code:'DPU', label:'DPU — Delivered at Place Unloaded' },
+];
+const SHIPPING_TYPES_SEA_ONLY = [
+  { code:'FAS', label:'FAS — Free Alongside Ship' },
+  { code:'FOB', label:'FOB — Free on Board' },
+  { code:'CFR', label:'CFR — Cost and Freight' },
+  { code:'CIF', label:'CIF — Cost, Insurance, and Freight' },
+];
 
 // ── Quick Add Line Card modal ─────────────────────────────────────────────────
 export function AddLinecardModal({ prefillName, onClose, onSaved }) {
@@ -317,6 +334,7 @@ export default function NewEnquiryPage() {
     assigned_to:  editEnq?.assigned_to  || '',
     priority:     editEnq?.priority     || 'normal',
     buying_type:  editEnq?.buying_type  || '',
+    shipping_type:editEnq?.shipping_type|| 'DDP',
     notes:        editEnq?.notes        || '',
   }));
 
@@ -591,7 +609,7 @@ export default function NewEnquiryPage() {
 
         <div className="section-divider">Customer Details</div>
 
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:13,marginBottom:13}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr 1fr',gap:13,marginBottom:13}}>
           <div className="form-group">
             <label className="label">Customer <span className="req">*</span></label>
             <select className="input" value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}
@@ -621,6 +639,19 @@ export default function NewEnquiryPage() {
             <select className="input" value={form.buying_type} onChange={e=>setForm(f=>({...f,buying_type:e.target.value}))}>
               <option value="">— Select Type —</option>
               {BUYING_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="label">Shipping Type
+              {form.shipping_type === 'DDP' && <span style={{fontWeight:400,color:'var(--text3)',fontSize:11}}> (default)</span>}
+            </label>
+            <select className="input" value={form.shipping_type} onChange={e=>setForm(f=>({...f,shipping_type:e.target.value}))}>
+              <optgroup label="Any mode of transport">
+                {SHIPPING_TYPES_ANY_MODE.map(t=><option key={t.code} value={t.code}>{t.label}</option>)}
+              </optgroup>
+              <optgroup label="Sea / waterway only">
+                {SHIPPING_TYPES_SEA_ONLY.map(t=><option key={t.code} value={t.code}>{t.label}</option>)}
+              </optgroup>
             </select>
           </div>
         </div>

@@ -111,6 +111,7 @@ export const STATUS_BADGE = {
   modify_requested:      ['badge-amber',  'Sent to Enquiry'],
   ordered:               ['badge-blue',   'Ordered'],
   order_created:         ['badge-blue',   'Order Created'],
+  merged:                ['badge-gray',   'Merged'],
   // Quote statuses
   active:                ['badge-blue',   'Active'],
   superseded:            ['badge-gray',   'Superseded'],

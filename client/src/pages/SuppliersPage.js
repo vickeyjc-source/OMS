@@ -24,13 +24,39 @@ const PAYMENT_TERMS_GROUPS = [
 ];
 
 // ── Shared UI components ──────────────────────────────────────────────────────
-const Tab = ({ label, active, onClick }) => (
-  <button onClick={onClick} style={{
-    padding:'9px 18px', fontSize:13, fontWeight:active?600:400, background:'none', border:'none',
-    borderBottom:active?'2px solid var(--accent)':'2px solid transparent',
-    color:active?'var(--accent)':'var(--text2)', cursor:'pointer', whiteSpace:'nowrap',
-  }}>{label}</button>
-);
+// Step wizard progress bar — numbered circles connected by a line. Click to
+// jump back to any earlier step; forward steps stay locked until the ones
+// before them are complete (see canReach in SupplierModal).
+function StepProgress({ steps, activeKey, onJump, canReach }) {
+  return (
+    <div style={{display:'flex',paddingBottom:16,marginBottom:14,borderBottom:'1px solid var(--border)',flexShrink:0}}>
+      {steps.map((s,i) => {
+        const isActive = s.key === activeKey;
+        const isDone = s.done && !isActive;
+        const reachable = canReach(s.key);
+        return (
+          <React.Fragment key={s.key}>
+            <div style={{flex:1,textAlign:'center',cursor:reachable?'pointer':'not-allowed',opacity:reachable?1:0.4}}
+              onClick={() => { if (reachable) onJump(s.key); else toast('Complete the earlier steps first'); }}>
+              <div style={{width:26,height:26,borderRadius:'50%',margin:'0 auto 6px',display:'flex',alignItems:'center',justifyContent:'center',
+                fontSize:11.5,fontWeight:700,
+                background: isActive ? 'var(--accent-lt)' : (isDone ? 'var(--accent)' : 'var(--surface)'),
+                border: `2px solid ${isActive||isDone ? 'var(--accent)' : 'var(--border-md)'}`,
+                color: isActive ? 'var(--accent)' : (isDone ? '#fff' : 'var(--text3)')}}>
+                {isDone ? '✓' : i+1}
+              </div>
+              <div style={{fontSize:11,fontWeight:600,whiteSpace:'nowrap',
+                color:isActive?'var(--accent)':(reachable?'var(--text2)':'var(--text3)')}}>
+                {s.label}{s.optional && <span style={{fontWeight:400,color:'var(--text3)'}}> (optional)</span>}
+              </div>
+            </div>
+            {i<steps.length-1 && <div style={{flex:'0 0 30px',height:2,background:isDone?'var(--accent)':'var(--border-md)',marginTop:13}}/>}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
 
 // ── Shipping Address Block (matches customer UX) ─────────────────────────────
 function ShippingBlock({ addr, idx, onChange, onRemove, domestic, excludeIndia }) {
@@ -176,7 +202,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
     try { const p = JSON.parse(supplier.shipping_addresses||'[]'); if (Array.isArray(p)) sa = p; } catch(_){}
     return {...blank,...supplier, contact_persons:cp, shipping_addresses:sa, linecards:supplier.linecards||[]};
   });
-  const [tab, setTab] = useState(initialTab || 'details');
+  const [tab, setTab] = useState(initialTab || 'basics');
   const [tried, setTried] = useState(false);
   const [billingTried, setBillingTried] = useState(false);
   const [billingEditMode, setBillingEditMode] = useState(() => !(supplier?.billing_city || supplier?.billing_street1));
@@ -223,20 +249,48 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  const _topName = [form.first_name, form.last_name].filter(Boolean).join(' ');
+  const billingLiveAttention = billingAttentionEdited ? form.billing_attention : (_topName || form.billing_attention);
+  const billingLivePhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
+
+  // ── Wizard steps — Line Cards & Bank Details are optional and never block
+  // Continue/Save; every other step is mandatory before moving forward. ──
+  const mobileDigits = (form.mobile||'').replace(/^\+\d+\s?/,'').trim();
+  const basicsDone  = !!form.name && !!mobileDigits && !!form.currency;
+  const detailsDone = intl ? !!form.payment_terms : !!(form.place_of_supply && form.gstin && form.pan && form.payment_terms);
+  const addressDone = !!(form.billing_street1 && form.billing_city && form.billing_state && form.billing_country && form.billing_pincode);
+  const STEPS = [
+    { key:'basics',    label:'Basics',           done: basicsDone },
+    { key:'details',   label:'Tax & Terms',      done: detailsDone },
+    { key:'address',   label:'Address',          done: addressDone },
+    { key:'contacts',  label:'Contact Persons',  done: form.contact_persons.length>0 },
+    { key:'linecards', label:'Line Cards',       done: selectedLcs.length>0, optional:true },
+    { key:'bank',      label:'Bank Details',     done: !!form.bank_account_no, optional:true },
+    { key:'remarks',   label:'Remarks',          done: !!(form.notes||form.remarks), optional:true },
+  ];
+  const stepReachable = { basics:true, details:basicsDone, address:basicsDone&&detailsDone,
+    contacts:basicsDone&&detailsDone&&addressDone, linecards:basicsDone&&detailsDone&&addressDone,
+    bank:basicsDone&&detailsDone&&addressDone, remarks:basicsDone&&detailsDone&&addressDone };
+  const canReach = (key) => !isNew || stepReachable[key];
+  const stepIdx = STEPS.findIndex(s=>s.key===tab);
+  const isLastStep = stepIdx === STEPS.length-1;
+
+  const goNext = () => {
+    if (tab==='basics'  && !basicsDone)  { setTried(true); toast.error('Fill required fields to continue'); return; }
+    if (tab==='details' && !detailsDone) { setTried(true); toast.error('Fill required fields to continue'); return; }
+    if (tab==='address' && !addressDone) { setBillingTried(true); setBillingEditMode(true); toast.error('Billing address is incomplete'); return; }
+    if (stepIdx < STEPS.length-1) setTab(STEPS[stepIdx+1].key);
+  };
+  const goBack = () => { if (stepIdx>0) setTab(STEPS[stepIdx-1].key); };
+
   const save = () => {
     setTried(true);
     setBillingTried(true);
-    if (!form.name) { toast.error('Supplier / Company name is required'); return; }
-    const mobileNum = (form.mobile||'').replace(/^\+\d+\s?/,'').trim();
-    if (!mobileNum) { toast.error('Mobile number is required'); return; }
-    if (!form.currency) { toast.error('Currency is required'); return; }
-    if (!intl && !form.place_of_supply) { toast.error('Place of Supply is required'); setTab('details'); return; }
-    if (!intl && !form.gstin) { toast.error('GSTIN is required'); setTab('details'); return; }
-    if (!intl && !form.pan) { toast.error('PAN is required'); setTab('details'); return; }
-    if (!form.payment_terms) { toast.error('Payment Terms is required'); setTab('details'); return; }
-    if (!form.billing_street1 || !form.billing_city || !form.billing_state || !form.billing_country || !form.billing_pincode) {
-      toast.error('Billing address is incomplete — fill all required fields'); setTab('address'); setBillingEditMode(true); return;
-    }
+    // Required — mirrors the step gates above; Line Cards & Bank Details are
+    // intentionally excluded, they're optional and never block saving.
+    if (!basicsDone)  { toast.error('Fill required fields in Basics'); setTab('basics'); return; }
+    if (!detailsDone) { toast.error('Fill required fields in Tax & Terms'); setTab('details'); return; }
+    if (!addressDone) { toast.error('Billing address is incomplete — fill all required fields'); setTab('address'); setBillingEditMode(true); return; }
     const topName = [form.first_name, form.last_name].filter(Boolean).join(' ');
     const finalAttention = billingAttentionEdited ? form.billing_attention : (topName || form.billing_attention);
     const finalPhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
@@ -249,10 +303,6 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
       country:form.billing_country||form.country,
     });
   };
-
-  const _topName = [form.first_name, form.last_name].filter(Boolean).join(' ');
-  const billingLiveAttention = billingAttentionEdited ? form.billing_attention : (_topName || form.billing_attention);
-  const billingLivePhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
 
   return (
     <>
@@ -271,7 +321,10 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
         </div>
         <div className="modal-body" style={{padding:'16px 24px 0 24px', display:'flex', flexDirection:'column', minHeight:0}}>
 
-          {/* ── Top fields ── */}
+          <StepProgress steps={STEPS} activeKey={tab} onJump={setTab} canReach={canReach} />
+
+          {/* ── Step: Basics ── */}
+          {tab==='basics' && (<>
           <div className="form-group" style={{marginBottom:13}}>
             <label className="label">Supplier Type</label>
             <div style={{display:'flex',gap:20,paddingTop:8}}>
@@ -331,16 +384,11 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
               </select>
             </div>
           </div>
+          </>)}
 
-          {/* ── Tabs ── */}
-          <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginTop:10,overflowX:'auto',flexShrink:0}}>
-            {[['details','Other Details'],['address','Address'],['contacts','Contact Persons'],['linecards','Line Cards'],['bank','Bank Details'],['remarks','Remarks']].map(([k,l])=>(
-              <Tab key={k} label={l} active={tab===k} onClick={()=>setTab(k)}/>
-            ))}
-          </div>
           <div style={{flex:1,overflowY:'auto',minHeight:0}}>
 
-          {/* ── Other Details ── */}
+          {/* ── Step: Tax & Terms ── */}
           {tab==='details' && (
             <div style={{paddingTop:16}}>
               {!intl ? (
@@ -393,7 +441,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
-          {/* ── Address ── */}
+          {/* ── Step: Address ── */}
           {tab==='address' && (
             <div style={{paddingTop:16}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
@@ -472,7 +520,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
-          {/* ── Contact Persons ── */}
+          {/* ── Step: Contact Persons ── */}
           {tab==='contacts' && (
             <div style={{paddingTop:16}}>
               <div style={{overflowX:'auto'}}>
@@ -500,7 +548,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
-          {/* ── Line Cards ── */}
+          {/* ── Step: Line Cards (optional) ── */}
           {tab==='linecards' && (
             <div style={{paddingTop:16}}>
               <div style={{display:'flex',flexWrap:'wrap',gap:4,minHeight:44,padding:10,border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)',marginBottom:24}}>
@@ -539,16 +587,16 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
-          {/* ── Bank Details ── */}
+          {/* ── Step: Bank Details (optional) ── */}
           {tab==='bank' && (
             <div style={{paddingTop:16,display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
               <div>
                 <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🏦 {intl?'Primary Bank':'Indian Bank Details'}</div>
-                <div className="form-group"><label className="label">Account Holder Name {!intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_account_name} onChange={e=>set('bank_account_name',e.target.value)}/></div>
-                <div className="form-group"><label className="label">Account Number {!intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_account_no} onChange={e=>set('bank_account_no',e.target.value)}/></div>
+                <div className="form-group"><label className="label">Account Holder Name</label><input className="input" value={form.bank_account_name} onChange={e=>set('bank_account_name',e.target.value)}/></div>
+                <div className="form-group"><label className="label">Account Number</label><input className="input" value={form.bank_account_no} onChange={e=>set('bank_account_no',e.target.value)}/></div>
                 <div className="form-group"><label className="label">Bank Name</label><input className="input" value={form.bank_name} onChange={e=>set('bank_name',e.target.value)}/></div>
                 <div className="form-group"><label className="label">Branch</label><input className="input" value={form.bank_branch} onChange={e=>set('bank_branch',e.target.value)}/></div>
-                {!intl&&<div className="form-group"><label className="label">IFSC Code <span className="req">*</span></label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
+                {!intl&&<div className="form-group"><label className="label">IFSC Code</label><input className="input" value={form.bank_ifsc} onChange={e=>set('bank_ifsc',e.target.value.toUpperCase())} placeholder="HDFC0001234"/></div>}
                 <div className="form-grid-2">
                   <div className="form-group"><label className="label">Currency</label>
                     <select className="input" value={form.bank_currency} onChange={e=>set('bank_currency',e.target.value)}>{ALL_CURRENCIES.map(c=><option key={c}>{c}</option>)}</select>
@@ -560,14 +608,14 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
               </div>
               <div>
                 <div style={{fontWeight:700,fontSize:13,marginBottom:12}}>🌐 International Wire</div>
-                <div className="form-group"><label className="label">SWIFT / BIC Code {intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_swift} onChange={e=>set('bank_swift',e.target.value.toUpperCase())} placeholder="HDFCINBBXXX"/></div>
-                <div className="form-group"><label className="label">IBAN {intl&&<span className="req">*</span>}</label><input className="input" value={form.bank_iban} onChange={e=>set('bank_iban',e.target.value.toUpperCase())} placeholder="GB29 NWBK 6016 1331 9268 19"/></div>
+                <div className="form-group"><label className="label">SWIFT / BIC Code</label><input className="input" value={form.bank_swift} onChange={e=>set('bank_swift',e.target.value.toUpperCase())} placeholder="HDFCINBBXXX"/></div>
+                <div className="form-group"><label className="label">IBAN</label><input className="input" value={form.bank_iban} onChange={e=>set('bank_iban',e.target.value.toUpperCase())} placeholder="GB29 NWBK 6016 1331 9268 19"/></div>
                 <div className="form-group"><label className="label">ABA / Routing (USA)</label><input className="input" value={form.bank_aba} onChange={e=>set('bank_aba',e.target.value)} placeholder="021000021"/></div>
               </div>
             </div>
           )}
 
-          {/* ── Remarks ── */}
+          {/* ── Step: Remarks (optional) ── */}
           {tab==='remarks' && (
             <div style={{paddingTop:16}}>
               <div className="form-group"><label className="label">Internal Notes</label>
@@ -582,9 +630,16 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
           </div>{/* end tab scroll wrapper */}
         </div>
         <div className="modal-footer">
-          {!isNew&&<button className="btn btn-danger btn-sm" style={{marginRight:'auto'}} onClick={()=>setConfirmDelete(true)}>Delete</button>}
+          <div style={{display:'flex',gap:8,marginRight:'auto',alignItems:'center'}}>
+            {stepIdx>0 && <button className="btn" onClick={goBack}>← Back</button>}
+            {!isNew && <button className="btn btn-danger btn-sm" onClick={()=>setConfirmDelete(true)}>Delete</button>}
+          </div>
           <button className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>{mutation.isPending?'Saving…':'Save Supplier'}</button>
+          {isLastStep ? (
+            <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>{mutation.isPending?'Saving…':'Save Supplier'}</button>
+          ) : (
+            <button className="btn btn-primary" onClick={goNext}>Continue →</button>
+          )}
         </div>
       </div>
     </div>

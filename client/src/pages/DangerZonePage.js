@@ -14,6 +14,7 @@ const MODULES = [
   { key:'approvals', label:'All Approvals',      icon:'✅', desc:'Deletes all approval workflows, requests and actions.',                                color:'var(--amber,#d97706)' },
   { key:'finance',   label:'All Finance Data',   icon:'💰', desc:'Deletes all customer payments, supplier finance queue entries and PO requests — keeps orders intact.',  color:'var(--amber,#d97706)' },
   { key:'inventory', label:'All Inventory',       icon:'🏭', desc:'Deletes all stock inventory records — warehouse and customer-held stock entries.',                         color:'var(--amber,#d97706)' },
+  { key:'audit',     label:'All Audit Bin Data', icon:'🧾', desc:'Deletes all cost audit records — estimate vs actual landed cost tracking and per-line breakdowns.',       color:'var(--amber,#d97706)' },
 ];
 
 function GlobalTab() {
@@ -92,7 +93,7 @@ function GlobalTab() {
               <span style={{fontSize:24}}>💣</span>
               <div>
                 <div style={{fontWeight:800,fontSize:15,color:'var(--red)'}}>Master Delete — Wipe Everything</div>
-                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Deletes ALL Orders, Enquiries, Quotes, Sourcing data, Approvals and Inventory in one shot. Customers, Suppliers and Users are kept.</div>
+                <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>Deletes ALL Orders, Enquiries, Quotes, Sourcing data, Approvals, Audit Bin data and Inventory in one shot. Customers, Suppliers and Users are kept.</div>
               </div>
             </div>
             <button className="btn btn-danger" style={{fontWeight:700,padding:'10px 24px'}}

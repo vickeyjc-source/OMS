@@ -1629,7 +1629,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     { key:'buffer',    label:'Buffer',       group:4, landedKey:'bufferINR' },
   ];
   const INTL_DEFAULT_MODES = { freight:'amt', insurance:'pct', transport:'amt', packaging:'amt',
-    bcd:'pct', sws:'pct', cess:'pct', clearing:'amt', bank:'amt', margin:'amt', buffer:'amt' };
+    bcd:'pct', sws:'pct', cess:'pct', clearing:'amt', bank:'amt', margin:'pct', buffer:'amt' };
   const computeLanded = (d) => {
     const qty = Number(d.qty) || 0;
     const isIntl = d.scope==='international';
@@ -1654,7 +1654,9 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     const bankAmount = amtOf('bank', importCost);
     const bufferINR = amtOf('buffer', importCost);
     const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankAmount;
-    const marginAmt = amtOf('margin', landedBeforeMargin);
+    // Margin in ₹ mode is a per-unit amount (matches calcDomesticQuote's s+m in
+    // Sourcing Bin) — scale by qty here so it isn't diluted across the batch.
+    const marginAmt = d.marginMode === 'pct' ? amtOf('margin', landedBeforeMargin) : (Number(d.marginVal)||0) * qty;
     const finalCost = landedBeforeMargin + marginAmt + bufferINR;
     const unitLanded = qty>0 ? finalCost/qty : 0;
     return { unitPriceInr, materialValue, freightINR, insuranceINR, transportINR, packagingINR, cifValue,
@@ -1670,6 +1672,21 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     lead_time: splitDialog.leadTime,
     tax_rate: Number(splitDialog.taxRate) || 0,
     availability: splitDialog.availability || '',
+    // Margin applies to both domestic and international splits — same field
+    // Sourcing Bin uses to turn source price into the customer-facing price.
+    margin_pct: Number(splitDialog.marginVal) || 0,
+    margin_inr: landed.marginAmt,
+    field_modes: JSON.stringify({
+      margin: splitDialog.marginMode,
+      ...(isIntl ? {
+        freight: splitDialog.freightMode, insurance: splitDialog.insuranceMode,
+        transport: splitDialog.transportMode, packaging: splitDialog.packagingMode,
+        bcd: splitDialog.bcdMode, sws: splitDialog.swsMode, cess: splitDialog.cessMode,
+        bank: splitDialog.bankMode, clearing: splitDialog.clearingMode, buffer: splitDialog.bufferMode,
+        transport_val: splitDialog.transportVal, packaging_val: splitDialog.packagingVal,
+        bank_val: splitDialog.bankVal, buffer_val: splitDialog.bufferVal,
+      } : {}),
+    }),
     ...(isIntl ? {
       sourced_currency: splitDialog.srcCurrency || 'USD',
       exchange_rate: Number(splitDialog.exchangeRate) || 1,
@@ -1681,22 +1698,12 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       // DB has no dedicated CESS/Bank/Transport/Packaging/Buffer columns — same as
       // Sourcing Bin, which keeps Transport/Packaging/Buffer purely client-side and
       // reuses bank_fixed_usd for CESS. Everything is still captured in field_modes
-      // below so the split row can be edited later without losing these values.
+      // above so the split row can be edited later without losing these values.
       bank_fixed_usd: Number(splitDialog.cessVal) || 0,
       clearance_fixed_inr: Number(splitDialog.clearingVal) || 0,
-      margin_pct: Number(splitDialog.marginVal) || 0,
-      field_modes: JSON.stringify({
-        freight: splitDialog.freightMode, insurance: splitDialog.insuranceMode,
-        transport: splitDialog.transportMode, packaging: splitDialog.packagingMode,
-        bcd: splitDialog.bcdMode, sws: splitDialog.swsMode, cess: splitDialog.cessMode,
-        bank: splitDialog.bankMode, clearing: splitDialog.clearingMode,
-        margin: splitDialog.marginMode, buffer: splitDialog.bufferMode,
-        transport_val: splitDialog.transportVal, packaging_val: splitDialog.packagingVal,
-        bank_val: splitDialog.bankVal, buffer_val: splitDialog.bufferVal,
-      }),
       freight_inr: landed.freightINR, insurance_inr: landed.insuranceINR,
       duty_inr: landed.bcdAmount, cess_inr: landed.swsAmount,
-      bank_inr: landed.bankAmount, clearance_inr: landed.clearingINR, margin_inr: landed.marginAmt,
+      bank_inr: landed.bankAmount, clearance_inr: landed.clearingINR,
     } : {}),
   });
 
@@ -1778,7 +1785,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       cessVal: srcRow?.bank_fixed_usd || '', cessMode: modes.cess || 'pct',
       clearingVal: srcRow?.clearance_fixed_inr || '', clearingMode: modes.clearing || 'amt',
       bankVal: modes.bank_val || '', bankMode: modes.bank || 'amt',
-      marginVal: srcRow?.margin_pct || '', marginMode: modes.margin || 'amt',
+      marginVal: srcRow?.margin_pct || '', marginMode: modes.margin || 'pct',
       bufferVal: modes.buffer_val || '', bufferMode: modes.buffer || 'amt',
     });
   };
@@ -2153,7 +2160,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                                 cessVal:'', cessMode:'pct',
                                 clearingVal:'', clearingMode:'amt',
                                 bankVal:'', bankMode:'amt',
-                                marginVal:'', marginMode:'amt',
+                                marginVal:'', marginMode:'pct',
                                 bufferVal:'', bufferMode:'amt',
                               });
                             }}>
@@ -2621,6 +2628,39 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       <label className="label">Lead time (days) <span className="req">*</span></label>
                       <input className="input" type="number" value={splitDialog.leadTime}
                         onChange={e=>setSplitDialog(d=>({...d,leadTime:e.target.value}))} placeholder="e.g. 15"/>
+                    </div>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                        Margin
+                        <div style={{display:'flex',border:'1px solid var(--border-md)',borderRadius:5,overflow:'hidden'}}>
+                          {['pct','amt'].map(m=>(
+                            <button key={m} type="button"
+                              onClick={()=>setSplitDialog(d=>({...d,marginMode:m}))}
+                              style={{padding:'2px 7px',fontSize:9.5,fontWeight:700,border:'none',cursor:'pointer',
+                                background:splitDialog.marginMode===m?'var(--accent)':'transparent',
+                                color:splitDialog.marginMode===m?'#fff':'var(--text3)'}}>
+                              {m==='pct'?'%':'₹'}
+                            </button>
+                          ))}
+                        </div>
+                      </label>
+                      <input className="input" type="number" step="0.01" value={splitDialog.marginVal}
+                        onChange={e=>setSplitDialog(d=>({...d,marginVal:e.target.value}))} placeholder="0"/>
+                    </div>
+                    <div className="form-group" style={{marginBottom:0}}>
+                      <label className="label" style={{color:'var(--green)'}}>= Customer Price / unit (₹)</label>
+                      <div className="input" style={{background:'var(--green-lt)',color:'var(--green)',
+                        border:'1.5px solid var(--green)',fontWeight:700,display:'flex',alignItems:'center'}}>
+                        {(() => {
+                          const sp = Number(splitDialog.price)||0;
+                          const mv = Number(splitDialog.marginVal)||0;
+                          if (!sp) return '—';
+                          const cp = splitDialog.marginMode==='pct' ? sp*(1+mv/100) : sp+mv;
+                          return `₹${cp.toLocaleString('en-IN',{maximumFractionDigits:2})}`;
+                        })()}
+                      </div>
                     </div>
                   </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
