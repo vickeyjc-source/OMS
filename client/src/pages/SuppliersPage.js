@@ -264,13 +264,14 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
     { key:'details',   label:'Tax & Terms',      done: detailsDone },
     { key:'address',   label:'Address',          done: addressDone },
     { key:'contacts',  label:'Contact Persons',  done: form.contact_persons.length>0 },
-    { key:'linecards', label:'Line Cards',       done: selectedLcs.length>0, optional:true },
+    { key:'linecards', label:'Line Cards',       done: selectedLcs.length>0 },
     { key:'bank',      label:'Bank Details',     done: !!form.bank_account_no, optional:true },
     { key:'remarks',   label:'Remarks',          done: !!(form.notes||form.remarks), optional:true },
   ];
+  const linecardsDone = selectedLcs.length>0;
   const stepReachable = { basics:true, details:basicsDone, address:basicsDone&&detailsDone,
     contacts:basicsDone&&detailsDone&&addressDone, linecards:basicsDone&&detailsDone&&addressDone,
-    bank:basicsDone&&detailsDone&&addressDone, remarks:basicsDone&&detailsDone&&addressDone };
+    bank:basicsDone&&detailsDone&&addressDone&&linecardsDone, remarks:basicsDone&&detailsDone&&addressDone&&linecardsDone };
   const canReach = (key) => !isNew || stepReachable[key];
   const stepIdx = STEPS.findIndex(s=>s.key===tab);
   const isLastStep = stepIdx === STEPS.length-1;
@@ -279,6 +280,7 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
     if (tab==='basics'  && !basicsDone)  { setTried(true); toast.error('Fill required fields to continue'); return; }
     if (tab==='details' && !detailsDone) { setTried(true); toast.error('Fill required fields to continue'); return; }
     if (tab==='address' && !addressDone) { setBillingTried(true); setBillingEditMode(true); toast.error('Billing address is incomplete'); return; }
+    if (tab==='linecards' && selectedLcs.length===0) { toast.error('Add at least one Line Card to continue'); return; }
     if (stepIdx < STEPS.length-1) setTab(STEPS[stepIdx+1].key);
   };
   const goBack = () => { if (stepIdx>0) setTab(STEPS[stepIdx-1].key); };
@@ -286,11 +288,12 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
   const save = () => {
     setTried(true);
     setBillingTried(true);
-    // Required — mirrors the step gates above; Line Cards & Bank Details are
+    // Required — mirrors the step gates above; Bank Details & Remarks are
     // intentionally excluded, they're optional and never block saving.
     if (!basicsDone)  { toast.error('Fill required fields in Basics'); setTab('basics'); return; }
     if (!detailsDone) { toast.error('Fill required fields in Tax & Terms'); setTab('details'); return; }
     if (!addressDone) { toast.error('Billing address is incomplete — fill all required fields'); setTab('address'); setBillingEditMode(true); return; }
+    if (selectedLcs.length===0) { toast.error('Add at least one Line Card before saving'); setTab('linecards'); return; }
     const topName = [form.first_name, form.last_name].filter(Boolean).join(' ');
     const finalAttention = billingAttentionEdited ? form.billing_attention : (topName || form.billing_attention);
     const finalPhone = billingPhoneEdited ? form.billing_phone : (form.mobile || form.billing_phone);
@@ -548,15 +551,20 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
             </div>
           )}
 
-          {/* ── Step: Line Cards (optional) ── */}
+          {/* ── Step: Line Cards (mandatory — at least one required) ── */}
           {tab==='linecards' && (
             <div style={{paddingTop:16}}>
-              <div style={{display:'flex',flexWrap:'wrap',gap:4,minHeight:44,padding:10,border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)',marginBottom:24}}>
+              <div style={{display:'flex',flexWrap:'wrap',gap:4,minHeight:44,padding:10,border:`1px solid ${selectedLcs.length===0?'var(--red)':'var(--border)'}`,borderRadius:'var(--r-sm)',background:'var(--surface2)',marginBottom:8}}>
                 {selectedLcs.length===0&&<span style={{fontSize:12,color:'var(--text3)'}}>No line cards assigned — search below</span>}
                 {selectedLcs.map(lid=>(
                   <span key={lid} className="lc-chip">{lcName(lid)}<button className="lc-chip-x" onClick={()=>removeLc(lid)}>×</button></span>
                 ))}
               </div>
+              {selectedLcs.length===0 && (
+                <div style={{marginBottom:16,fontSize:11,color:'var(--red)',fontWeight:600}}>
+                  Add at least one Line Card to continue.
+                </div>
+              )}
               <div style={{padding:'16px', border:'1px solid var(--border)', borderRadius:'var(--r-sm)', background:'var(--surface2)'}}>
                 <div className="form-group" style={{ marginBottom: lcSearch ? 12 : 0 }}>
                   <label className="label">Search &amp; Add Line Card</label>
