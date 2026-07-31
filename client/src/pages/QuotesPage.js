@@ -57,6 +57,10 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const [confirmRevision, setConfirmRevision] = useState(false);
   const [confirmCreateOrder, setConfirmCreateOrder] = useState(false);
   const [orderPrefill, setOrderPrefill] = useState(null);
+  const [removeItem, setRemoveItem] = useState(null);
+  const [charges, setCharges] = useState([]);
+  const [chargesLoadedFor, setChargesLoadedFor] = useState(null);
+  const [chargesSavedSnapshot, setChargesSavedSnapshot] = useState('[]');
 
   // Sync editable fields when parent passes updated quote data (after save+refresh)
   useEffect(() => {
@@ -88,6 +92,12 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
   const { data: lineData, isLoading: linesLoading, isError: linesErrored } = useQuery({
     queryKey: ['quote-lines', quote.id],
     queryFn: () => api.get('/quotes/' + quote.id + '/lineitems').then(r => r.data),
+  });
+
+  // Removed-item audit trail — who removed what from this quote, and when.
+  const { data: quoteHistory = [] } = useQuery({
+    queryKey: ['quote-history', quote.id],
+    queryFn: () => api.get('/quotes/' + quote.id + '/history').then(r => r.data).catch(() => []),
   });
 
   const saveMutation = useMutation({
@@ -179,6 +189,46 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
     && !enquiryModifyRequested;
 
   const items = lineData?.items || [];
+
+  // Seed the Additional Charges list once per quote from the lineitems response
+  // (the only place additional_charges comes back already parsed as an array).
+  useEffect(() => {
+    if (lineData && chargesLoadedFor !== quote.id) {
+      const seeded = Array.isArray(lineData.additional_charges) ? lineData.additional_charges : [];
+      setCharges(seeded);
+      setChargesSavedSnapshot(JSON.stringify(seeded));
+      setChargesLoadedFor(quote.id);
+    }
+  }, [lineData, quote.id, chargesLoadedFor]);
+
+  const addCharge    = () => setCharges(c => [...c, { name:'', amount:'' }]);
+  const updCharge    = (i,k,v) => setCharges(c => c.map((x,j) => j===i ? {...x,[k]:v} : x));
+  const removeCharge = (i) => setCharges(c => c.filter((_,j) => j!==i));
+  const chargesTotal = charges.reduce((s,c) => s + (Number(c.amount)||0), 0);
+  // Blocks "Next → Details" until unsaved charge edits are explicitly saved —
+  // so charges added here never silently get left behind unsaved.
+  const chargesDirty = JSON.stringify(charges) !== chargesSavedSnapshot;
+
+  const saveChargesMutation = useMutation({
+    mutationFn: () => api.put('/quotes/' + quote.id, { additional_charges: charges.filter(c => c.name || Number(c.amount)>0) }).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries(['quote-lines', quote.id]);
+      setChargesSavedSnapshot(JSON.stringify(charges));
+      toast.success('Additional charges saved');
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to save charges'),
+  });
+
+  const removeItemMutation = useMutation({
+    mutationFn: itemId => api.post('/quotes/' + quote.id + '/items/' + itemId + '/exclude').then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries(['quote-lines', quote.id]);
+      qc.invalidateQueries(['quote-history', quote.id]);
+      toast.success('Item removed from this quote');
+      setRemoveItem(null);
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to remove item'),
+  });
 
   // Tab order: items → details → response
   const tabs = [
@@ -335,6 +385,7 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                         <th style={{textAlign:'right'}}>Base Value</th>
                         <th style={{textAlign:'right',color:'var(--green)'}}>Total</th>
                         <th style={{color:'var(--teal,#0d9488)'}}>Del. Date</th>
+                        {quoteStatus === 'active' && !quoteAwaitingRevision && <th style={{textAlign:'right'}}>Remove</th>}
                       </tr></thead>
                       <tbody>
                         {items.map((li, i) => {
@@ -364,6 +415,12 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                               <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600,whiteSpace:'nowrap'}}>
                                 {li.preferred_delivery_date ? `📅 ${li.preferred_delivery_date}` : <span style={{color:'var(--text3)'}}>—</span>}
                               </td>
+                              {quoteStatus === 'active' && !quoteAwaitingRevision && (
+                                <td style={{textAlign:'right'}}>
+                                  <button type="button" className="btn btn-xs btn-danger"
+                                    onClick={()=>setRemoveItem(li)}>✕ Remove</button>
+                                </td>
+                              )}
                             </tr>
                           );
                         })}
@@ -371,6 +428,108 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                     </table>
                   </div>
               }
+
+              {/* Additional Charges — same free-form name+amount pattern as Sourcing,
+                  scoped to this quote's own customer-facing total. */}
+              {!linesLoading && !linesErrored && (
+                <div className="form-group" style={{marginTop:18,marginBottom:0}}>
+                  <label className="label">Additional Charges</label>
+                  {charges.map((c,i) => (
+                    <div key={i} style={{display:'flex',gap:8,alignItems:'center',marginBottom:6}}>
+                      <input className="input" style={{flex:2}} placeholder="Charge name"
+                        value={c.name||''} disabled={quoteStatus!=='active'||quoteAwaitingRevision}
+                        onChange={e=>updCharge(i,'name',e.target.value)}/>
+                      <input className="input" style={{flex:1}} type="number" step="0.01" min="0" placeholder="₹ Amount"
+                        value={c.amount??''} disabled={quoteStatus!=='active'||quoteAwaitingRevision}
+                        onChange={e=>updCharge(i,'amount',e.target.value)}/>
+                      {quoteStatus==='active' && !quoteAwaitingRevision && (
+                        <button type="button" className="btn btn-xs btn-danger" onClick={()=>removeCharge(i)}>Remove</button>
+                      )}
+                    </div>
+                  ))}
+                  {quoteStatus==='active' && !quoteAwaitingRevision && (
+                    <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                      <button type="button" className="btn btn-sm btn-success" onClick={addCharge}
+                        style={{display:'inline-flex',width:'auto',alignSelf:'flex-start'}}>+ Add Charge</button>
+                      <button type="button" className="btn btn-sm btn-primary" disabled={saveChargesMutation.isPending}
+                        onClick={()=>saveChargesMutation.mutate()}>
+                        {saveChargesMutation.isPending ? 'Saving…' : '💾 Save Charges'}
+                      </button>
+                    </div>
+                  )}
+                  {chargesTotal > 0 && (
+                    <div style={{marginTop:10,fontSize:13,fontWeight:700,color:'var(--green)'}}>
+                      + Additional Charges Total: {fmtCur(chargesTotal, 'INR')}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Removed items — view-only audit trail: who removed what, and when */}
+              {quoteHistory.some(h => h.detail?.type === 'item_removed') && (
+                <div className="form-group" style={{marginTop:18,marginBottom:0}}>
+                  <label className="label">🗑 Removed Items History</label>
+                  <div style={{display:'grid',gap:10}}>
+                    {quoteHistory.filter(h => h.detail?.type === 'item_removed').map(h => {
+                      const li = h.detail.item || {};
+                      const base = (li.quantity||0) * (li.quote_price||0);
+                      const tax  = Number(li.tax_rate)||0;
+                      const tot  = base + base*tax/100;
+                      return (
+                        <div key={h.id} style={{borderRadius:'var(--r-sm)',border:'1px solid var(--border)',overflow:'hidden'}}>
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,padding:'6px 12px',
+                            background:'var(--red-lt,#fef2f2)',borderBottom:'1px solid var(--border)',fontSize:11.5}}>
+                            <span style={{color:'var(--red)',fontWeight:700}}>✕ Removed</span>
+                            <span style={{color:'var(--text3)',whiteSpace:'nowrap'}}>
+                              by <b style={{color:'var(--text2)'}}>{h.by_user||'—'}</b> · {fmtDateTime(h.ts)}
+                            </span>
+                          </div>
+                          <div style={{overflowX:'auto'}}>
+                            <table className="table" style={{marginBottom:0}}>
+                              <thead><tr>
+                                <th>Component</th>
+                                <th>Manufacturer</th>
+                                <th>IPN</th>
+                                <th style={{textAlign:'right',color:'var(--amber,#d97706)'}}>Target Price</th>
+                                <th style={{textAlign:'right'}}>Qty</th>
+                                <th style={{textAlign:'right'}}>Quote Price</th>
+                                <th style={{textAlign:'right'}}>Tax %</th>
+                                <th style={{textAlign:'right'}}>Base Value</th>
+                                <th style={{textAlign:'right',color:'var(--green)'}}>Total</th>
+                                <th style={{color:'var(--teal,#0d9488)'}}>Del. Date</th>
+                              </tr></thead>
+                              <tbody>
+                                <tr>
+                                  <td style={{fontWeight:600}}>{li.component}</td>
+                                  <td style={{fontSize:12,color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
+                                  <td style={{fontFamily:'monospace',fontSize:11,color:'var(--text3)'}}>{li.ipn||'—'}</td>
+                                  <td style={{textAlign:'right',color:'var(--amber,#d97706)',fontFamily:'monospace'}}>
+                                    {li.target_price ? fmtCur(li.target_price, li.target_currency) : '—'}
+                                  </td>
+                                  <td style={{textAlign:'right',fontWeight:500}}>{fmt(li.quantity)}</td>
+                                  <td style={{textAlign:'right',fontWeight:700,fontFamily:'monospace'}}>
+                                    {li.quote_price ? fmtCur(li.quote_price, li.quote_currency) : '—'}
+                                  </td>
+                                  <td style={{textAlign:'right',color:tax>0?'var(--teal,#0d9488)':'var(--text3)',fontWeight:tax>0?600:400}}>{tax}%</td>
+                                  <td style={{textAlign:'right',fontWeight:600,color:'var(--text)',fontFamily:'monospace'}}>
+                                    {base ? fmtCur(base, li.quote_currency) : '—'}
+                                  </td>
+                                  <td style={{textAlign:'right',fontWeight:700,color:tax>0?'var(--green)':'var(--text)',fontFamily:'monospace'}}>
+                                    {base ? fmtCur(tot, li.quote_currency) : '—'}
+                                  </td>
+                                  <td style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:600,whiteSpace:'nowrap'}}>
+                                    {li.preferred_delivery_date ? `📅 ${li.preferred_delivery_date}` : <span style={{color:'var(--text3)'}}>—</span>}
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -676,7 +835,11 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
             {/* Right: Close + Next */}
             <button className="btn" onClick={onClose} style={{fontWeight:500}}>✕ Close</button>
             {tabIdx === 0 && (
-              <button className="btn btn-primary" onClick={() => setTabIdx(1)} style={{fontWeight:600}}>
+              <button className="btn btn-primary"
+                disabled={chargesDirty}
+                title={chargesDirty ? 'Save the Additional Charges first before proceeding' : ''}
+                onClick={() => !chargesDirty && setTabIdx(1)}
+                style={{fontWeight:600, opacity: chargesDirty ? 0.45 : 1, cursor: chargesDirty ? 'not-allowed' : 'pointer'}}>
                 Next → Details
               </button>
             )}
@@ -760,6 +923,32 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                 style={{background:'var(--amber,#d97706)', borderColor:'var(--amber,#d97706)', color:'#fff', fontWeight:700}}
                 onClick={() => { setConfirmRevision(false); reviseMutation.mutate(); }}>
                 {reviseMutation.isPending ? 'Sending…' : '↩ Send to Revision'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove item confirm modal */}
+      {removeItem && (
+        <div className="overlay" style={{zIndex:600}} onClick={() => !removeItemMutation.isPending && setRemoveItem(null)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:420}}>
+            <div className="modal-header">
+              <h2 style={{fontSize:16}}>Remove Item</h2>
+              <button className="close-x" onClick={() => setRemoveItem(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:13, color:'var(--text2)', lineHeight:1.6}}>
+                Remove <b>{removeItem.component}</b> from this quote? It won't be included in the order created from this quote. This does not delete the item from the Enquiry or Sourcing.
+              </div>
+            </div>
+            <div className="modal-footer" style={{justifyContent:'flex-end', gap:8}}>
+              <button className="btn" onClick={() => setRemoveItem(null)} disabled={removeItemMutation.isPending}>Cancel</button>
+              <button className="btn btn-danger"
+                disabled={removeItemMutation.isPending}
+                style={{fontWeight:700}}
+                onClick={() => removeItemMutation.mutate(removeItem.id)}>
+                {removeItemMutation.isPending ? 'Removing…' : '✕ Yes, Remove'}
               </button>
             </div>
           </div>

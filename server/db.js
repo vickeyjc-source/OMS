@@ -331,6 +331,10 @@ async function createSchema() {
       id TEXT PRIMARY KEY, survivor_id TEXT NOT NULL, absorbed_id TEXT NOT NULL,
       merged_by TEXT, merged_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS quote_history (
+      id TEXT PRIMARY KEY, quote_id TEXT NOT NULL,
+      action TEXT NOT NULL, by_user TEXT, ts TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS quotes (
       id TEXT PRIMARY KEY, enquiry_id TEXT, customer_id TEXT NOT NULL,
       quote_no TEXT UNIQUE NOT NULL, zoho_quote_no TEXT, file_ref TEXT,
@@ -711,6 +715,13 @@ async function initDb() {
   try { await pool.query("ALTER TABLE quotes ADD COLUMN sent_to_customer INTEGER DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE quotes ADD COLUMN existing_order_id TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE quotes ADD COLUMN updated_at TEXT DEFAULT NULL"); } catch(_) {}
+  // Additional Charges — same free-form name+amount list Sourcing uses, but
+  // scoped to this quote's own customer-facing total (not the Sourcing estimate).
+  try { await pool.query("ALTER TABLE quotes ADD COLUMN additional_charges TEXT DEFAULT NULL"); } catch(_) {}
+  // Per-quote-only item removal — hides an enquiry_item from THIS quote's line
+  // items list without touching the underlying enquiry/sourcing data, since
+  // items are shared live across every quote revision for the same enquiry.
+  try { await pool.query("ALTER TABLE quotes ADD COLUMN excluded_item_ids TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sourcing_revision_notes TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN sales_comment TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE enquiry_sourcing ADD COLUMN exchange_rate NUMERIC DEFAULT NULL"); } catch(_) {}

@@ -626,23 +626,24 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
       .catch(() => {});
   }, [item.supplier_order_id, item.id, isSupplier]);
 
-  // Additional charges state
-  const [hasAdditional, setHasAdditional] = useState(null);
-  const [charges, setCharges] = useState([]);
+  // Additional charges state — for a fresh customer payment, seed from the
+  // Quote's own Additional Charges as a starting point (still fully editable/
+  // removable here — Finance always has the final say on what's actually paid).
+  const seededQuoteCharges = type === 'customer' && Array.isArray(item.quote_additional_charges) ? item.quote_additional_charges : [];
+  const [hasAdditional, setHasAdditional] = useState(seededQuoteCharges.length > 0 ? true : null);
+  const [charges, setCharges] = useState(seededQuoteCharges);
   const [chargeInput, setChargeInput] = useState({ name: '', amount: '' });
+  const [removeChargeIdx, setRemoveChargeIdx] = useState(null);
   const [amountChangeNote, setAmountChangeNote] = useState('');
   // pureBase tracks what user typed before charges (never mutated by charge additions)
   const [pureBase, setPureBase] = useState(parseFloat(defaultAmt) || 0);
 
-  // Additional charges + reason-note flow applies to both supplier and customer payments
+  // Additional charges apply to both supplier and customer payments
   const showCharges = true;
   const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
   // grandTotal = pureBase + all charges — shown in the Amount field
   const grandTotal = pureBase + chargesTotal;
   const originalNum = parseFloat(defaultAmt) || 0;
-
-  // Reason needed only when final amount differs from original
-  const anyAmountChanged = showCharges && Math.abs(grandTotal - originalNum) > 0.009;
 
   const addCharge = () => {
     const n = chargeInput.name.trim();
@@ -675,8 +676,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
 
   const canSubmit = !mutation.isPending
     && !!form.payment_method && !!form.payment_ref && grandTotal > 0
-    && (type === 'customer' || (form.zoho_po_number?.trim() && form.supplier_ref?.trim()))
-    && (!anyAmountChanged || !!amountChangeNote.trim());
+    && (type === 'customer' || (form.zoho_po_number?.trim() && form.supplier_ref?.trim()));
 
   const handleSubmit = () => {
     const payload = {
@@ -786,7 +786,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
               {originalNum > 0 && (
                 <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
                   Original: <strong style={{fontFamily:'monospace'}}>{fmtM(originalNum)}</strong>
-                  {anyAmountChanged && (
+                  {Math.abs(grandTotal - originalNum) > 0.009 && (
                     <span style={{marginLeft:8,fontWeight:700,color: grandTotal > originalNum ? 'var(--green)' : 'var(--red)'}}>
                       {grandTotal > originalNum ? '▲' : '▼'} {fmtM(Math.abs(grandTotal - originalNum))}
                     </span>
@@ -870,7 +870,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                             + {fmtM(c.amount)}
                           </span>
                           <button style={{background:'none',border:'none',color:'var(--red)',cursor:'pointer',fontSize:16,padding:'0 4px'}}
-                            onClick={()=>removeCharge(i)}>×</button>
+                            onClick={()=>setRemoveChargeIdx(i)}>×</button>
                         </div>
                       ))}
                     </div>
@@ -918,27 +918,6 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                 </div>
               )}
 
-              {/* ── Reason note — only when total differs from original ── */}
-              {anyAmountChanged && (
-                <div style={{marginTop:14,padding:'12px 14px',borderRadius:'var(--r-sm)',
-                  background:'var(--red-lt,#fef2f2)',border:'1px solid var(--red)33'}}>
-                  <label className="label" style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
-                    <span style={{color:'var(--red)',fontWeight:700}}>Reason for Amount Change</span>
-                    <span className="req">*</span>
-                  </label>
-                  <input className="input" value={amountChangeNote}
-                    onChange={e=>setAmountChangeNote(e.target.value)}
-                    placeholder="e.g. Exchange rate difference, freight added, bank charges deducted…"
-                    style={{background:'#fff',
-                      borderColor: !amountChangeNote.trim() ? 'var(--red)' : 'var(--green)'}}
-                  />
-                  {!amountChangeNote.trim() && (
-                    <div style={{marginTop:5,fontSize:11,color:'var(--red)',fontWeight:600}}>
-                      Required — explain why the amount changed from {fmtM(originalNum)}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
         </div>
@@ -951,6 +930,31 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
           </button>
         </div>
       </div>
+
+      {/* Remove charge confirm modal */}
+      {removeChargeIdx !== null && (
+        <div className="overlay" style={{zIndex:600}} onClick={() => setRemoveChargeIdx(null)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()} style={{maxWidth:400}}>
+            <div className="modal-header">
+              <h2 style={{fontSize:16}}>Remove Charge</h2>
+              <button className="close-x" onClick={() => setRemoveChargeIdx(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{fontSize:13, color:'var(--text2)', lineHeight:1.6}}>
+                Remove <b>{charges[removeChargeIdx]?.name}</b> ({fmtM(charges[removeChargeIdx]?.amount)}) from this payment?
+              </div>
+            </div>
+            <div className="modal-footer" style={{justifyContent:'flex-end', gap:8}}>
+              <button className="btn" onClick={() => setRemoveChargeIdx(null)}>Cancel</button>
+              <button className="btn btn-danger"
+                style={{fontWeight:700}}
+                onClick={() => { removeCharge(removeChargeIdx); setRemoveChargeIdx(null); }}>
+                ✕ Yes, Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

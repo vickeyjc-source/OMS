@@ -1883,67 +1883,110 @@ app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
   res.json({ id: newId, quote_no: newQuoteNo, revision: attempt });
 }));
 
-app.get('/api/quotes/:id/lineitems', auth, asyncRoute(async (req, res) => {
-  const q = await getAsync('SELECT * FROM quotes WHERE id=?', [req.params.id]);
-  if (!q) return res.status(404).json({ error: 'Quote not found' });
-  if (!q.enquiry_id) return res.json({ items: [] });
+// Shared shape builder — used by both the live lineitems list and the removed-
+// item history snapshot, so "what this row looked like" is computed identically
+// in both places instead of two copies drifting apart over time.
+function buildQuoteLineItem(item, sourcing, notePrices) {
+  const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
+  const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
 
-  const items   = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [q.enquiry_id]);
-  const sourcing= await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [q.enquiry_id]);
+  // Use DB quote_price first; fallback to parsed notes
+  let qp  = src.quote_price  || null;
+  let qc  = src.quote_currency|| null;
+  if (!qp) {
+    const np = notePrices[item.component.toLowerCase()];
+    if (np) { qp = np.price; qc = np.currency; }
+  }
 
-  // Parse quote prices from the notes field as a fallback only (never used to decide
-  // which items belong to the quote — component names/notes can contain colons, e.g.
-  // URLs in LINE NOTE text, which broke the old name-matching filter and dropped items).
+  return {
+    id:           item.id,
+    component:    item.component,
+    manufacturer: item.manufacturer || '',
+    ipn:          item.ipn          || '',
+    quantity:     item.quantity     || 0,
+    target_price: item.target_price || '',
+    target_currency: item.target_currency || 'INR',
+    preferred_delivery_date: item.preferred_delivery_date || '',
+    quote_price:   qp,
+    quote_currency:qc || item.target_currency || 'INR',
+    sourced_price: src.sourced_price || null,
+    supplier_id:   src.supplier_id   || '',
+    margin_inr:  src.margin_inr  != null ? Number(src.margin_inr)  : null,
+    margin_pct:  src.margin_pct  != null ? Number(src.margin_pct)  : null,
+    // FIX 2: return tax_rate from enquiry_sourcing (set by Sourcing team)
+    // fallback to enquiry_items.tax_rate if sourcing row has none
+    tax_rate: (src.tax_rate != null && src.tax_rate !== '') ? Number(src.tax_rate)
+             : (item.tax_rate != null ? Number(item.tax_rate) : 0),
+  };
+}
+
+function parseQuoteNotePrices(notes) {
   // Notes format: "ComponentName: Quote CUR 245 | Src CUR 220 | Qty 10\n..."
   const notePrices = {};
-  (q.notes || '').split('\n').forEach(line => {
-    // Match: "COMPONENT: Quote INR 245 | ..."  or  "COMPONENT: Quote INR 245.50 | ..."
+  (notes || '').split('\n').forEach(line => {
     const m = line.match(/^([^:]+):\s*Quote\s+([A-Z]+)\s+([\d.]+)/i);
     if (m) {
       const key = m[1].trim().toLowerCase();
       notePrices[key] = { price: parseFloat(m[3]), currency: m[2] };
     }
   });
+  return notePrices;
+}
+
+app.get('/api/quotes/:id/lineitems', auth, asyncRoute(async (req, res) => {
+  const q = await getAsync('SELECT * FROM quotes WHERE id=?', [req.params.id]);
+  if (!q) return res.status(404).json({ error: 'Quote not found' });
+  if (!q.enquiry_id) return res.json({ items: [], additional_charges: [] });
+
+  const excludedIds = parseJsonSafe(q.excluded_item_ids, []);
+  const items   = (await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [q.enquiry_id]))
+    .filter(it => !excludedIds.includes(it.id));
+  const sourcing= await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [q.enquiry_id]);
+
+  // Parse quote prices from the notes field as a fallback only (never used to decide
+  // which items belong to the quote — component names/notes can contain colons, e.g.
+  // URLs in LINE NOTE text, which broke the old name-matching filter and dropped items).
+  const notePrices = parseQuoteNotePrices(q.notes);
 
   const lineItems = items.filter(item => {
     const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
     if (srcRows.length === 0) return true;
     return srcRows.some(s => ['ready','quoted'].includes(s.item_status || 'ready'));
-  }).map(item => {
-    const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
-    const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
+  }).map(item => buildQuoteLineItem(item, sourcing, notePrices));
 
-    // Use DB quote_price first; fallback to parsed notes
-    let qp  = src.quote_price  || null;
-    let qc  = src.quote_currency|| null;
-    if (!qp) {
-      const np = notePrices[item.component.toLowerCase()];
-      if (np) { qp = np.price; qc = np.currency; }
-    }
+  res.json({ enquiry_id: q.enquiry_id, items: lineItems, additional_charges: parseJsonSafe(q.additional_charges, []) });
+}));
 
-    return {
-      id:           item.id,
-      component:    item.component,
-      manufacturer: item.manufacturer || '',
-      ipn:          item.ipn          || '',
-      quantity:     item.quantity     || 0,
-      target_price: item.target_price || '',
-      target_currency: item.target_currency || 'INR',
-      preferred_delivery_date: item.preferred_delivery_date || '',
-      quote_price:   qp,
-      quote_currency:qc || item.target_currency || 'INR',
-      sourced_price: src.sourced_price || null,
-      supplier_id:   src.supplier_id   || '',
-      margin_inr:  src.margin_inr  != null ? Number(src.margin_inr)  : null,
-      margin_pct:  src.margin_pct  != null ? Number(src.margin_pct)  : null,
-      // FIX 2: return tax_rate from enquiry_sourcing (set by Sourcing team)
-      // fallback to enquiry_items.tax_rate if sourcing row has none
-      tax_rate: (src.tax_rate != null && src.tax_rate !== '') ? Number(src.tax_rate)
-               : (item.tax_rate != null ? Number(item.tax_rate) : 0),
-    };
-  });
+// Remove/restore a line item from THIS quote's own view only — the underlying
+// enquiry_item and its sourcing row are untouched, so Sourcing/Enquiry and any
+// other quote revision for the same enquiry are unaffected.
+app.post('/api/quotes/:id/items/:itemId/exclude', auth, asyncRoute(async (req, res) => {
+  const q = await getAsync('SELECT * FROM quotes WHERE id=?', [req.params.id]);
+  if (!q) return res.status(404).json({ error: 'Quote not found' });
+  const item = await getAsync('SELECT * FROM enquiry_items WHERE id=? AND enquiry_id=?', [req.params.itemId, q.enquiry_id]);
+  if (!item) return res.status(404).json({ error: 'Line item not found on this quote' });
+  const excluded = parseJsonSafe(q.excluded_item_ids, []);
+  if (!excluded.includes(req.params.itemId)) excluded.push(req.params.itemId);
+  await runAsync('UPDATE quotes SET excluded_item_ids=?, updated_at=? WHERE id=?', [JSON.stringify(excluded), nowStr(), req.params.id]);
+  try {
+    // Snapshot the full row exactly as it looked at removal time — same shape
+    // the Line Items table renders — so the history log can show every column,
+    // not just the component name.
+    const sourcing = await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [q.enquiry_id]);
+    const snapshot = buildQuoteLineItem(item, sourcing, parseQuoteNotePrices(q.notes));
+    await runAsync('INSERT INTO quote_history(id, quote_id, action, by_user, ts) VALUES(?,?,?,?,?)',
+      [uuid(), req.params.id, JSON.stringify({ type: 'item_removed', item: snapshot }), req.session.user.name, nowStr()]);
+  } catch(_) {}
+  saveNow();
+  res.json({ ok: true });
+}));
 
-  res.json({ enquiry_id: q.enquiry_id, items: lineItems });
+app.get('/api/quotes/:id/history', auth, asyncRoute(async (req, res) => {
+  const rows = await allAsync('SELECT * FROM quote_history WHERE quote_id=? ORDER BY ts DESC', [req.params.id]);
+  // action stores a JSON object ({type, item}) for structured entries like
+  // item removal — parseJsonSafe only accepts arrays, so parse plain here.
+  const parseDetail = (raw) => { try { return JSON.parse(raw); } catch(_) { return null; } };
+  res.json(rows.map(r => ({ ...r, detail: parseDetail(r.action) })));
 }));
 
 app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
@@ -1959,10 +2002,13 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
     const liveOrder = await getAsync("SELECT id FROM orders WHERE quote_id=? AND status NOT IN ('deleted','cancelled') LIMIT 1", [req.params.id]);
     if (liveOrder) resolvedQuoteStatus = 'order_created';
   }
+  const additionalCharges = Array.isArray(d.additional_charges)
+    ? d.additional_charges.filter(c => c && (c.name || Number(c.amount) > 0))
+    : null;
   await runAsync(`UPDATE quotes SET
        quote_no=?, zoho_quote_no=?, file_ref=?, status=?, valid_until=?, notes=?,
        customer_response=?, customer_response_date=?, customer_response_notes=?, customer_response_by=?,
-       sent_to_customer=?,
+       sent_to_customer=?, additional_charges=?,
        revision=COALESCE(revision,1),
        updated_at=?
        WHERE id=?`,
@@ -1978,6 +2024,7 @@ app.put('/api/quotes/:id', auth, asyncRoute(async (req, res) => {
       d.customer_response_notes ?? old.customer_response_notes ?? null,
       d.customer_response_by    ?? old.customer_response_by    ?? null,
       d.sent_to_customer != null ? (d.sent_to_customer ? 1 : 0) : (old.sent_to_customer ?? 0),
+      additionalCharges ? JSON.stringify(additionalCharges) : (old.additional_charges ?? null),
       nowStr(),
       req.params.id,
     ]);
@@ -2288,8 +2335,8 @@ app.post('/api/approvals/requests/:id/action', auth, asyncRoute(async (req, res)
 // ── ADMIN: MASTER DELETE (admin-only, logged) ────────────────────────────────
 const DELETABLE_MODULES = {
   orders:    { label:'All Orders',        tables:['shipment_items','shipments','grn_records','order_history','order_documents','customer_shipping','supplier_order_items','supplier_orders','order_items','orders','customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'] },
-  enquiries: { label:'All Enquiries',     tables:['enquiry_history','enquiry_sourcing','enquiry_items','enquiries'] },
-  quotes:    { label:'All Quotes',        tables:['quotes'] },
+  enquiries: { label:'All Enquiries',     tables:['enquiry_merges','enquiry_history','enquiry_sourcing','enquiry_items','enquiries'] },
+  quotes:    { label:'All Quotes',        tables:['quote_history','quotes'] },
   sourcing:  { label:'All Sourcing Data', tables:['enquiry_sourcing'] },
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
   finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
@@ -2424,8 +2471,8 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
   const tables = ['shipment_items','shipments','grn_records',
     'order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits',
     'order_history','order_documents','customer_shipping','supplier_order_items',
-    'supplier_orders','order_items','orders','enquiry_history','enquiry_sourcing',
-    'enquiry_items','enquiries','quotes','approval_actions','approval_requests','approval_workflows',
+    'supplier_orders','order_items','orders','enquiry_merges','enquiry_history','enquiry_sourcing',
+    'enquiry_items','enquiries','quote_history','quotes','approval_actions','approval_requests','approval_workflows',
     'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files','stock_inventory'];
   // Soft master delete — snapshot everything into one restorable batch instead of
   // hard-wiping. Blobs are kept so uploaded files survive a restore.
@@ -3699,6 +3746,15 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   }
   const itemsByOrder = {};
   allItems.forEach(li => { (itemsByOrder[li.order_id] = itemsByOrder[li.order_id] || []).push(li); });
+  // Quote's own Additional Charges — passed through as a starting-point default
+  // for Finance's Record Payment form (still freely editable/removable there,
+  // same as every other additional-charges entry point in this app).
+  const quoteIds = [...new Set(filtered.map(o => o.quote_id).filter(Boolean))];
+  const quoteChargesById = {};
+  if (quoteIds.length) {
+    const quoteRows = await allAsync('SELECT id, additional_charges FROM quotes WHERE id IN (' + quoteIds.map(()=>'?').join(',') + ')', quoteIds);
+    quoteRows.forEach(q => { quoteChargesById[q.id] = parseJsonSafe(q.additional_charges, []); });
+  }
   const enriched = filtered.map(o => {
     const items = itemsByOrder[o.id] || [];
     const effectivePaymentTerms = o.payment_terms || custMap[o.customer_id]?.payment_terms || '';
@@ -3731,6 +3787,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
         : isPartialAdvanceTerms(effectivePaymentTerms) ? 'partial_advance'
         : isNetTerms(effectivePaymentTerms) ? 'net' : 'other',
       last_payment: orderPayments[0] || null,
+      quote_additional_charges: quoteChargesById[o.quote_id] || [],
       _computed_total: total,
       _computed_paid: paid,
     };
