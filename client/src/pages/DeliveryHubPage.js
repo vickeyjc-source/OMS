@@ -1240,7 +1240,9 @@ export default function DeliveryHubPage() {
                         below instead, so confirming one never silently also completes others. */}
                     {hasCustomerShipmentInFlight && allOpenShipments.length === 1 && (
                       <button className="btn btn-xs"
-                        style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                        style={canMarkCustomerReceived
+                          ? {background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}
+                          : {background:'var(--surface2)',color:'var(--text3)',borderColor:'var(--border)',fontWeight:700,cursor:'not-allowed'}}
                         disabled={!canMarkCustomerReceived}
                         title={blockReason}
                         onClick={()=>{
@@ -1331,7 +1333,9 @@ export default function DeliveryHubPage() {
                         </div>
                         {ship.status!=='delivered' && (
                           <button className="btn btn-xs"
-                            style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
+                            style={canMarkCustomerReceived
+                              ? {background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}
+                              : {background:'var(--surface2)',color:'var(--text3)',borderColor:'var(--border)',fontWeight:700,cursor:'not-allowed'}}
                             disabled={!canMarkCustomerReceived}
                             title={blockReason}
                             onClick={()=>{
@@ -1354,10 +1358,16 @@ export default function DeliveryHubPage() {
                 },{});
                 const HUB_PO_STATUSES = ['in_transit', 'partially_received', 'received'];
                 const HUB_LINE_STATUSES = ['delivered_hub', 'ready_to_ship', 'grn_partial', 'grn_rejected', 'partial_shipped', 'shipped'];
+                // An order only ever reaches Delivery Hub once at least one PO/line
+                // is hub-side — but that doesn't mean every PO on it is. A PO that's
+                // still stuck pre-GRN (e.g. never received) must stay visible here
+                // too, since it's exactly the one blocking "Mark Received by
+                // Customer" — hiding it made the blocker invisible in this view.
                 const visibleSoList = soList.filter(so => {
                   if (HUB_PO_STATUSES.includes(so.status)) return true;
                   const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
-                  return soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status));
+                  if (soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status))) return true;
+                  return soItems.some(li => (grnQtyByItem[li.id]||0) < (li.qty||0));
                 });
                 const LINE_ICON = {
                   delivered_hub:   {ic:'📦',l:'At Hub',        c:'var(--teal,#0d9488)'},
