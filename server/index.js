@@ -3486,7 +3486,22 @@ async function paidTotalsForOrder(orderId) {
   const custRows = await allAsync('SELECT actual_amount, amount FROM customer_payments WHERE order_id=?', [orderId]);
   const supRows  = await allAsync('SELECT actual_amount, paid_amount, amount FROM finance_queue WHERE order_id=?', [orderId]);
   const sum = rows => rows.reduce((s,r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
-  return { customer_paid_total: sum(custRows), supplier_paid_total: sum(supRows) };
+  return { customer_paid_computed: sum(custRows), supplier_paid_computed: sum(supRows) };
+}
+// Manual overrides (order_cost_audits.customer_paid_override / supplier_paid_override)
+// win over the computed Finance sum whenever a user has set one from Audit Bin —
+// NULL means "no override yet, use the computed total".
+function applyPaidOverrides(audit, computed) {
+  const custOverride = audit.customer_paid_override;
+  const supOverride  = audit.supplier_paid_override;
+  return {
+    customer_paid_total: custOverride !== null && custOverride !== undefined ? parseFloat(custOverride) : computed.customer_paid_computed,
+    supplier_paid_total: supOverride !== null && supOverride !== undefined ? parseFloat(supOverride) : computed.supplier_paid_computed,
+    customer_paid_computed: computed.customer_paid_computed,
+    supplier_paid_computed: computed.supplier_paid_computed,
+    customer_paid_is_override: custOverride !== null && custOverride !== undefined,
+    supplier_paid_is_override: supOverride !== null && supOverride !== undefined,
+  };
 }
 
 app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
@@ -3514,8 +3529,26 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     ...a,
     order: orderById[a.order_id] || null,
     items: items.filter(i => i.audit_id === a.id),
-    ...(paidByOrder[a.order_id] || { customer_paid_total: 0, supplier_paid_total: 0 }),
+    ...applyPaidOverrides(a, paidByOrder[a.order_id] || { customer_paid_computed: 0, supplier_paid_computed: 0 }),
   })));
+}));
+
+// PUT /api/audit-bin/:id/paid — set (or clear, with null) the manual override
+// for Customer Paid / Supplier Paid shown on this audit row.
+app.put('/api/audit-bin/:id/paid', auth, asyncRoute(async (req, res) => {
+  const audit = await getAsync('SELECT id FROM order_cost_audits WHERE id=?', [req.params.id]);
+  if (!audit) return res.status(404).json({ error: 'Audit record not found' });
+  const d = req.body || {};
+  const toNumOrNull = v => (v === '' || v === null || v === undefined) ? null : (Number.isFinite(parseFloat(v)) ? parseFloat(v) : null);
+  const updates = [];
+  const params = [];
+  if ('customer_paid_override' in d) { updates.push('customer_paid_override=?'); params.push(toNumOrNull(d.customer_paid_override)); }
+  if ('supplier_paid_override' in d) { updates.push('supplier_paid_override=?'); params.push(toNumOrNull(d.supplier_paid_override)); }
+  if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
+  params.push(req.params.id);
+  await runAsync(`UPDATE order_cost_audits SET ${updates.join(', ')} WHERE id=?`, params);
+  saveNow();
+  res.json({ ok: true });
 }));
 
 // One-time/ad-hoc backfill: any order already sitting in Closed Bin from before
@@ -3547,8 +3580,7 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
   audit.items = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
   const paid = await paidTotalsForOrder(req.params.id);
-  audit.customer_paid_total = paid.customer_paid_total;
-  audit.supplier_paid_total = paid.supplier_paid_total;
+  Object.assign(audit, applyPaidOverrides(audit, paid));
   res.json(audit);
 }));
 

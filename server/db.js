@@ -684,6 +684,14 @@ async function initDb() {
   // never blended into one guess.
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges NUMERIC DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
+  // Manual override for Customer Paid / Supplier Paid shown in Audit Bin — these
+  // two figures are normally computed live by summing customer_payments and
+  // finance_queue, but that sum can be missing/wrong (payment recorded outside
+  // Finance's normal flow, older data, etc.). When set, the override is what's
+  // shown instead of the computed sum; NULL means "use the computed total" —
+  // this never touches the real Finance payment records.
+  try { await pool.query("ALTER TABLE order_cost_audits ADD COLUMN customer_paid_override NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audits ADD COLUMN supplier_paid_override NUMERIC DEFAULT NULL"); } catch(_) {}
   // Per-line-item Estimate detail mirroring Sourcing exactly (see schema comment
   // on order_cost_audit_item_lines above).
   try {

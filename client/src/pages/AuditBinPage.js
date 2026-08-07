@@ -27,6 +27,57 @@ function fmtM(n) {
   return '₹' + v.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 }
 
+// Click-to-edit Customer Paid / Supplier Paid amount — shows the computed
+// Finance total (or an override once one's been entered) with a pencil to
+// open a plain number field. Saving writes to order_cost_audits' own
+// customer_paid_override / supplier_paid_override column — it never touches
+// the real Finance payment records, so editing here is always safe.
+function EditablePaid({ auditId, field, value, isOverride, color, onSaved, stopPropagation }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const startEdit = (e) => {
+    if (stopPropagation) e.stopPropagation();
+    setDraft(value ? String(value) : '');
+    setEditing(true);
+  };
+  const cancel = (e) => { if (stopPropagation) e.stopPropagation(); setEditing(false); };
+  const save = async (e) => {
+    if (stopPropagation) e.stopPropagation();
+    setSaving(true);
+    try {
+      await api.put(`/audit-bin/${auditId}/paid`, { [field]: draft === '' ? null : draft });
+      toast.success('Amount saved');
+      setEditing(false);
+      onSaved();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to save amount');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div style={{ display:'flex', alignItems:'center', gap:4 }} onClick={e=>stopPropagation && e.stopPropagation()}>
+        <input type="number" step="0.01" autoFocus value={draft} onChange={e=>setDraft(e.target.value)}
+          style={{ width:100, fontSize:12, padding:'3px 6px', borderRadius:6, border:'1px solid var(--border)' }}
+          onKeyDown={e=>{ if(e.key==='Enter') save(e); if(e.key==='Escape') cancel(e); }}/>
+        <button className="btn btn-xs btn-primary" disabled={saving} onClick={save} style={{padding:'2px 6px'}}>{saving?'…':'✓'}</button>
+        <button className="btn btn-xs" disabled={saving} onClick={cancel} style={{padding:'2px 6px'}}>×</button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+      <span style={{ fontSize:12, fontWeight:700, color }}>{fmtM(value)}</span>
+      {isOverride && <span title="Manually entered — overrides the computed Finance total" style={{fontSize:9,color:'var(--text3)'}}>✏ manual</span>}
+      <button className="btn btn-xs" title="Enter amount" onClick={startEdit} style={{padding:'1px 6px',fontSize:11}}>✏</button>
+    </div>
+  );
+}
+
 // ── Per-supplier-PO card — plain amount fields, all blank by default ─────────
 function AuditItemCard({ item, onSaved }) {
   const [form, setForm] = useState(() => {
@@ -161,8 +212,14 @@ function AuditDetailModal({ order, onClose, onSaved }) {
           {!isLoading && items.length > 0 && (<>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,
               padding:'10px 16px',borderRadius:'var(--r)',background:'var(--surface2)',border:'1px solid var(--border)',flexWrap:'wrap',gap:10}}>
-              <div style={{fontSize:12}}>Customer Paid: <b style={{color:'var(--green)'}}>{fmtM(audit?.customer_paid_total)}</b></div>
-              <div style={{fontSize:12}}>Supplier Paid: <b style={{color:'var(--red)'}}>{fmtM(audit?.supplier_paid_total)}</b></div>
+              <div style={{fontSize:12,display:'flex',alignItems:'center',gap:8}}>Customer Paid:
+                {audit && <EditablePaid auditId={audit.id} field="customer_paid_override" value={audit.customer_paid_total}
+                  isOverride={audit.customer_paid_is_override} color="var(--green)" onSaved={refresh}/>}
+              </div>
+              <div style={{fontSize:12,display:'flex',alignItems:'center',gap:8}}>Supplier Paid:
+                {audit && <EditablePaid auditId={audit.id} field="supplier_paid_override" value={audit.supplier_paid_total}
+                  isOverride={audit.supplier_paid_is_override} color="var(--red)" onSaved={refresh}/>}
+              </div>
             </div>
             {items.map(item => (
               <AuditItemCard key={item.id} item={item} onSaved={refresh}/>
@@ -280,8 +337,16 @@ export default function AuditBinPage() {
                   {a.order?.po_number && <span className="mono" style={{fontSize:11,color:'var(--text3)',marginLeft:8}}>PO:{a.order.po_number}</span>}
                   <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>{custName(a.order?.customer_id)}</div>
                 </div>
-                <div style={{fontSize:12,fontWeight:700,color:'var(--green)'}}>{fmtM(a.customer_paid_total)}</div>
-                <div style={{fontSize:12,fontWeight:700,color:'var(--red)'}}>{fmtM(a.supplier_paid_total)}</div>
+                <div onClick={e=>e.stopPropagation()}>
+                  <EditablePaid auditId={a.id} field="customer_paid_override" value={a.customer_paid_total}
+                    isOverride={a.customer_paid_is_override} color="var(--green)" stopPropagation
+                    onSaved={()=>qc.invalidateQueries(['audit-bin'])}/>
+                </div>
+                <div onClick={e=>e.stopPropagation()}>
+                  <EditablePaid auditId={a.id} field="supplier_paid_override" value={a.supplier_paid_total}
+                    isOverride={a.supplier_paid_is_override} color="var(--red)" stopPropagation
+                    onSaved={()=>qc.invalidateQueries(['audit-bin'])}/>
+                </div>
                 <div style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                   <button className="btn btn-xs btn-primary" onClick={()=>setSelected(a)}>👁 View</button>
                 </div>
