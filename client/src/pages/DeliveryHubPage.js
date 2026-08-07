@@ -931,12 +931,68 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
   );
 }
 
+// Walks ONE specific order through every Delivery Hub stage in order (GRN →
+// Ship Now → Shipped → Customer Confirm → Close → Audit) and stops at the
+// first incomplete stage, naming exactly what's missing — so a stuck order
+// can be diagnosed straight from prod without touching the database.
+function HubDiagnosticModal({ orderId, onClose }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['hub-diagnostic', orderId],
+    queryFn: () => api.get(`/orders/${orderId}/hub-diagnostic`).then(r => r.data),
+  });
+  return (
+    <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal modal-sm" style={{ maxWidth: 520 }}>
+        <div className="modal-header">
+          <h2 style={{ margin: 0 }}>🩺 Delivery Hub Diagnostic — {orderId}</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{ paddingTop: 14, paddingBottom: 14 }}>
+          {isLoading && <div className="loading-center">Checking…</div>}
+          {error && <div style={{ color: 'var(--red)', fontSize: 13 }}>Failed to load diagnostic.</div>}
+          {data && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {data.steps.map((s, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 10px',
+                  borderRadius: 8, background: s.ok ? 'var(--green-lt)' : 'var(--amber-lt,#fffbeb)',
+                  border: `1px solid ${s.ok ? 'var(--green)' : 'var(--amber,#d97706)'}44`,
+                }}>
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>{s.ok ? '✅' : '⏳'}</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: s.ok ? 'var(--green)' : 'var(--amber,#92400e)' }}>{s.step}</div>
+                    {s.detail && <div style={{ fontSize: 12, color: 'var(--text2)', marginTop: 2 }}>{s.detail}</div>}
+                  </div>
+                </div>
+              ))}
+              {data.stopped_at && (
+                <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>
+                  Stopped at <strong>{data.stopped_at}</strong> — later steps aren't checked yet since this one isn't done.
+                </div>
+              )}
+              {!data.stopped_at && (
+                <div style={{ fontSize: 12, color: 'var(--green)', fontWeight:600, marginTop: 4 }}>
+                  All stages complete for this order.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DeliveryHubPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
   const [selected,         setSelected]         = useState(null);
   const [selectedPoId,     setSelectedPoId]     = useState(null);
   const [escalating,       setEscalating]       = useState(null);
+  const [diagnosing,       setDiagnosing]       = useState(null); // order id currently showing the step-by-step diagnostic
   const [search,           setSearch]           = useState('');
   const [filter,           setFilter]           = useState('all');
   const [dispatch,         setDispatch]         = useState(null);
@@ -1154,6 +1210,8 @@ export default function DeliveryHubPage() {
                     </span>
                   ))}
                   <StatusBadge s={order.status}/>
+                  <button className="btn btn-xs" style={{fontSize:10,padding:'2px 8px'}} title="Step-by-step check: which stage is this order stuck at, and what's missing"
+                    onClick={()=>setDiagnosing(order.id)}>🩺 Diagnose</button>
                   {isInTransit && <span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)'}}>🚚 In Transit to Customer</span>}
                   {grnDone && !isInTransit && !hasBalance && <span className="badge badge-green">✅ GRN Done — Ready for Outbound</span>}
                   {!grnDone && !isInTransit && !hasBalance && <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⏳ Pending GRN</span>}
@@ -1541,6 +1599,9 @@ export default function DeliveryHubPage() {
           shipment={confirming.shipment}
           onClose={()=>setConfirming(null)}
           onSaved={()=>setConfirming(null)}/>
+      )}
+      {diagnosing && (
+        <HubDiagnosticModal orderId={diagnosing} onClose={()=>setDiagnosing(null)}/>
       )}
     </div>
   );

@@ -3542,6 +3542,118 @@ app.post('/api/audit-bin/backfill', auth, asyncRoute(async (req, res) => {
   res.json({ ok: true, scanned: missing.length, created });
 }));
 
+// GET /api/orders/:id/hub-diagnostic — walks THIS order through every
+// Delivery Hub stage in order (GRN → Ship Now → Shipped → Customer Confirm →
+// Close) and stops at the first incomplete one, naming the exact missing
+// field(s) — same rules the UI already enforces, just narrated for one order
+// so a specific stuck order can be diagnosed from prod without DB access.
+app.get('/api/orders/:id/hub-diagnostic', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const order = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const items = await allAsync('SELECT * FROM order_items WHERE order_id=?', [oid]);
+  const supplierOrders = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [oid]);
+  const soItemRows = supplierOrders.length
+    ? await allAsync('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + supplierOrders.map(()=>'?').join(',') + ')', supplierOrders.map(s=>s.id))
+    : [];
+  const grnRecords = await allAsync('SELECT * FROM grn_records WHERE order_id=?', [oid]);
+  const shipments = await allAsync('SELECT * FROM shipments WHERE order_id=?', [oid]);
+  const shipIds = shipments.map(s=>s.id);
+  const shipItems = shipIds.length
+    ? await allAsync('SELECT * FROM shipment_items WHERE shipment_id IN (' + shipIds.map(()=>'?').join(',') + ')', shipIds)
+    : [];
+  const docs = (await getAsync('SELECT * FROM order_documents WHERE order_id=?', [oid])) || {};
+  const cust = order.customer_id ? await getAsync('SELECT country FROM customers WHERE id=?', [order.customer_id]) : null;
+  const audit = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [oid]);
+
+  const grnQtyByItem = {}; grnRecords.forEach(r => { grnQtyByItem[r.order_item_id] = (grnQtyByItem[r.order_item_id]||0) + (parseInt(r.qty_received)||0); });
+  const shippedQtyByItem = {}; shipItems.forEach(si => { shippedQtyByItem[si.order_item_id] = (shippedQtyByItem[si.order_item_id]||0) + (parseInt(si.qty_shipped)||0); });
+
+  const steps = [];
+  const missing = [];
+  const add = (name, ok, detail) => { steps.push({ step: name, ok, detail: detail || (ok ? 'Done' : '') }); if (!ok) missing.push({ step: name, detail }); };
+
+  // 1. GRN — every line item's received qty must cover its ordered qty
+  //    (or the PO carries a credit note excusing the shortfall).
+  const soByItem = {}; soItemRows.forEach(r => { soByItem[r.item_id] = supplierOrders.find(s=>s.id===r.supplier_order_id); });
+  const shortItems = items.filter(li => {
+    const rcvd = grnQtyByItem[li.id] || 0;
+    if (rcvd >= (li.qty||0)) return false;
+    const so = soByItem[li.id];
+    return !(so && so.credit_note_no);
+  });
+  add('1. GRN Received', shortItems.length === 0,
+    shortItems.length ? `Pending GRN for: ${shortItems.map(li=>`${li.component} (${grnQtyByItem[li.id]||0}/${li.qty})`).join(', ')}` : '');
+  if (shortItems.length) { return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing }); }
+
+  // 2. Ship Now (dispatch to customer) — every unit received at hub must be
+  //    covered by a shipment record carrying tracking no, shipper, invoice
+  //    (number + uploaded file), delivery slip, packing list, and — for
+  //    Indian deliveries over ₹50,000 — an e-way bill.
+  const atHubItems = items.filter(li => (grnQtyByItem[li.id]||0) > (shippedQtyByItem[li.id]||0));
+  if (atHubItems.length) {
+    add('2. Ship Now (Dispatch)', false,
+      `Received but not yet shipped to customer: ${atHubItems.map(li=>`${li.component} (${(grnQtyByItem[li.id]||0)-(shippedQtyByItem[li.id]||0)} pending)`).join(', ')}`);
+    return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing });
+  }
+  if (!shipments.length) {
+    add('2. Ship Now (Dispatch)', false, 'No shipment record exists yet for this order');
+    return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing });
+  }
+  const totalInr = items.filter(i=>i.currency==='INR').reduce((s,i)=>s+(i.qty*i.unit_price),0);
+  const ewayRequired = cust?.country === 'India' && totalInr > 50000;
+  const shipFieldGaps = [];
+  shipments.forEach(s => {
+    const gaps = [];
+    if (!s.tracking_no) gaps.push('tracking number');
+    if (!s.shipper_id) gaps.push('shipper');
+    if (!s.invoice_ref) gaps.push('invoice number');
+    if (!s.invoice_file) gaps.push('invoice file upload');
+    if (!s.delivery_slip) gaps.push('delivery slip');
+    if (!s.packing_list) gaps.push('packing list');
+    if (ewayRequired && !s.eway_bill) gaps.push('e-way bill');
+    if (gaps.length) shipFieldGaps.push(`Shipment ${s.shipment_no}: missing ${gaps.join(', ')}`);
+  });
+  add('2. Ship Now (Dispatch)', shipFieldGaps.length === 0, shipFieldGaps.join(' | '));
+  if (shipFieldGaps.length) { return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing }); }
+
+  // 3. Shipped — line items must actually carry line_status shipped/delivered
+  //    (the dispatch step above can leave a line at partial_shipped short of
+  //    its ordered qty if a later top-up shipment is still pending).
+  const notShipped = items.filter(li => !['shipped','delivered'].includes(li.line_status));
+  add('3. Shipped Out', notShipped.length === 0,
+    notShipped.length ? `Not fully shipped: ${notShipped.map(li=>`${li.component} (${li.line_status})`).join(', ')}` : '');
+  if (notShipped.length) { return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing }); }
+
+  // 4. Customer delivery confirmed — every shipment must be marked delivered
+  //    (the "✅ Confirm" / "Mark Received by Customer" action).
+  const undelivered = shipments.filter(s => s.status !== 'delivered');
+  add('4. Customer Delivery Confirmed', undelivered.length === 0,
+    undelivered.length ? `Awaiting confirmation: Shipment ${undelivered.map(s=>s.shipment_no).join(', ')}` : '');
+  if (undelivered.length) { return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing }); }
+
+  // 5. Order closed — requires delivery slip, packing list, invoice on file
+  //    (and e-way bill if applicable), then flips to 'closed' and gets its
+  //    Audit Bin snapshot created.
+  const closeDocGaps = [];
+  if (!docs.delivery_slip) closeDocGaps.push('delivery slip');
+  if (!docs.packing_list) closeDocGaps.push('packing list');
+  if (!docs.invoice) closeDocGaps.push('invoice');
+  if (ewayRequired && !docs.eway_bill) closeDocGaps.push('e-way bill');
+  const isClosed = order.status === 'closed';
+  add('5. Order Closed', isClosed,
+    isClosed ? '' : closeDocGaps.length ? `Missing for closing: ${closeDocGaps.join(', ')}` : 'Order not yet marked closed');
+  if (!isClosed) { return res.json({ order_id: oid, status: order.status, steps, stopped_at: steps[steps.length-1].step, missing }); }
+
+  // 6. Audit Bin snapshot — created automatically the moment the order closes;
+  //    flags orders that closed before this feature existed or otherwise
+  //    slipped through (fixable via POST /api/audit-bin/backfill).
+  add('6. Audit Bin Snapshot', !!audit, audit ? '' : 'Order is closed but has no Audit Bin record — run Sync from Closed Bin');
+
+  res.json({ order_id: oid, status: order.status, steps, stopped_at: null, missing });
+}));
+
 app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
