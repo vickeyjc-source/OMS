@@ -674,6 +674,36 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
   );
 }
 
+// Small popup listing a single supplier's line cards (tap the count badge to open)
+function LineCardsPopup({ supplier, linecards, onClose }) {
+  const names = (supplier.linecards||[]).map(id => linecards.find(l=>l.id===id)?.name || id);
+  return (
+    <div className="overlay" style={{ zIndex: 400 }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal modal-sm" style={{ maxWidth: 380 }}>
+        <div className="modal-header">
+          <div>
+            <h2 style={{ margin: 0 }}>🏷 Line Cards</h2>
+            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 2 }}>{supplier.name}</div>
+          </div>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{ paddingTop: 14, paddingBottom: 14 }}>
+          {names.length === 0
+            ? <div className="empty-state"><div>No line cards</div></div>
+            : <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {names.map((n, i) => (
+                  <span key={i} className="badge badge-blue" style={{ fontWeight: 600, alignSelf: 'flex-start' }}>{n}</span>
+                ))}
+              </div>}
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────────────────────────────
 export default function SuppliersPage() {
   const [search,   setSearch]   = useState('');
@@ -681,6 +711,7 @@ export default function SuppliersPage() {
   const [modal,    setModal]    = useState(null);
   const [modalTab, setModalTab] = useState(null); // pre-select tab when opening modal
   const [showBulk, setShowBulk] = useState(false);
+  const [lcPopup,  setLcPopup]  = useState(null); // supplier whose line cards popup is open
   const qc = useQueryClient();
   const { data: suppliers=[] } = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data) });
   const { data: linecards=[] } = useQuery({ queryKey:['linecards'], queryFn:()=>api.get('/linecards').then(r=>r.data) });
@@ -776,10 +807,10 @@ export default function SuppliersPage() {
                   {(s.linecards||[]).length > 0
                     ? <span
                         className="badge badge-blue"
-                        style={{fontWeight:600, cursor: lcMatchedBySearch ? 'pointer' : 'default',
+                        style={{fontWeight:600, cursor:'pointer',
                           outline: lcMatchedBySearch ? '2px solid var(--accent)' : 'none'}}
-                        title={lcMatchedBySearch ? `Click to open Line Cards tab` : `${s.linecards.length} line card(s)`}
-                        onClick={lcMatchedBySearch ? e => { e.stopPropagation(); openModal(s,'linecards'); } : undefined}
+                        title="Click to view line cards"
+                        onClick={e => { e.stopPropagation(); setLcPopup(s); }}
                       >{s.linecards.length}{lcMatchedBySearch ? ' 🏷' : ''}</span>
                     : <span className="muted">—</span>}
                 </td>
@@ -801,6 +832,7 @@ export default function SuppliersPage() {
 
       {modal!==null&&<SupplierModal supplier={Object.keys(modal).length?modal:null} linecards={linecards} initialTab={modalTab} onClose={closeModal}/>}
       {showBulk&&<BulkUpload onClose={()=>setShowBulk(false)} onDone={()=>{qc.invalidateQueries(['suppliers']);setShowBulk(false);}}/>}
+      {lcPopup&&<LineCardsPopup supplier={lcPopup} linecards={linecards} onClose={()=>setLcPopup(null)}/>}
     </div>
   );
 }

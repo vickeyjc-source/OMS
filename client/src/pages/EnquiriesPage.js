@@ -219,8 +219,15 @@ export default function EnquiriesPage() {
   const filtered = enqs.filter(e => {
     if (filter!=='all' && e.status!==filter) return false;
     if (!search) return true;
-    const q = search.toLowerCase();
-    return e.id.toLowerCase().includes(q) || custName(e.customer_id).toLowerCase().includes(q);
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    if (e.id.toLowerCase().includes(q)) return true;
+    if (custName(e.customer_id).toLowerCase().includes(q)) return true;
+    // Partial match on any component/IPN in this enquiry's line items —
+    // e.g. typing "abcd" should surface an enquiry containing "com-abcd123".
+    return (e.items||[]).some(it =>
+      (it.component||'').toLowerCase().includes(q) || (it.ipn||'').toLowerCase().includes(q)
+    );
   }).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
 
   const toggleMergeSelect = (id) => {
@@ -242,7 +249,7 @@ export default function EnquiriesPage() {
       <div className="flex-between" style={{marginBottom:14}}>
         <div className="search-wrap">
           <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
-          <input className="search-input" placeholder="Search enquiries…" value={search} onChange={e=>setSearch(e.target.value)} />
+          <input className="search-input" placeholder="Search by ENQ #, customer or component…" value={search} onChange={e=>setSearch(e.target.value)} />
         </div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {mergeSelection.length > 0 && (

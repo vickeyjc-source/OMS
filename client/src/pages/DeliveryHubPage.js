@@ -1097,11 +1097,13 @@ export default function DeliveryHubPage() {
           const readyToShipItems    = allItems.filter(li=>['ready_to_ship','grn_partial','delivered_hub'].includes(li.line_status));
           const hasBalance     = partialShippedItems.length > 0;
           const hasReadyItems  = readyToShipItems.length > 0;
-          const compactMeta = [
-            order.enquiry_no ? `ENQ ${order.enquiry_no}` : '',
-            order.quote_no ? `QT ${order.quote_no}` : '',
-            order.po_number ? `PO ${order.po_number}` : '',
-          ].filter(Boolean).join(' · ');
+          // Each segment kept separate (rather than one joined string) so the
+          // ENQ/QT reference numbers can be bolded/highlighted independently.
+          const metaSegments = [
+            order.enquiry_no ? { label:'ENQ', value:order.enquiry_no, strong:true }  : null,
+            order.quote_no   ? { label:'QT',  value:order.quote_no,   strong:true }  : null,
+            order.po_number  ? { label:'PO',  value:order.po_number,  strong:false } : null,
+          ].filter(Boolean);
           const shippedQtyByItem = (shipmentList || []).flatMap(s => s.items || []).reduce((m, si) => {
             m[si.order_item_id] = (m[si.order_item_id] || 0) + (parseInt(si.qty_shipped, 10) || 0);
             return m;
@@ -1134,7 +1136,16 @@ export default function DeliveryHubPage() {
               <div className="flex-between" style={{marginBottom:10}}>
                 <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
                   <span className="mono bold" style={{fontSize:14}}>{order.id}</span>
-                  {compactMeta && <span style={{fontSize:12,color:'var(--text3)',fontWeight:600}}>{compactMeta}</span>}
+                  {metaSegments.map((seg, i) => (
+                    <span key={seg.label} style={{fontSize:12,display:'inline-flex',alignItems:'center',gap:4}}>
+                      {i>0 && <span style={{color:'var(--text3)',marginRight:4}}>·</span>}
+                      <span style={{color:'var(--text3)',fontWeight:600}}>{seg.label}</span>
+                      <span className="mono" style={{
+                        fontWeight: seg.strong ? 800 : 600,
+                        color: seg.strong ? 'var(--accent)' : 'var(--text3)',
+                      }}>{seg.value}</span>
+                    </span>
+                  ))}
                   <StatusBadge s={order.status}/>
                   {isInTransit && <span style={{fontSize:11,color:'var(--teal,#0d9488)',fontWeight:700,padding:'2px 8px',borderRadius:999,background:'var(--teal-lt,#f0fdfa)'}}>🚚 In Transit to Customer</span>}
                   {grnDone && !isInTransit && !hasBalance && <span className="badge badge-green">✅ GRN Done — Ready for Outbound</span>}
