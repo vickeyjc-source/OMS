@@ -73,7 +73,7 @@ function EditablePaid({ auditId, field, value, isOverride, color, onSaved, stopP
     <div style={{ display:'flex', alignItems:'center', gap:6 }}>
       <span style={{ fontSize:12, fontWeight:700, color }}>{fmtM(value)}</span>
       {isOverride && <span title="Manually entered — overrides the computed Finance total" style={{fontSize:9,color:'var(--text3)'}}>✏ manual</span>}
-      <button className="btn btn-xs" title="Enter amount" onClick={startEdit} style={{padding:'1px 6px',fontSize:11}}>✏</button>
+      <button className="btn btn-xs" title="Enter amount" onClick={startEdit} style={{padding:'1px 8px',fontSize:11,whiteSpace:'nowrap'}}>✏ Edit</button>
     </div>
   );
 }
