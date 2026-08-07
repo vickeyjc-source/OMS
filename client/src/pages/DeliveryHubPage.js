@@ -1110,19 +1110,26 @@ export default function DeliveryHubPage() {
           }, {});
           const allOpenShipments = shipmentList.filter(s => s.status !== 'delivered');
           const hasCustomerShipmentInFlight = allOpenShipments.length > 0;
-          const supplierDeliveryReady = soList.length > 0 && soList.every(so => {
+          // Per-PO reason this order isn't ready, so the disabled button can tell
+          // you exactly which supplier PO is blocking it (and why) instead of a
+          // generic "wait" message.
+          const blockingSOs = soList.filter(so => {
             const soItems = (so.items || []).map(id => allItems.find(li => li.id === id)).filter(Boolean);
-            if (!soItems.length) return false;
+            if (!soItems.length) return true;
             const fullyShipped = soItems.every(li => ['shipped', 'delivered'].includes(li.line_status));
-            if (fullyShipped) return true;
-            if (!so.credit_note_no) return false;
-            return soItems.every(li => {
-              const received = grnQtyByItem[li.id] || 0;
-              const shipped = shippedQtyByItem[li.id] || 0;
-              return shipped >= received;
-            });
+            if (fullyShipped) return false;
+            if (!so.credit_note_no) return true;
+            return !soItems.every(li => (shippedQtyByItem[li.id] || 0) >= (grnQtyByItem[li.id] || 0));
           });
+          const supplierDeliveryReady = soList.length > 0 && blockingSOs.length === 0;
           const canMarkCustomerReceived = hasCustomerShipmentInFlight && supplierDeliveryReady;
+          const blockReason = !hasCustomerShipmentInFlight
+            ? 'No open shipment to confirm'
+            : soList.length === 0
+              ? 'No supplier PO linked to this order yet'
+              : blockingSOs.length > 0
+                ? `Waiting on ${blockingSOs.map(so => `${so.internal_po_no||so.id}${so.credit_note_no ? '' : ' (needs credit note for short shipment)'}`).join(', ')}`
+                : '';
           const shipperNameFor = (value) => {
             if (!value) return '';
             return shippers.find(s => s.id === value)?.name || value;
@@ -1199,9 +1206,10 @@ export default function DeliveryHubPage() {
                       <button className="btn btn-xs"
                         style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
                         disabled={!canMarkCustomerReceived}
+                        title={blockReason}
                         onClick={()=>{
                           if (!canMarkCustomerReceived) {
-                            toast.error('Wait until all supplier GRN and shipment lines are completed');
+                            toast.error(blockReason || 'Wait until all supplier GRN and shipment lines are completed');
                             return;
                           }
                           setConfirming({ order, shipment: allOpenShipments[0] });
@@ -1289,9 +1297,9 @@ export default function DeliveryHubPage() {
                           <button className="btn btn-xs"
                             style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}}
                             disabled={!canMarkCustomerReceived}
-                            title={!canMarkCustomerReceived ? 'Wait until all supplier GRN and shipment lines are completed' : ''}
+                            title={blockReason}
                             onClick={()=>{
-                              if (!canMarkCustomerReceived) { toast.error('Wait until all supplier GRN and shipment lines are completed'); return; }
+                              if (!canMarkCustomerReceived) { toast.error(blockReason || 'Wait until all supplier GRN and shipment lines are completed'); return; }
                               setConfirming({ order, shipment: ship });
                             }}>
                             ✅ Confirm

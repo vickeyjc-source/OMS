@@ -3518,6 +3518,30 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
   })));
 }));
 
+// One-time/ad-hoc backfill: any order already sitting in Closed Bin from before
+// createCostAudit() existed (or that slipped through for any other reason) never
+// got an order_cost_audits row, so it never appears in Audit Bin. This walks every
+// closed order missing an audit row and creates it now — safe to re-run any time,
+// createCostAudit() itself is a no-op for orders that already have one.
+app.post('/api/audit-bin/backfill', auth, asyncRoute(async (req, res) => {
+  if (!['admin','manager'].includes(req.session.user.role)) return res.status(403).json({ error: 'Only managers or admins can backfill Audit Bin' });
+  const missing = await allAsync(
+    `SELECT o.id FROM orders o
+     LEFT JOIN order_cost_audits a ON a.order_id = o.id
+     WHERE o.status='closed' AND a.id IS NULL`
+  );
+  let created = 0;
+  for (const row of missing) {
+    const before = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [row.id]);
+    if (before) continue;
+    await createCostAudit(row.id);
+    const after = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [row.id]);
+    if (after) created++;
+  }
+  saveNow();
+  res.json({ ok: true, scanned: missing.length, created });
+}));
+
 app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });

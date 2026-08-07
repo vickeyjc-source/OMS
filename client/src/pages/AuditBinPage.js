@@ -183,6 +183,27 @@ export default function AuditBinPage() {
   const qc = useQueryClient();
   const [selected, setSelected] = useState(null);
   const [search, setSearch] = useState('');
+  const [syncing, setSyncing] = useState(false);
+
+  // Orders that were already in Closed Bin before this Audit Bin feature
+  // existed never got an order_cost_audits row created for them (it's only
+  // ever created at the moment an order transitions TO closed). This lets an
+  // admin/manager backfill those older closed orders into Audit Bin on demand.
+  const canSync = ['admin','manager'].includes(user?.role);
+  const runSync = async () => {
+    setSyncing(true);
+    try {
+      const { data } = await api.post('/audit-bin/backfill');
+      qc.invalidateQueries(['audit-bin']);
+      toast.success(data.created > 0
+        ? `✅ Added ${data.created} closed order(s) to Audit Bin`
+        : 'Everything in Closed Bin is already in Audit Bin');
+    } catch(e) {
+      toast.error(e.response?.data?.error || 'Failed to sync Audit Bin');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const { data: audits = [], isLoading } = useQuery({
     queryKey: ['audit-bin'],
@@ -226,6 +247,11 @@ export default function AuditBinPage() {
           <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
           <input className="search-input" placeholder="Search order, PO, customer…" value={search} onChange={e=>setSearch(e.target.value)}/>
         </div>
+        {canSync && (
+          <button className="btn btn-sm" disabled={syncing} onClick={runSync} title="Pull in any Closed Bin order that's missing from Audit Bin">
+            {syncing ? 'Syncing…' : '🔄 Sync from Closed Bin'}
+          </button>
+        )}
       </div>
 
       {isLoading && <div className="loading-center">Loading…</div>}
