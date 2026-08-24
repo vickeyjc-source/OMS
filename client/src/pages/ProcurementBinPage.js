@@ -2239,7 +2239,10 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       </td>
                       <td>
                         {so
-                          ? <>
+                          ? <div style={{display:'flex',flexDirection:'column',gap:3}}>
+                              <span style={{fontSize:11,fontWeight:700,color:'var(--accent)'}}>
+                                Assigned: {supName(so.supplier_id)}
+                              </span>
                               {(() => {
                                 const poAssignedRef = so.zoho_po_number || so.supplier_ref || so.po_no || so.internal_po_no;
                                 if (poAssignedRef) {
@@ -2260,7 +2263,7 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                               })()}
                               {(so.payment_blocked===1||so.payment_blocked===true)&&
                                 <span style={{fontSize:10,color:'var(--red)',marginLeft:4}}>🔒</span>}
-                            </>
+                            </div>
                           : (srcSup
                               ? <span style={{fontSize:11,color:'var(--accent)',fontWeight:600}}>Assigned: {supName(srcSup)}</span>
                               : <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>)

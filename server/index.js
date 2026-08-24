@@ -3980,9 +3980,7 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
     : grandTotal;
 
   // If actual amount differs from grand total, change note is mandatory
-  if (Math.abs(actualAmount - grandTotal) > 0.009 && !((d.amount_change_note || '').trim())) {
-    return res.status(400).json({ error: 'Please provide a reason note when the actual amount differs from the total amount' });
-  }
+
 
   const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
@@ -4339,9 +4337,7 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
 
   // Reason note is only required when the disbursed amount differs from the entered amount
   // (base + charges). Paying a partial/split advance is NOT a mismatch.
-  if (Math.abs(actualAmount - submittedAmount) > 0.009 && !((d.amount_change_note || '').trim())) {
-    return res.status(400).json({ error: 'Please provide a reason note when the actual amount differs from the total amount' });
-  }
+
 
   // Full PO amount (for balance tracking) — the confirmed total, never the partial advance.
   const grandTotal = (parseFloat(fq.amount) || parseFloat(so?.confirmed_price) || 0) + chargesTotal;
@@ -4498,9 +4494,7 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
   // Note is mandatory if actual amount differs from (base amount input + charges)
   const inputBase = parseFloat(d.amount) || 0;
   const expectedActual = inputBase + chargesTotal;
-  if (Math.abs(actualAmount - expectedActual) > 0.009 && !((d.amount_change_note || '').trim())) {
-    return res.status(400).json({ error: 'Please provide a reason note when the actual payment amount differs from the total' });
-  }
+
 
   const prevPaid     = parseFloat(so.net_total_paid) || 0;
   const newTotalPaid = prevPaid + actualAmount;
