@@ -733,7 +733,7 @@ export function CustomerModal({ customer, onClose, onSaved }) {
                     domestic={!intl}
                     excludeIndia={intl}
                   />
-                  <div style={{marginTop:12,marginBottom:16}}>
+                  <div style={{marginTop:12,marginBottom:16,textAlign:'right'}}>
                     <button className="btn btn-xs btn-primary" onClick={() => setBillingEditMode(false)}>✓ Done</button>
                   </div>
                 </div>

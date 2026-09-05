@@ -67,6 +67,11 @@ export default function Layout() {
             New Order
           </NavLink>}
           <div className="sb-section">Bins</div>
+          {can('rfq-analysis') && <NavLink to="/rfq-analysis" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
+            <Icon d="M2 3h12M2 3v9a1 1 0 001 1h10a1 1 0 001-1V3M5 6h6M5 9h4"/>
+            RFQ Analysis
+            {(summary.rfq_open||0) > 0 && <span className="nav-badge">{summary.rfq_open}</span>}
+          </NavLink>}
           {can('sourcing-bin') && <NavLink to="/sourcing-bin" className={({isActive})=>`nav-item ${isActive?'active':''}`}>
             <Icon d="M3 3h10l1 9H2L3 3zM6 3V2a2 2 0 014 0v1M6 7h4"/>
             Sourcing Bin

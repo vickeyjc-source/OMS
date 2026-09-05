@@ -33,6 +33,8 @@ const DangerZonePage = lazy(()=>import('./pages/DangerZonePage'));
 const FinancePage = lazy(()=>import('./pages/FinancePage'));
 const TaxSettingsPage = lazy(()=>import('./pages/TaxSettingsPage'));
 const InventoryPage = lazy(()=>import('./pages/InventoryPage'));
+const AnalysisPage = lazy(()=>import('./pages/AnalysisPage'));
+const AnalysisLineDetailPage = lazy(()=>import('./pages/AnalysisLineDetailPage'));
 
 function Spinner() {
   return (
@@ -94,6 +96,8 @@ function AppRoutes() {
         <Route path="danger-zone" element={<RequireSection section="danger-zone" strictAdmin><DangerZonePage /></RequireSection>} />
         <Route path="finance" element={<RequireSection section="finance"><FinancePage /></RequireSection>} />
         <Route path="inventory" element={<RequireSection section="inventory"><InventoryPage /></RequireSection>} />
+        <Route path="rfq-analysis" element={<RequireSection section="rfq-analysis"><AnalysisPage /></RequireSection>} />
+        <Route path="rfq-analysis/:lineId" element={<RequireSection section="rfq-analysis"><AnalysisLineDetailPage /></RequireSection>} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/' : '/login'} replace />} />
     </Routes></Suspense>

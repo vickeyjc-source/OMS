@@ -1741,6 +1741,140 @@ app.put('/api/enquiries/:id', auth, asyncRoute(async (req, res) => {
   res.json(out);
 }));
 
+// ── Currency Normalization ──────────────────────────────────────────
+async function getFxRate(from, to, actorId) {
+  if (from === to) return { rate: 1, rate_date: nowStr().slice(0, 10), source: 'identity', fetched_at: nowStr(), stale: false };
+  const today = nowStr().slice(0, 10);
+  const cached = await getAsync('SELECT * FROM fx_rates WHERE from_currency=? AND to_currency=? AND rate_date=? ORDER BY fetched_at DESC LIMIT 1', [from, to, today]);
+  if (cached) return { ...cached, stale: false };
+  try {
+    let source = 'frankfurter.app';
+    const response = await fetch(`https://api.frankfurter.app/latest?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+    const data = response.ok ? await response.json() : null;
+    let rate = data?.rates?.[to];
+    if (!rate) {
+      const fallback = await fetch(`https://open.er-api.com/v6/latest/${encodeURIComponent(from)}`);
+      if (!fallback.ok) throw new Error('FX API error ' + fallback.status);
+      const fallbackData = await fallback.json();
+      rate = fallbackData?.rates?.[to];
+      source = 'open.er-api.com';
+    }
+    if (!rate) throw new Error('No rate in FX response');
+    const now = nowStr();
+    await runAsync('INSERT INTO fx_rates(id,from_currency,to_currency,rate,rate_date,source,fetched_at,fetched_by) VALUES(?,?,?,?,?,?,?,?)', [uuid(), from, to, rate, today, source, now, actorId || null]);
+    return { from_currency: from, to_currency: to, rate, rate_date: today, source, fetched_at: now, stale: false };
+  } catch (_) {
+    const lastKnown = await getAsync('SELECT * FROM fx_rates WHERE from_currency=? AND to_currency=? ORDER BY rate_date DESC, fetched_at DESC LIMIT 1', [from, to]);
+    return lastKnown ? { ...lastKnown, stale: true } : null;
+  }
+}
+
+app.get('/api/fx-rate', auth, sectionGateAny(['rfq-analysis', 'sourcing-bin', 'procurement-bin']), asyncRoute(async (req, res) => {
+  const { from, to } = req.query;
+  if (!from || !to) return res.status(400).json({ error: 'from and to are required' });
+  const result = await getFxRate(String(from).toUpperCase(), String(to).toUpperCase(), req.session.user.id);
+  if (!result) return res.status(502).json({ error: 'No FX rate available — enter one manually', from, to });
+  res.json(result);
+}));
+
+app.post('/api/fx-rate/override', auth, sectionGateAny(['rfq-analysis', 'sourcing-bin', 'procurement-bin']), asyncRoute(async (req, res) => {
+  const { from, to, rate } = req.body;
+  if (!from || !to || !rate || isNaN(rate)) return res.status(400).json({ error: 'from, to and a numeric rate are required' });
+  const now = nowStr();
+  await runAsync('INSERT INTO fx_rates(id,from_currency,to_currency,rate,rate_date,source,fetched_at,fetched_by) VALUES(?,?,?,?,?,?,?,?)', [uuid(), String(from).toUpperCase(), String(to).toUpperCase(), Number(rate), now.slice(0, 10), 'manual', now, req.session.user.id]);
+  saveNow();
+  res.json({ from_currency: from, to_currency: to, rate: Number(rate), rate_date: now.slice(0, 10), source: 'manual', fetched_at: now, stale: false });
+}));
+
+// ── RFQ ANALYSIS ─────────────────────────────────────────────
+app.get('/api/rfq', auth, asyncRoute(async (req, res) => {
+  const items = await allAsync(`SELECT ei.id, ei.enquiry_id, e.customer_id, e.assigned_to
+    FROM enquiry_items ei JOIN enquiries e ON e.id=ei.enquiry_id
+    WHERE e.created_at >= '2026-09-05'`);
+  for (const item of items) {
+    const existing = await getAsync('SELECT id FROM rfq_lines WHERE id=?', [item.id]);
+    if (!existing) await ensureRfqLine(item.id);
+    if (item.assigned_to) await runAsync('UPDATE rfq_lines SET assigned_to=?, updated_at=? WHERE id=?', [item.assigned_to, nowStr(), item.id]);
+  }
+  const rows = await allAsync(`SELECT rl.*, e.created_at AS enquiry_created_at, COALESCE(e.sourcing_no, e.id) AS enquiry_no, e.priority,
+    CASE WHEN rl.comparison_completed_at IS NOT NULL AND rl.comparison_completed_at != '' THEN true ELSE false END AS comparison_complete
+    FROM rfq_lines rl JOIN enquiries e ON e.id=rl.enquiry_id ORDER BY rl.created_at DESC`);
+  for (const row of rows) {
+    row.quotes = await allAsync('SELECT * FROM rfq_quotes WHERE rfq_line_id=? ORDER BY created_at', [row.id]);
+    const snap = await getAsync('SELECT comparison_mode FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC LIMIT 1', [row.id]);
+    if (snap && snap.comparison_mode) {
+      try { row.comparison_priority = JSON.parse(snap.comparison_mode); } catch(e) { row.comparison_priority = ['price','lead','terms']; }
+    }
+  }
+  res.json(rows);
+}));
+
+async function ensureRfqLine(lineId) {
+  let line = await getAsync('SELECT * FROM rfq_lines WHERE id=?', [lineId]);
+  if (line) return line;
+  const item = await getAsync(`SELECT ei.*, e.customer_id, e.created_at AS enquiry_created_at, COALESCE(e.sourcing_no,e.id) AS enquiry_no
+    FROM enquiry_items ei JOIN enquiries e ON e.id=ei.enquiry_id WHERE ei.id=?`, [lineId]);
+  if (!item) return null;
+  const now = nowStr();
+  await runAsync(`INSERT INTO rfq_lines(id,enquiry_id,enquiry_item_id,customer_id,assigned_to,component,ipn,manufacturer,date_code,quantity,target_price,target_currency,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [item.id,item.enquiry_id,item.id,item.customer_id,item.assigned_to||null,item.component,item.ipn||'',item.manufacturer||'',item.date_code||'',item.quantity,item.target_price,item.target_currency||'INR','open',now,now]);
+  const sourced = await allAsync(`SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? AND sourced_price IS NOT NULL`, [item.id]);
+  for (const quote of sourced) {
+    await runAsync(`INSERT INTO rfq_quotes(id,rfq_line_id,supplier_id,price,currency,available_qty,lead_days,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`, [uuid(), item.id, quote.supplier_id, quote.sourced_price, quote.sourced_currency || 'INR', null, quote.lead_time ? Number.parseInt(quote.lead_time, 10) || null : null, now, now]);
+  }
+  return getAsync('SELECT * FROM rfq_lines WHERE id=?', [lineId]);
+}
+
+app.get('/api/rfq/ciflux-history', auth, asyncRoute(async (req, res) => {
+  const component = (req.query.component || '').trim().toLowerCase();
+  const manufacturer = (req.query.manufacturer || '').trim().toLowerCase();
+  if (!component || !manufacturer) return res.json([]);
+  
+  const purchases = await allAsync(`
+    SELECT oi.id, oi.procurement_price AS price, oi.currency, oi.qty AS quantity, 
+           DATE(oi.order_date) AS awardedAt, s.name AS supplierName, s.id AS supplierId
+    FROM order_items oi
+    JOIN suppliers s ON s.id = oi.supplier_id
+    WHERE LOWER(TRIM(oi.component)) = ? AND LOWER(TRIM(oi.manufacturer)) = ?
+      AND oi.procurement_price IS NOT NULL
+      AND oi.line_status NOT IN ('negotiating', 'confirmed', 'procurement', 'payment')
+    ORDER BY oi.order_date DESC
+    LIMIT 3
+  `, [component, manufacturer]);
+  
+  res.json(purchases);
+}));
+app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
+  const line = await ensureRfqLine(req.params.lineId);
+  if (!line) return res.status(404).json({ error: 'RFQ line not found' });
+  line.quotes = await allAsync('SELECT * FROM rfq_quotes WHERE rfq_line_id=? ORDER BY created_at', [line.id]);
+  const enquiry = await getAsync('SELECT created_at AS enquiry_created_at, COALESCE(sourcing_no,id) AS enquiry_no FROM enquiries WHERE id=?', [line.enquiry_id]);
+  line.enquiry_created_at = enquiry?.enquiry_created_at || line.enquiry_created_at;
+  line.enquiry_no = enquiry?.enquiry_no || line.enquiry_id;
+  line.comparison_complete = Boolean(line.comparison_completed_at);
+  line.award_snapshots = await allAsync('SELECT * FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC', [line.id]);
+  res.json(line);
+}));
+
+app.post('/api/rfq/:lineId/quotes', auth, asyncRoute(async (req, res) => {
+  const line = await ensureRfqLine(req.params.lineId); if (!line) return res.status(404).json({ error: 'RFQ line not found' });
+  const d = req.body, now = nowStr();
+  if (!d.supplier_id) return res.status(400).json({ error: 'Supplier required' });
+  if (d.id) await runAsync('UPDATE rfq_quotes SET price=?,currency=?,available_qty=?,lead_days=?,updated_at=? WHERE id=? AND rfq_line_id=?', [d.price ?? null,d.currency||'USD',d.available_qty ?? null,d.lead_days ?? null,now,d.id,line.id]);
+  else await runAsync('INSERT INTO rfq_quotes(id,rfq_line_id,supplier_id,price,currency,available_qty,lead_days,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,d.supplier_id,d.price ?? null,d.currency||'USD',d.available_qty ?? null,d.lead_days ?? null,req.session.user.id,now,now]);
+  saveNow(); res.json({ ok: true });
+}));
+
+app.post('/api/rfq/:lineId/save-comparison', auth, asyncRoute(async (req, res) => {
+  const line = await ensureRfqLine(req.params.lineId); if (!line) return res.status(404).json({ error: 'RFQ line not found' });
+  const previous = await getAsync('SELECT MAX(version) AS version FROM rfq_award_snapshots WHERE rfq_line_id=?', [line.id]);
+  const now = nowStr();
+  await runAsync('INSERT INTO rfq_award_snapshots(id,rfq_line_id,version,kind,comparison_currency,comparison_mode,awarded_supplier_id,fx_rates_used,quotes_snapshot,computed_results,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,Number(previous?.version||0)+1,'saved',req.body.comparison_currency||'USD',JSON.stringify(req.body.comparison_priority||['price','lead','terms']),null,JSON.stringify(req.body.fx_rates_used||{}),JSON.stringify(req.body.quotes_snapshot||[]),JSON.stringify(req.body.computed_results||{}),req.session.user.id,now]);
+  await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, updated_at=? WHERE id=?', [now, now, line.id]);
+  saveNow(); res.json({ ok: true });
+}));
+
 // ── QUOTES ───────────────────────────────────────────────────
 // Returns next QT number: QT-2425-0001
 app.get('/api/next-quote-no', auth, asyncRoute(async (req, res) => {
@@ -2337,6 +2471,7 @@ const DELETABLE_MODULES = {
   orders:    { label:'All Orders',        tables:['shipment_items','shipments','grn_records','order_history','order_documents','customer_shipping','supplier_order_items','supplier_orders','order_items','orders','customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files'] },
   enquiries: { label:'All Enquiries',     tables:['enquiry_merges','enquiry_history','enquiry_sourcing','enquiry_items','enquiries'] },
   quotes:    { label:'All Quotes',        tables:['quote_history','quotes'] },
+  rfq:       { label:'All RFQ Data',      tables:['rfq_award_snapshots','rfq_quotes','rfq_lines'] },
   sourcing:  { label:'All Sourcing Data', tables:['enquiry_sourcing'] },
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
   finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
@@ -2472,7 +2607,7 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
     'order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits',
     'order_history','order_documents','customer_shipping','supplier_order_items',
     'supplier_orders','order_items','orders','enquiry_merges','enquiry_history','enquiry_sourcing',
-    'enquiry_items','enquiries','quote_history','quotes','approval_actions','approval_requests','approval_workflows',
+    'enquiry_items','enquiries','quote_history','quotes','rfq_award_snapshots','rfq_quotes','rfq_lines','approval_actions','approval_requests','approval_workflows',
     'customer_payments','supplier_net_payment_logs','finance_queue','po_requests','app_files','stock_inventory'];
   // Soft master delete — snapshot everything into one restorable batch instead of
   // hard-wiping. Blobs are kept so uploaded files survive a restore.
@@ -2621,6 +2756,14 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
     delivery_hub:    await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('delivery_hub','transit_hub','partial_hub')"),
     quote_bin:       await g("SELECT COUNT(*) as c FROM quotes WHERE status='active'"),
     orders_new:      await g("SELECT COUNT(*) as c FROM orders WHERE status IN ('open','draft')"),
+    rfq_open:        await g(`
+      SELECT COUNT(DISTINCT e.id) as c 
+      FROM enquiries e
+      JOIN enquiry_items ei ON e.id = ei.enquiry_id
+      LEFT JOIN rfq_lines rl ON rl.id = ei.id
+      WHERE e.created_at >= '2026-09-05' 
+      AND (rl.comparison_completed_at IS NULL OR rl.comparison_completed_at = '')
+    `),
   });
 }));
 

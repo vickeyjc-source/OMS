@@ -13,6 +13,7 @@ const MODULES = [
   { key:'orders',    label:'All Orders',        icon:'📦', desc:'Restores all orders, line items, supplier POs, shipping records, order history, customer payments, finance queue, PO requests and uploaded files.', color:'var(--red)' },
   { key:'enquiries', label:'All Enquiries',     icon:'📋', desc:'Restores all enquiries, enquiry items, sourcing data and enquiry history.',                color:'var(--red)' },
   { key:'quotes',    label:'All Quotes',        icon:'📄', desc:'Restores all quote records back to the Quote Bin.',                                         color:'var(--red)' },
+  { key:'rfq',       label:'All RFQ Data',      icon:'📊', desc:'Restores all RFQ lines, supplier quotes and comparison snapshots back to RFQ Analysis.', color:'var(--red)' },
   { key:'sourcing',  label:'Sourcing Data Only',icon:'🔍', desc:'Restores only sourcing rows (supplier prices/availability).',                              color:'var(--amber,#d97706)' },
   { key:'approvals', label:'All Approvals',     icon:'✅', desc:'Restores all approval workflows, requests and actions.',                                   color:'var(--amber,#d97706)' },
   { key:'finance',   label:'All Finance Data',  icon:'💰', desc:'Restores all customer payments, supplier finance queue entries and PO requests.',           color:'var(--amber,#d97706)' },

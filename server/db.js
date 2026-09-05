@@ -543,6 +543,32 @@ async function createSchema() {
       performed_by_name TEXT DEFAULT '',
       performed_at TEXT NOT NULL       -- full timestamp incl. seconds
     );
+    CREATE TABLE IF NOT EXISTS rfq_lines (
+      id TEXT PRIMARY KEY, enquiry_id TEXT NOT NULL, enquiry_item_id TEXT NOT NULL,
+      customer_id TEXT NOT NULL, assigned_to TEXT, component TEXT DEFAULT '',
+      ipn TEXT DEFAULT '', manufacturer TEXT DEFAULT '', date_code TEXT DEFAULT '',
+      quantity NUMERIC DEFAULT 0, target_price NUMERIC, target_currency TEXT DEFAULT 'INR',
+      status TEXT NOT NULL DEFAULT 'open', awarded_supplier_id TEXT DEFAULT '',
+      awarded_at TEXT DEFAULT '', notes TEXT DEFAULT '', comparison_completed_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rfq_quotes (
+      id TEXT PRIMARY KEY, rfq_line_id TEXT NOT NULL, supplier_id TEXT NOT NULL,
+      price NUMERIC, currency TEXT DEFAULT 'INR', available_qty NUMERIC, lead_days NUMERIC,
+      notes TEXT DEFAULT '', created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS rfq_award_snapshots (
+      id TEXT PRIMARY KEY, rfq_line_id TEXT NOT NULL, version INTEGER DEFAULT 1,
+      kind TEXT DEFAULT 'saved', comparison_currency TEXT NOT NULL, comparison_mode TEXT DEFAULT 'price',
+      awarded_supplier_id TEXT, fx_rates_used JSONB NOT NULL, quotes_snapshot JSONB NOT NULL,
+      computed_results JSONB NOT NULL, created_by TEXT, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fx_rates (
+      id TEXT PRIMARY KEY, from_currency TEXT NOT NULL, to_currency TEXT NOT NULL,
+      rate NUMERIC NOT NULL, rate_date TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'frankfurter.app',
+      fetched_at TEXT NOT NULL, fetched_by TEXT
+    );
+    ALTER TABLE rfq_lines ADD COLUMN IF NOT EXISTS comparison_completed_at TEXT DEFAULT '';
   `);
 }
 

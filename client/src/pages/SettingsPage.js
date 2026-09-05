@@ -5,6 +5,7 @@ import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import { CURRENCIES } from '../utils/rfqScoring';
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -18,8 +19,10 @@ export default function SettingsPage() {
   const [newTmpl, setNewTmpl] = useState(null);
   const [saving, setSaving] = useState(false);
   const [confirmDeleteTmpl, setConfirmDeleteTmpl] = useState(null); // template id to delete
+  const [comparisonCurrency, setComparisonCurrency] = useState(null);
 
   const effectiveMode = poMode ?? settings.po_mode ?? 'external';
+  const effectiveComparisonCurrency = comparisonCurrency ?? settings.default_comparison_currency ?? 'INR';
 
   const saveSetting = async (key, value) => {
     setSaving(true);
@@ -56,6 +59,25 @@ export default function SettingsPage() {
     <div style={{maxWidth:900}}>
       <h1 style={{fontSize:22,fontWeight:800,marginBottom:4}}>⚙ Settings</h1>
       <p style={{color:'var(--text2)',fontSize:13,marginBottom:24}}>Admin configuration — only managers and admins can change these settings.</p>
+
+      <div className="card" style={{marginBottom:20}}>
+        <div className="card-title">RFQ Comparison Currency</div>
+        <p style={{fontSize:13,color:'var(--text2)',marginBottom:14}}>
+          Choose the default currency used when comparing supplier quotes. Analysts can still change the currency for an individual comparison.
+        </p>
+        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <select className="input" style={{width:120}} value={effectiveComparisonCurrency} onChange={e=>setComparisonCurrency(e.target.value)}>
+            {CURRENCIES.map(currency=><option key={currency} value={currency}>{currency}</option>)}
+          </select>
+          {comparisonCurrency && comparisonCurrency !== settings.default_comparison_currency && (
+            <>
+              <button className="btn btn-sm btn-primary" disabled={saving} onClick={()=>saveSetting('default_comparison_currency', comparisonCurrency)}>{saving?'Saving…':'Save default'}</button>
+              <button className="btn btn-sm" onClick={()=>setComparisonCurrency(null)}>Cancel</button>
+            </>
+          )}
+          <span style={{fontSize:12,color:'var(--text3)'}}>Current default: <strong style={{color:'var(--accent)'}}>{settings.default_comparison_currency || 'INR'}</strong></span>
+        </div>
+      </div>
 
       {/* ── PO Mode ── */}
       <div className="card" style={{marginBottom:20}}>

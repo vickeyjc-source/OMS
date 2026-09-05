@@ -5,6 +5,7 @@ export const SECTION_DEFINITIONS = [
   { key: 'quotes', label: 'Quotes', path: '/quotes', group: 'Enquiries' },
   { key: 'orders', label: 'All Orders', path: '/orders', group: 'Orders' },
   { key: 'new-order', label: 'New Order', path: '/orders/new', group: 'Orders' },
+  { key: 'rfq-analysis', label: 'RFQ Analysis', path: '/rfq-analysis', group: 'Bins' },
   { key: 'sourcing-bin', label: 'Sourcing Bin', path: '/sourcing-bin', group: 'Bins' },
   { key: 'procurement-bin', label: 'Procurement Bin', path: '/procurement-bin', group: 'Bins' },
   { key: 'delivery-hub', label: 'Delivery Hub', path: '/delivery-hub', group: 'Bins' },

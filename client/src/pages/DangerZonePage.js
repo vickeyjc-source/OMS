@@ -10,6 +10,7 @@ const MODULES = [
   { key:'orders',    label:'All Orders',        icon:'📦', desc:'Deletes all orders, line items, supplier POs, shipping records, order history, customer payments, finance queue, PO requests and uploaded files.',   color:'var(--red)' },
   { key:'enquiries', label:'All Enquiries',      icon:'📋', desc:'Deletes all enquiries, enquiry items, sourcing data and enquiry history.',             color:'var(--red)' },
   { key:'quotes',    label:'All Quotes',         icon:'📄', desc:'Deletes all quote records from the Quote Bin.',                                        color:'var(--red)' },
+  { key:'rfq',       label:'All RFQ Analysis',   icon:'🔬', desc:'Deletes all RFQ lines, supplier quotes, and comparison snapshots from the RFQ Analysis page.', color:'var(--red)' },
   { key:'sourcing',  label:'Sourcing Data Only', icon:'🔍', desc:'Deletes only sourcing rows (supplier prices/availability) — keeps enquiries intact.',  color:'var(--amber,#d97706)' },
   { key:'approvals', label:'All Approvals',      icon:'✅', desc:'Deletes all approval workflows, requests and actions.',                                color:'var(--amber,#d97706)' },
   { key:'finance',   label:'All Finance Data',   icon:'💰', desc:'Deletes all customer payments, supplier finance queue entries and PO requests — keeps orders intact.',  color:'var(--amber,#d97706)' },
