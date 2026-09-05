@@ -641,11 +641,10 @@ export function SupplierModal({ supplier, linecards, onClose, onSaved, initialTa
           <div style={{display:'flex',gap:8,marginRight:'auto',alignItems:'center'}}>
             {stepIdx>0 && <button className="btn" onClick={goBack}>← Back</button>}
             {!isNew && <button className="btn btn-danger btn-sm" onClick={()=>setConfirmDelete(true)}>Delete</button>}
-          </div>
-          <button className="btn" onClick={onClose}>Cancel</button>
-          {isLastStep ? (
+            <button className="btn" onClick={onClose}>Cancel</button>
             <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>{mutation.isPending?'Saving…':'Save Supplier'}</button>
-          ) : (
+          </div>
+          {!isLastStep && (
             <button className="btn btn-primary" onClick={goNext}>Continue →</button>
           )}
         </div>

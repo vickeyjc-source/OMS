@@ -9,6 +9,22 @@ import { StatusBadge, fmtDate } from '../utils/helpers';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtM = (n) => '₹' + (parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtCurrency = (n, currency) => {
+  const symbols = { INR:'₹', USD:'$', EUR:'€', SGD:'S$', GBP:'£' };
+  return `${symbols[currency] || currency}${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(n || 0)}`;
+};
+function ValuePills({ totals, size = 13 }) {
+  const entries = Object.entries(totals || {}).filter(([, value]) => value > 0);
+  if (!entries.length) return <span style={{color:'var(--text3)',fontSize:12}}>—</span>;
+  const colors = { INR:'#1a6b40', USD:'#1b4f9e', EUR:'#5c3b9a', SGD:'#0b6b6b', GBP:'#8c3d00' };
+  return <div style={{display:'flex',flexWrap:'wrap',gap:5}}>
+    {entries.map(([currency, value]) => (
+      <span key={currency} style={{background:colors[currency] || '#444',color:'#fff',padding:'2px 9px',borderRadius:999,fontSize:size-1,fontWeight:600,fontFamily:'DM Mono,monospace'}}>
+        {fmtCurrency(value, currency)}
+      </span>
+    ))}
+  </div>;
+}
 const today   = () => new Date().toISOString().slice(0,10);
 const daysDiff = d => {
   if (!d) return null;
@@ -1556,6 +1572,55 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
   );
 }
 
+function CombinedPaymentHistory({ payments, onSelect }) {
+  if (!payments.length) {
+    return <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No payments recorded yet.</div>;
+  }
+  return (
+    <div style={{display:'grid',gap:8}}>
+      {payments.slice(0,100).map(({ type, item: payment }) => {
+        const isCustomer = type === 'customer';
+        const currency = isCustomer ? (payment.currency || 'INR') : (payment.confirmed_currency || payment.currency || 'INR');
+        const amount = isCustomer
+          ? (parseFloat(payment.amount) || 0)
+          : (payment.payment_kind === 'net'
+            ? (parseFloat(payment.amount) || 0)
+            : (parseFloat(payment.actual_amount) || parseFloat(payment.paid_amount) || parseFloat(payment.amount) || 0));
+        const reference = payment.payment_ref || '—';
+        const date = payment.payment_date || payment.paid_at || payment.recorded_at;
+        return (
+          <div key={`${type}-${payment.id}`} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
+            border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
+            onClick={()=>onSelect({type, item:payment})}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,
+                  background:isCustomer?'var(--accent-lt,#eff6ff)':'var(--teal-lt,#f0fdfa)',
+                  color:isCustomer?'var(--accent)':'var(--teal,#0d9488)',fontWeight:700}}>
+                  {isCustomer ? 'Customer' : 'Supplier'}
+                </span>
+                <span className="mono" style={{fontWeight:700,color:isCustomer?'var(--accent)':'var(--teal,#0d9488)'}}>
+                  {isCustomer ? payment.order_id : (payment.internal_po_no || payment.supplier_order_id)}
+                </span>
+              </div>
+              <span style={{fontWeight:800,color:'var(--green)',fontSize:14}}>{fmtM(amount, currency)}</span>
+            </div>
+            <div style={{color:'var(--text2)'}}>
+              {isCustomer ? (payment.customer_name || payment.customer_id || 'Customer') : (payment.supplier_name || payment.supplier_id || 'Supplier')}
+              {' · '}{payment.payment_method || 'Payment'}{' · '}Ref: {reference}{' · '}{fmtDate(date)}
+            </div>
+            {(payment.po_number || payment.internal_po_no || payment.supplier_ref) && (
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
+                {isCustomer ? `Customer PO: ${payment.po_number || '—'}` : `Supplier PO: ${payment.internal_po_no || payment.supplier_ref || '—'}`}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main Finance Page ─────────────────────────────────────────────────────────
 export default function FinancePage() {
   const { user } = useAuth();
@@ -1722,36 +1787,54 @@ export default function FinancePage() {
     o.customer_payment_status !== 'paid' &&
     (o.customer_payment_status === 'payment_recorded' || o.status === 'payment_approval' || (Number(o.balance_due) || 0) > 0.009)
   );
-  const custNet     = custQueue.filter(o =>
-    o.status !== 'payment_approval' &&
-    !isAdvanceTerms(o.payment_terms) &&
-    !isPartialAdvance(o.payment_terms) &&
-    isNetTerms(o.payment_terms)
-  );
-  const custOther   = custQueue.filter(o =>
-    o.status !== 'payment_approval' &&
-    !isAdvanceTerms(o.payment_terms) &&
-    !isPartialAdvance(o.payment_terms) &&
-    !isNetTerms(o.payment_terms) &&
-    o.payment_terms
-  );
+  const custNet     = custQueue.filter(o => {
+    if (o.status === 'payment_approval') return false;
+    if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) return false;
+    if (!isNetTerms(o.payment_terms)) return false;
+    if (o.customer_payment_status === 'paid') return false;
+    const bal = o.balance_due !== undefined ? Number(o.balance_due) : Math.max(0, (Number(o.order_total || o.total_amount || 0)) - Number(o.total_paid || 0));
+    return bal > 0.009;
+  });
+  const custOther   = custQueue.filter(o => {
+    if (o.status === 'payment_approval') return false;
+    if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms) || isNetTerms(o.payment_terms)) return false;
+    if (!o.payment_terms) return false;
+    if (o.customer_payment_status === 'paid') return false;
+    const bal = o.balance_due !== undefined ? Number(o.balance_due) : Math.max(0, (Number(o.order_total || o.total_amount || 0)) - Number(o.total_paid || 0));
+    return bal > 0.009;
+  });
   const supAdvance  = supQueue.advance || [];
-  const supNet      = supQueue.net || [];
+  const supNet      = (supQueue.net || []).filter(r => {
+    if (r.status === 'paid') return false;
+    const total = parseFloat(r.confirmed_price || r.total_amount || 0);
+    const paid = parseFloat(r.net_total_paid || 0);
+    const balance = Math.max(0, total - paid);
+    if (total > 0 && balance <= 0.009) return false;
+    return true;
+  });
 
-  // Stat cards
-  const stats = [
-    { label:'Customer Advance Due',    val: custAdvance.filter(o=>o.customer_payment_status!=='paid').length,  color:'var(--red)' },
-    { label:'Customer Net Due',        val: custNet.filter(o=>o.customer_payment_status!=='paid').length,      color:'var(--amber,#d97706)' },
-    { label:'Supplier Advance Blocked',val: supAdvance.length,                                                  color:'var(--red)' },
-    { label:'Supplier Net Due',        val: supNet.filter(r=>r.days_due!==null&&r.days_due<=30).length,        color:'var(--amber,#d97706)' },
-  ];
+  const paidTotals = useMemo(() => {
+    const totals = { customer: {}, supplier: {} };
+    (history.customer || []).forEach(payment => {
+      const currency = payment.currency || 'INR';
+      totals.customer[currency] = (totals.customer[currency] || 0) + (parseFloat(payment.amount) || 0);
+    });
+    (history.supplier || []).forEach(payment => {
+      const currency = payment.confirmed_currency || payment.currency || 'INR';
+      const amount = payment.payment_kind === 'net'
+        ? (parseFloat(payment.amount) || 0)
+        : (parseFloat(payment.actual_amount) || parseFloat(payment.paid_amount) || parseFloat(payment.amount) || 0);
+      totals.supplier[currency] = (totals.supplier[currency] || 0) + amount;
+    });
+    return totals;
+  }, [history.customer, history.supplier]);
 
   const TABS = [
-    { k:'cust-advance', icon:'🧾', label:'Customer Advance', count:custAdvance.length },
-    { k:'cust-net',     icon:'📅', label:'Customer Net/Other', count:custNet.length + custOther.length },
-    { k:'sup-advance',  icon:'💸', label:'Supplier Advance', count:supAdvance.length },
-    { k:'sup-net',      icon:'📅', label:'Supplier Net', count:supNet.filter(r=>r.status!=='paid').length },
-    { k:'po-requests',  icon:'📋', label:'PO Requests', count:pendingPORequests.length },
+    { k:'cust-advance', icon:'🧾', label:'Customer Advance' },
+    { k:'cust-net',     icon:'📅', label:'Customer Net/Other' },
+    { k:'sup-advance',  icon:'💸', label:'Supplier Advance' },
+    { k:'sup-net',      icon:'📅', label:'Supplier Net' },
+    { k:'po-requests',  icon:'📋', label:'PO Requests' },
     { k:'history',      icon:'✅', label:'History' },
   ];
 
@@ -1806,6 +1889,11 @@ export default function FinancePage() {
     });
   }, [history.supplier, historyFilter, hq]);
 
+  const combinedHistory = useMemo(() => [
+    ...filteredCustomerHistory.map(item => ({ type:'customer', item, date:item.payment_date || item.recorded_at })),
+    ...filteredSupplierHistory.map(item => ({ type:'supplier', item, date:item.payment_date || item.paid_at }))
+  ].sort((a,b) => new Date(b.date || 0) - new Date(a.date || 0)), [filteredCustomerHistory, filteredSupplierHistory]);
+
   const sq = search.toLowerCase();
   const filterCust = arr => !search ? arr : arr.filter(o =>
     (o.id||'').toLowerCase().includes(sq) ||
@@ -1820,12 +1908,13 @@ export default function FinancePage() {
 
   return (
     <div>
-      {/* Stat cards */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:20}}>
-        {stats.map(s=>(
-          <div key={s.label} className="stat-card" style={{borderLeft:`3px solid ${s.color}`}}>
-            <div className="stat-label">{s.label}</div>
-            <div className="stat-val" style={{fontSize:24,color:s.color}}>{s.val}</div>
+      {/* Paid totals */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:12,marginBottom:20}}>
+        {[{label:'Total Customer Paid',key:'customer',color:'var(--accent)',icon:'💳'}, {label:'Total Supplier Paid',key:'supplier',color:'var(--teal,#0d9488)',icon:'💸'}].map(card=>(
+          <div key={card.key} className="stat-card" style={{borderLeft:`3px solid ${card.color}`}}>
+            <div className="stat-label">{card.icon} {card.label}</div>
+            <ValuePills totals={paidTotals[card.key]} size={16}/>
+            <div className="stat-sub">Recorded payments across all history</div>
           </div>
         ))}
       </div>
@@ -2141,7 +2230,7 @@ export default function FinancePage() {
             Supplier POs on net payment terms — track due dates and record settlements.
           </div>
           {supLoading ? <div style={{padding:30,textAlign:'center',color:'var(--text3)'}}>Loading…</div> :
-          filterSup(supNet.filter(r=>r.status!=='paid')).length === 0 ? (
+          filterSup(supNet).length === 0 ? (
             <div style={{padding:40,textAlign:'center',color:'var(--text3)'}}>
               <div style={{fontSize:32,marginBottom:8}}>✅</div>No net-term supplier payments pending
             </div>
@@ -2155,7 +2244,7 @@ export default function FinancePage() {
                 <th>Due Date</th><th>Status</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
-                {filterSup(supNet.filter(r=>r.status!=='paid')).map(r=>{
+                {filterSup(supNet).map(r=>{
                   const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                   const daysLeft = r.payment_due_date ? daysDiff(r.payment_due_date) : null;
                   const isPaid = r.status === 'paid';
@@ -2237,8 +2326,8 @@ export default function FinancePage() {
       {/* ── Tab: History ── */}
       {tab==='history' && (
         <div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:20}}>
-            <div style={{gridColumn:'1 / -1',display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr',gap:10,marginBottom:2}}>
+          <div>
+            <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr',gap:10,marginBottom:14}}>
               <input className="input" placeholder="Search order, customer/supplier, PO, PI, ref..."
                 value={historyFilter.query}
                 onChange={e=>setHistoryFilter(f=>({...f, query:e.target.value}))}/>
@@ -2252,125 +2341,11 @@ export default function FinancePage() {
               <input className="input" type="date" value={historyFilter.to}
                 onChange={e=>setHistoryFilter(f=>({...f, to:e.target.value}))}/>
             </div>
-            {/* Customer payments */}
-            <div>
-              <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:'var(--accent)'}}>
-                Customer Receipts ({filteredCustomerHistory.length})
-              </div>
-              {filteredCustomerHistory.length === 0 ? (
-                <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No customer payments recorded yet.</div>
-              ) : (
-                <div style={{display:'grid',gap:8}}>
-                  {filteredCustomerHistory.slice(0,50).map(p=>(
-                    <div key={p.id} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
-                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
-                      onClick={()=>setHistoryDetail({ type:'customer', item:p })}>
-                      <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-                        <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{p.order_id}</span>
-                        <span style={{fontWeight:800,color:'var(--green)'}}>{fmtM(p.amount, p.currency)}</span>
-                      </div>
-                      <div style={{color:'var(--text2)'}}>
-                        {p.payment_method} · Ref: {p.payment_ref||'—'} · {fmtDate(p.payment_date)}
-                      </div>
-                      {p.po_number && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Customer PO: {p.po_number}</div>}
-                      {p.pi_no && <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>PI: {p.pi_no}</div>}
-                      {(() => {
-                        try {
-                          const charges = typeof p.additional_charges === 'string' ? JSON.parse(p.additional_charges) : (p.additional_charges || []);
-                          if (!Array.isArray(charges) || charges.length === 0) return null;
-                          return (
-                            <div style={{marginTop:4,fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>
-                              + Charges: {charges.map(c=>c.name+' '+fmtM(c.amount, p.currency)).join(' | ')}
-                            </div>
-                          );
-                        } catch(_) { return null; }
-                      })()}
-                      {p.amount_change_note && (
-                        <div style={{marginTop:3,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
-                          Note: {p.amount_change_note}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{fontWeight:700,fontSize:13}}>All Paid History ({combinedHistory.length})</div>
+              <div style={{fontSize:11,color:'var(--text3)'}}>Customer and supplier payments</div>
             </div>
-            {/* Supplier payments */}
-            <div>
-              <div style={{fontWeight:700,fontSize:13,marginBottom:10,color:'var(--teal,#0d9488)'}}>
-                Supplier Payments ({filteredSupplierHistory.length})
-              </div>
-              {filteredSupplierHistory.length === 0 ? (
-                <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No supplier payments recorded yet.</div>
-              ) : (
-                <div style={{display:'grid',gap:8}}>
-                  {filteredSupplierHistory.slice(0,50).map(p=>(
-                    <div key={p.id} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
-                      border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
-                      onClick={()=>setHistoryDetail({ type:'supplier', item:p })}>
-                      {(() => {
-                        const cur       = p.confirmed_currency || p.currency || 'INR';
-                        // Headline = amount actually paid incl. additional charges.
-                        // advance: actual_amount/paid_amount carry charges; net: amount already incl. charges.
-                        const thisAmt   = p.payment_kind === 'net'
-                          ? (parseFloat(p.amount) || 0)
-                          : (parseFloat(p.actual_amount) || parseFloat(p.paid_amount) || parseFloat(p.amount) || 0);
-                        const grandTotal= parseFloat(p.grand_total) || 0;
-                        const remaining = parseFloat(p.remaining_snapshot) ?? Math.max(0, grandTotal - thisAmt);
-                        const isPartial = p.payment_kind === 'net' && remaining > 0;
-                        return (<>
-                          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
-                            <span className="mono" style={{fontWeight:700,color:'var(--teal,#0d9488)'}}>{p.internal_po_no||p.supplier_order_id}</span>
-                            <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                              {isPartial
-                                ? <span style={{fontSize:10,padding:'1px 7px',borderRadius:99,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:700}}>partial</span>
-                                : p.payment_kind==='net' && <span style={{fontSize:10,padding:'1px 7px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:700}}>settled</span>
-                              }
-                              <span style={{fontWeight:800,color:'var(--green)',fontSize:14}}>{fmtM(thisAmt, cur)}</span>
-                            </div>
-                          </div>
-                          {p.supplier_name && <div style={{fontWeight:600,color:'var(--text2)',marginBottom:2}}>{p.supplier_name}</div>}
-                          <div style={{color:'var(--text2)'}}>Ref: {p.payment_ref||'—'} · {fmtDate(p.paid_at||p.payment_date)}</div>
-                          {p.payment_kind === 'net' && grandTotal > 0 && (
-                            <div style={{marginTop:6,padding:'5px 8px',borderRadius:4,
-                              background: remaining > 0 ? 'var(--amber-lt,#fffbeb)' : 'var(--green-lt)',
-                              display:'flex',gap:16,flexWrap:'wrap'}}>
-                              <span style={{fontSize:11,color:'var(--text2)'}}>
-                                Total due: <strong>{fmtM(grandTotal, cur)}</strong>
-                              </span>
-                              <span style={{fontSize:11,color:'var(--green)',fontWeight:700}}>
-                                Paid: {fmtM(parseFloat(p.total_paid_snapshot)||thisAmt, cur)}
-                              </span>
-                              {remaining > 0
-                                ? <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:700}}>Still needed: {fmtM(remaining, cur)}</span>
-                                : <span style={{fontSize:11,color:'var(--green)',fontWeight:700}}>✓ Fully settled</span>
-                              }
-                            </div>
-                          )}
-                              {p.supplier_ref && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>PI: {p.supplier_ref}{p.zoho_po_number ? ` · Zoho: ${p.zoho_po_number}` : ''}</div>}
-                          {(() => {
-                            try {
-                              const charges = typeof p.additional_charges === 'string' ? JSON.parse(p.additional_charges) : (p.additional_charges || []);
-                              if (!Array.isArray(charges) || charges.length === 0) return null;
-                              return (
-                                <div style={{marginTop:4,fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>
-                                  + Charges: {charges.map(c=>c.name+' '+fmtM(c.amount)).join(' | ')}
-                                </div>
-                              );
-                            } catch(_) { return null; }
-                          })()}
-                          {p.amount_change_note && (
-                            <div style={{marginTop:3,fontSize:11,color:'var(--red)',fontStyle:'italic'}}>
-                              Note: {p.amount_change_note}
-                            </div>
-                          )}
-                        </>);
-                      })()}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <CombinedPaymentHistory payments={combinedHistory} onSelect={setHistoryDetail}/>
           </div>
         </div>
       )}

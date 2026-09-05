@@ -8,6 +8,15 @@ import { useAuth } from '../context/AuthContext';
 
 function fmtVal(n,c){const sym={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'};return`${sym[c]||c}${new Intl.NumberFormat('en-IN',{maximumFractionDigits:0}).format(n||0)}`;}
 function computeValues(orders){const t={};orders.forEach(o=>(o.lineItems||[]).forEach(li=>{const c=li.currency||'INR';t[c]=(t[c]||0)+(li.qty*li.unit_price);}));return t;}
+function computePaidValues(history, type){
+  const totals={};
+  (history?.[type]||[]).forEach(payment=>{
+    const currency=type==='customer' ? (payment.currency||'INR') : (payment.confirmed_currency||payment.currency||'INR');
+    const amount=type==='customer' ? (parseFloat(payment.amount)||0) : (payment.payment_kind==='net' ? (parseFloat(payment.amount)||0) : (parseFloat(payment.actual_amount)||parseFloat(payment.paid_amount)||parseFloat(payment.amount)||0));
+    totals[currency]=(totals[currency]||0)+amount;
+  });
+  return totals;
+}
 function ValuePills({totals,size=13}){const e=Object.entries(totals||{}).filter(([,v])=>v>0);if(!e.length)return<span style={{color:'var(--text3)',fontSize:12}}>—</span>;const clr={INR:'#1a6b40',USD:'#1b4f9e',EUR:'#5c3b9a',SGD:'#0b6b6b',GBP:'#8c3d00'};return<div style={{display:'flex',flexWrap:'wrap',gap:5}}>{e.map(([c,v])=><span key={c} style={{background:clr[c]||'#444',color:'#fff',padding:'2px 9px',borderRadius:999,fontSize:size-1,fontWeight:600,fontFamily:'DM Mono,monospace'}}>{fmtVal(v,c)}</span>)}</div>;}
 function filterByRange(orders,range){const now=new Date(),today=new Date(now.getFullYear(),now.getMonth(),now.getDate());if(range==='today')return orders.filter(o=>new Date(o.created_at)>=today);if(range==='month')return orders.filter(o=>new Date(o.created_at)>=new Date(now.getFullYear(),now.getMonth(),1));if(range==='year')return orders.filter(o=>new Date(o.created_at)>=new Date(now.getFullYear(),0,1));return orders;}
 
@@ -54,6 +63,7 @@ export default function DashboardPage() {
 
   const totalResults = searchRes ? (searchRes.orders?.length||0)+(searchRes.items?.length||0)+(searchRes.enquiries?.length||0)+(searchRes.suppliers?.length||0)+(searchRes.customers?.length||0) : 0;
   const { data: summary={} } = useQuery({ queryKey:['summary'], queryFn:()=>api.get('/reports/summary').then(r=>r.data), refetchInterval:15000 });
+  const { data: financeHistory={} } = useQuery({ queryKey:['finance-history'], queryFn:()=>api.get('/finance/history').then(r=>r.data).catch(()=>({customer:[],supplier:[]})), enabled:isAdmin });
   const { data: orders=[] }  = useQuery({ queryKey:['orders'],  queryFn:()=>api.get('/orders').then(r=>r.data) });
   const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
   const canSeeCustomer = user.perms?.canSeeCustomer !== false;
@@ -61,6 +71,10 @@ export default function DashboardPage() {
 
   const openOrders = orders.filter(o => (o.status || '').toLowerCase() !== 'closed');
   const allValues  = useMemo(()=>computeValues(orders),[orders]);
+  const paidValues = useMemo(() => ({
+    customer: computePaidValues(financeHistory, 'customer'),
+    supplier: computePaidValues(financeHistory, 'supplier'),
+  }), [financeHistory]);
   const shippedOrders = orders.filter(o=>(o.lineItems||[]).some(li=>['shipped'].includes(li.line_status)));
 
   const pipeline = [
@@ -363,6 +377,15 @@ export default function DashboardPage() {
                     <div style={{fontSize:12,color:'var(--text2)',marginBottom:6,fontWeight:600}}>{icon} {label}</div>
                     <div style={{fontSize:20,fontWeight:700,color,marginBottom:4}}>{fin[key].orders.length}<span style={{fontSize:11,fontWeight:400,color:'var(--text3)',marginLeft:5}}>orders</span></div>
                     <ValuePills totals={fin[key].values} size={12}/>
+                  </div>
+                ))}
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(2,minmax(0,1fr))',gap:12,marginBottom:16}}>
+                {[{label:'Total Customer Paid',key:'customer',icon:'💳',color:'var(--accent)'},{label:'Total Supplier Paid',key:'supplier',icon:'💸',color:'var(--teal)'}].map(card=>(
+                  <div key={card.key} style={{background:'var(--surface2)',borderRadius:'var(--r)',padding:'14px 16px',borderLeft:`3px solid ${card.color}`}}>
+                    <div style={{fontSize:12,color:'var(--text2)',marginBottom:8,fontWeight:600}}>{card.icon} {card.label}</div>
+                    <ValuePills totals={paidValues[card.key]} size={14}/>
+                    <div style={{fontSize:11,color:'var(--text3)',marginTop:7}}>Recorded payments across all history</div>
                   </div>
                 ))}
               </div>

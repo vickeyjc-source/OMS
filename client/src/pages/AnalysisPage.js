@@ -36,7 +36,7 @@ const dateForOffset = offset => {
 };
 const lineDate = line => String(line.enquiry_created_at || line.created_at || line.updated_at || '').slice(0, 10);
 
-function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, ratesFor, navigate, isOpen, onToggle }) {
+function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, inventoryItems, ratesFor, navigate, isOpen, onToggle }) {
   const gridRef = useRef(null);
   const { colWidths, rowHeights, startColDrag, startRowDrag, autoFitColumn, autoFitRow } = useResizableGrid();
   const collapsed = !isOpen;
@@ -105,7 +105,8 @@ function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, 
           <tbody>
             {rows.map((line, idx) => {
               const priority = line.comparison_priority || ['price', 'lead', 'terms'];
-              const { ranked } = rankLine(line.quotes, suppliersById, { compareCurrency: line.target_currency, rates: ratesFor(line.target_currency), priority, qty: line.quantity });
+              const compareCurr = line.comparison_currency || line.target_currency || 'INR';
+              const { ranked } = rankLine(line.quotes, suppliersById, { compareCurrency: compareCurr, rates: ratesFor(compareCurr), priority, qty: line.quantity });
               const priorityLabel = p => p === 'price' ? 'Price' : p === 'lead' ? 'Lead' : p === 'terms' ? 'Terms' : '—';
               const first = ranked[0], second = ranked[1], third = ranked[2];
               const resizeRow = e => { e.stopPropagation(); startRowDrag(e, line.id, e.currentTarget.closest('tr').getBoundingClientRect().height); };
@@ -114,11 +115,13 @@ function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, 
               const columnHandle = key => <ColResizeHandle onDragStart={e => resizeColumn(e, key)} />;
               const choiceCell = (r, tone) => {
                 if (!r) return <div className="rfq-choice rfq-choice-empty">—</div>;
-                const sup = suppliersById[r.supplier_id];
+                const isInvStock = r.supplier_id?.startsWith('__inv__');
+                const invStockHit = isInvStock ? (inventoryItems || []).find(h => h.id === r.supplier_id.slice(7)) : null;
+                const supName = isInvStock ? ((invStockHit?.holder_display || invStockHit?.holder_name || 'Warehouse') + ' (Stock)') : (suppliersById[r.supplier_id]?.name || r.supplier_id);
                 return (
                   <div className={`rfq-choice rfq-choice-${tone}`}>
-                    <span className="rfq-choice-name">{sup?.name || r.supplier_id}</span>
-                    <span className="rfq-choice-price">{line.target_currency} {fmt(r.normalizedPrice)}</span>
+                    <span className="rfq-choice-name">{supName}</span>
+                    <span className="rfq-choice-price">{compareCurr} {fmt(r.normalizedPrice)}</span>
                   </div>
                 );
               };
@@ -175,14 +178,16 @@ export default function AnalysisPage() {
   const { data: lines = [], isLoading } = useQuery({ queryKey: ['rfq'], queryFn: () => api.get('/rfq').then(r => r.data) });
   const { data: suppliers = [] } = useQuery({ queryKey: ['suppliers'], queryFn: () => api.get('/suppliers').then(r => r.data) });
   const { data: customers = [] } = useQuery({ queryKey: ['customers'], queryFn: () => api.get('/customers').then(r => r.data) });
+  const { data: inventoryItems = [] } = useQuery({ queryKey: ['inventory'], queryFn: () => api.get('/inventory').then(r => r.data) });
   const suppliersById = Object.fromEntries(suppliers.map(s => [s.id, s]));
   const customerName = id => customers.find(c => c.id === id)?.name || id;
 
-  // Every line normalizes to its own target currency here (fixes comparing
-  // raw numbers across currencies) — the full currency picker/override and
-  // Total Cost mode live on the line-detail page where the real decision happens.
+  // Every line normalizes to its comparison currency (or target currency fallback)
   const neededPairs = new Set();
-  lines.forEach(l => (l.quotes || []).forEach(q => { if (q.currency && q.currency !== l.target_currency) neededPairs.add(`${q.currency}|${l.target_currency}`); }));
+  lines.forEach(l => {
+    const cur = l.comparison_currency || l.target_currency || 'INR';
+    (l.quotes || []).forEach(q => { if (q.currency && q.currency !== cur) neededPairs.add(`${q.currency}|${cur}`); });
+  });
   const pairList = [...neededPairs];
   const rateQueries = useQuery({
     queryKey: ['fx-rates-batch', pairList.join(',')],
@@ -298,7 +303,7 @@ export default function AnalysisPage() {
         return (
           <EnquiryGroupGrid
             key={enqId} enqId={enqId} rows={rows} allInEnq={allInEnq}
-            customerName={customerName} suppliersById={suppliersById} ratesFor={ratesFor} navigate={navigate}
+            customerName={customerName} suppliersById={suppliersById} inventoryItems={inventoryItems} ratesFor={ratesFor} navigate={navigate}
             isOpen={enqId === activeEnquiryId}
             onToggle={id => setOpenEnquiryId(activeEnquiryId === id ? null : id)}
           />

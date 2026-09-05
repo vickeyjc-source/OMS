@@ -18,7 +18,7 @@ import { useResizableGrid, ColResizeHandle, RowResizeHandle, resizableGridCSS, G
 
 const COL_DEFAULT_LABEL = 170, COL_DEFAULT = 150;
 
-function AddQuoteModal({ line, suppliers, onClose, initialSupplierId }) {
+function AddQuoteModal({ line, suppliers, inventoryItems = [], onClose, initialSupplierId }) {
   const qc = useQueryClient();
   const [supplierId, setSupplierId] = useState(initialSupplierId || '');
   const [price, setPrice] = useState('');
@@ -27,6 +27,19 @@ function AddQuoteModal({ line, suppliers, onClose, initialSupplierId }) {
   const [lead, setLead] = useState('');
   const usedIds = new Set((line.quotes || []).map(q => q.supplier_id));
   const available = suppliers.filter(s => !usedIds.has(s.id));
+
+  const _comp = (line.component || '').toLowerCase().trim();
+  const _mfr = (line.manufacturer || '').toLowerCase().trim();
+  const itemStockHits = (() => {
+    const map = {};
+    inventoryItems.forEach(inv => {
+      const ic = (inv.component || '').toLowerCase().trim();
+      const im = (inv.manufacturer || '').toLowerCase().trim();
+      if (ic === _comp && im === _mfr) map[inv.id] = inv;
+    });
+    return Object.values(map);
+  })();
+  const availableStock = itemStockHits.filter(h => !usedIds.has('__inv__' + h.id));
 
   const save = async () => {
     if (!supplierId) return toast.error('Pick a supplier');
@@ -49,8 +62,29 @@ function AddQuoteModal({ line, suppliers, onClose, initialSupplierId }) {
         <div className="modal-body">
           <div className="form-group">
             <label className="label">Supplier</label>
-            <select className="input" value={supplierId} onChange={e => setSupplierId(e.target.value)}>
+            <select className="input" value={supplierId} onChange={e => {
+              setSupplierId(e.target.value);
+              if (e.target.value.startsWith('__inv__')) {
+                const hit = inventoryItems.find(h => h.id === e.target.value.slice(7));
+                if (hit) {
+                  if (hit.target_price) setPrice(hit.target_price);
+                  if (hit.target_currency) setCurrency(hit.target_currency);
+                  if (hit.quantity_available) setQty(hit.quantity_available);
+                }
+              }
+            }}>
               <option value="">— Select a supplier —</option>
+              {availableStock.length > 0 && (
+                <optgroup label="📦 IN STOCK">
+                  {availableStock.map(h => (
+                    <option key={'__inv__' + h.id} value={'__inv__' + h.id}>
+                      {h.holder_type === 'customer' ? '👤' : h.holder_type === 'supplier' ? '🏢' : '🏭'} {h.holder_display || h.holder_name || 'Warehouse'}
+                      {h.target_price ? ' — ' + (h.target_currency || 'INR') + ' ' + Number(h.target_price).toLocaleString('en-IN', { maximumFractionDigits: 2 }) : ''} ({h.quantity_available} pcs)
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {availableStock.length > 0 && <option disabled>──────────</option>}
               {available.map(s => <option key={s.id} value={s.id}>{s.name} ({paymentLabel(s)})</option>)}
             </select>
           </div>
@@ -191,13 +225,28 @@ export default function AnalysisLineDetailPage() {
   const { data: line, isLoading } = useQuery({ queryKey: ['rfq-line', lineId], queryFn: () => api.get(`/rfq/${lineId}`).then(r => r.data) });
   const { data: suppliers = [] } = useQuery({ queryKey: ['suppliers'], queryFn: () => api.get('/suppliers').then(r => r.data) });
   const { data: customers = [] } = useQuery({ queryKey: ['customers'], queryFn: () => api.get('/customers').then(r => r.data) });
+  const { data: inventoryItems = [] } = useQuery({ queryKey: ['inventory'], queryFn: () => api.get('/inventory').then(r => r.data) });
   const { data: settings = {} } = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings').then(r => r.data) });
   const suppliersById = Object.fromEntries(suppliers.map(s => [s.id, s]));
 
   const effectiveCompareCurrency = CURRENCIES.includes(compareCurrency)
     ? compareCurrency
-    : CURRENCIES.includes(settings.default_comparison_currency) ? settings.default_comparison_currency
-      : CURRENCIES.includes(line?.target_currency) ? line.target_currency : 'INR';
+    : CURRENCIES.includes(line?.comparison_currency)
+      ? line.comparison_currency
+      : CURRENCIES.includes(settings.default_comparison_currency)
+        ? settings.default_comparison_currency
+        : CURRENCIES.includes(line?.target_currency) ? line.target_currency : 'INR';
+
+  useEffect(() => {
+    if (line) {
+      if (line.comparison_currency && CURRENCIES.includes(line.comparison_currency)) {
+        setCompareCurrency(line.comparison_currency);
+      }
+      if (line.comparison_priority && Array.isArray(line.comparison_priority) && line.comparison_priority.length === 3) {
+        setPriority(line.comparison_priority);
+      }
+    }
+  }, [line?.id, line?.comparison_completed_at, line?.comparison_currency, JSON.stringify(line?.comparison_priority)]);
 
   const neededCurrencies = useMemo(() => {
     if (!line) return [];
@@ -231,11 +280,34 @@ export default function AnalysisLineDetailPage() {
     (line?.quotes || []).map(q => ({
       id: q.id, price: q.price, currency: q.currency, available_qty: q.available_qty, lead_days: q.lead_days
     }))
-  ) + '|' + effectiveCompareCurrency;
+  ) + '|' + effectiveCompareCurrency + '|' + JSON.stringify(priority);
 
   useEffect(() => {
     if (comparisonFingerprint !== null && quotesFingerprint !== comparisonFingerprint) setIsStale(true);
-  }, [quotesFingerprint]);
+  }, [quotesFingerprint, comparisonFingerprint]);
+
+  // Auto-run comparison on load if line comparison was already completed
+  useEffect(() => {
+    if (line && line.comparison_complete && comparisonResult === null && (line.quotes || []).length >= 2) {
+      const allRatesReady = neededCurrencies.every(c => manualRates[c] != null || fetchedRates[c]?.rate != null);
+      if (allRatesReady) {
+        const curPriority = (priority && priority.length === 3 && priority.every(Boolean))
+          ? priority
+          : (line.comparison_priority || ['price', 'lead', 'terms']);
+        const result = rankLine(line.quotes, suppliersById, {
+          compareCurrency: effectiveCompareCurrency,
+          rates,
+          priority: curPriority,
+          qty: Number(line.quantity) || 0
+        });
+        if (result.ranked && result.ranked.length > 0) {
+          setComparisonResult(result);
+          setComparisonFingerprint(quotesFingerprint);
+          setIsStale(false);
+        }
+      }
+    }
+  }, [line?.id, line?.comparison_complete, Boolean(comparisonResult), neededCurrencies.length, Object.keys(fetchedRates).length, effectiveCompareCurrency, priority, quotesFingerprint]);
 
   const saveComparison = async resultToSave => {
     await api.post(`/rfq/${line.id}/save-comparison`, {
@@ -243,7 +315,20 @@ export default function AnalysisLineDetailPage() {
       comparison_priority: priority,
       fx_rates_used: rates,
       quotes_snapshot: (line.quotes || []).map(q => ({ id: q.id, supplier_id: q.supplier_id, price: q.price, currency: q.currency, available_qty: q.available_qty, lead_days: q.lead_days })),
-      computed_results: { ranked: resultToSave.ranked.map(r => ({ supplier_id: r.supplier_id, combined: r.combined, normalizedPrice: r.normalizedPrice, normalizedTotalCost: r.normalizedTotalCost, rank: r.rank })), bestPrice: resultToSave.bestPrice, bestPriceSupplierId: resultToSave.bestPriceSupplierId, bestTotalCost: resultToSave.bestTotalCost, bestTotalCostSupplierId: resultToSave.bestTotalCostSupplierId },
+      computed_results: { 
+        ranked: resultToSave.ranked.map(r => ({ 
+          id: r.id, 
+          supplier_id: r.supplier_id, 
+          combined: r.combined, 
+          normalizedPrice: r.normalizedPrice, 
+          normalizedTotalCost: r.normalizedTotalCost, 
+          rank: r.rank 
+        })), 
+        bestPrice: resultToSave.bestPrice, 
+        bestPriceSupplierId: resultToSave.bestPriceSupplierId, 
+        bestTotalCost: resultToSave.bestTotalCost, 
+        bestTotalCostSupplierId: resultToSave.bestTotalCostSupplierId 
+      },
     });
   };
 
@@ -425,19 +510,22 @@ export default function AnalysisLineDetailPage() {
                   <RowResizeHandle onDragStart={e => startRowDrag(e, 'header', rowHeights.header || ROW_DEFAULT)} />
                 </th>
                 {line.quotes.map(q => {
-                  const s = suppliersById[q.supplier_id];
+                  const isInvStock = q.supplier_id?.startsWith('__inv__');
+                  const invStockHit = isInvStock ? inventoryItems.find(h => h.id === q.supplier_id.slice(7)) : null;
+                  const s = isInvStock ? null : suppliersById[q.supplier_id];
+                  const supName = isInvStock ? ((invStockHit?.holder_display || invStockHit?.holder_name || 'Warehouse') + ' (Stock)') : (s?.name || q.supplier_id);
                   const rank = rankByQuoteId[q.id];
                   const bg = rankBg(rank);
                   return (
                     <th key={q.id} className="bold" data-col-key={q.id} style={{ background: bg }}>
                       {(
                         <button
-                          onClick={e => { e.stopPropagation(); setDeleteTarget({ id: q.id, name: s?.name }); }}
+                          onClick={e => { e.stopPropagation(); setDeleteTarget({ id: q.id, name: supName }); }}
                           title="Remove this supplier from the comparison"
                           style={{ position: 'absolute', top: 3, right: 3, width: 16, height: 16, lineHeight: '14px', textAlign: 'center', padding: 0, border: '1px solid var(--border)', borderRadius: '50%', background: 'var(--surface)', color: 'var(--text3)', fontSize: 11, fontWeight: 700, cursor: 'pointer', zIndex: 4 }}
                         >✕</button>
                       )}
-                      {s?.name || q.supplier_id}{rank ? <div style={{ fontSize: 10, fontWeight: 400 }}>#{rank}</div> : null}
+                      {supName}{rank ? <div style={{ fontSize: 10, fontWeight: 400 }}>#{rank}</div> : null}
                       <ColResizeHandle onDragStart={e => startColDrag(e, q.id, colWidths[q.id] || COL_DEFAULT)} onAutoFit={() => autoFitColumn(tableRef, q.id)} />
                     </th>
                   );
@@ -513,9 +601,10 @@ export default function AnalysisLineDetailPage() {
                   <RowResizeHandle onDragStart={e => startRowDrag(e, 'payment_terms', rowHeights.payment_terms || ROW_DEFAULT)} />
                 </td>
                 {line.quotes.map(q => {
-                  const s = suppliersById[q.supplier_id];
+                  const isInvStock = q.supplier_id?.startsWith('__inv__');
+                  const s = isInvStock ? null : suppliersById[q.supplier_id];
                   const rank = rankByQuoteId[q.id];
-                  return <td key={q.id} data-col-key={q.id} style={{ background: rankBg(rank) }}>{paymentLabel(s)}</td>;
+                  return <td key={q.id} data-col-key={q.id} style={{ background: rankBg(rank) }}>{isInvStock ? 'Internal' : paymentLabel(s)}</td>;
                 })}
               </tr>
               <tr style={{ height: rowHeights.normalized || ROW_DEFAULT }}>
@@ -587,7 +676,7 @@ export default function AnalysisLineDetailPage() {
         </div>
       )}
 
-      {showAddQuote && <AddQuoteModal line={line} suppliers={suppliers} initialSupplierId={intelPresetSupplier} onClose={() => { setShowAddQuote(false); setIntelPresetSupplier(null); }} />}
+      {showAddQuote && <AddQuoteModal line={line} suppliers={suppliers} inventoryItems={inventoryItems} initialSupplierId={intelPresetSupplier} onClose={() => { setShowAddQuote(false); setIntelPresetSupplier(null); }} />}
       {deleteTarget && <ConfirmDeleteModal
         label={`${deleteTarget.name || 'this supplier'}'s quote`}
         message={<>Remove <strong>{deleteTarget.name || 'this supplier'}'s quote</strong> from this line?<br /><span style={{ fontSize: 12, color: 'var(--text3)' }}>Any costs added under it will also be removed.</span></>}

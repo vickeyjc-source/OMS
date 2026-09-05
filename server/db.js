@@ -569,6 +569,8 @@ async function createSchema() {
       fetched_at TEXT NOT NULL, fetched_by TEXT
     );
     ALTER TABLE rfq_lines ADD COLUMN IF NOT EXISTS comparison_completed_at TEXT DEFAULT '';
+    ALTER TABLE rfq_lines ADD COLUMN IF NOT EXISTS comparison_currency TEXT DEFAULT '';
+    ALTER TABLE rfq_lines ADD COLUMN IF NOT EXISTS comparison_priority TEXT DEFAULT '';
   `);
 }
 

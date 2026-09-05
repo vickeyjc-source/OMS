@@ -1799,11 +1799,29 @@ app.get('/api/rfq', auth, asyncRoute(async (req, res) => {
   const rows = await allAsync(`SELECT rl.*, e.created_at AS enquiry_created_at, COALESCE(e.sourcing_no, e.id) AS enquiry_no, e.priority,
     CASE WHEN rl.comparison_completed_at IS NOT NULL AND rl.comparison_completed_at != '' THEN true ELSE false END AS comparison_complete
     FROM rfq_lines rl JOIN enquiries e ON e.id=rl.enquiry_id ORDER BY rl.created_at DESC`);
+  try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_currency TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_priority TEXT DEFAULT ''"); } catch(_) {}
   for (const row of rows) {
     row.quotes = await allAsync('SELECT * FROM rfq_quotes WHERE rfq_line_id=? ORDER BY created_at', [row.id]);
-    const snap = await getAsync('SELECT comparison_mode FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC LIMIT 1', [row.id]);
-    if (snap && snap.comparison_mode) {
-      try { row.comparison_priority = JSON.parse(snap.comparison_mode); } catch(e) { row.comparison_priority = ['price','lead','terms']; }
+    const snap = await getAsync('SELECT comparison_mode, comparison_currency FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC LIMIT 1', [row.id]);
+    if (snap) {
+      if (!row.comparison_currency && snap.comparison_currency) {
+        row.comparison_currency = snap.comparison_currency;
+      }
+      if (!row.comparison_priority && snap.comparison_mode) {
+        row.comparison_priority = snap.comparison_mode;
+      }
+    }
+    if (typeof row.comparison_priority === 'string') {
+      try {
+        const parsed = JSON.parse(row.comparison_priority);
+        row.comparison_priority = Array.isArray(parsed) ? parsed : ['price','lead','terms'];
+      } catch(e) {
+        row.comparison_priority = ['price','lead','terms'];
+      }
+    }
+    if (!Array.isArray(row.comparison_priority) || row.comparison_priority.length !== 3) {
+      row.comparison_priority = ['price','lead','terms'];
     }
   }
   res.json(rows);
@@ -1854,6 +1872,26 @@ app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
   line.enquiry_no = enquiry?.enquiry_no || line.enquiry_id;
   line.comparison_complete = Boolean(line.comparison_completed_at);
   line.award_snapshots = await allAsync('SELECT * FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC', [line.id]);
+  const latestSnap = (line.award_snapshots || [])[0];
+  if (latestSnap) {
+    if (!line.comparison_currency && latestSnap.comparison_currency) {
+      line.comparison_currency = latestSnap.comparison_currency;
+    }
+    if (!line.comparison_priority && latestSnap.comparison_mode) {
+      line.comparison_priority = latestSnap.comparison_mode;
+    }
+  }
+  if (typeof line.comparison_priority === 'string') {
+    try {
+      const parsed = JSON.parse(line.comparison_priority);
+      line.comparison_priority = Array.isArray(parsed) ? parsed : ['price','lead','terms'];
+    } catch(e) {
+      line.comparison_priority = ['price','lead','terms'];
+    }
+  }
+  if (!Array.isArray(line.comparison_priority) || line.comparison_priority.length !== 3) {
+    line.comparison_priority = ['price','lead','terms'];
+  }
   res.json(line);
 }));
 
@@ -1866,12 +1904,25 @@ app.post('/api/rfq/:lineId/quotes', auth, asyncRoute(async (req, res) => {
   saveNow(); res.json({ ok: true });
 }));
 
+app.delete('/api/rfq/:lineId/quotes/:quoteId', auth, asyncRoute(async (req, res) => {
+  await runAsync('DELETE FROM rfq_quotes WHERE id=? AND rfq_line_id=?', [req.params.quoteId, req.params.lineId]);
+  saveNow(); res.json({ ok: true });
+}));
+
 app.post('/api/rfq/:lineId/save-comparison', auth, asyncRoute(async (req, res) => {
   const line = await ensureRfqLine(req.params.lineId); if (!line) return res.status(404).json({ error: 'RFQ line not found' });
   const previous = await getAsync('SELECT MAX(version) AS version FROM rfq_award_snapshots WHERE rfq_line_id=?', [line.id]);
   const now = nowStr();
-  await runAsync('INSERT INTO rfq_award_snapshots(id,rfq_line_id,version,kind,comparison_currency,comparison_mode,awarded_supplier_id,fx_rates_used,quotes_snapshot,computed_results,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,Number(previous?.version||0)+1,'saved',req.body.comparison_currency||'USD',JSON.stringify(req.body.comparison_priority||['price','lead','terms']),null,JSON.stringify(req.body.fx_rates_used||{}),JSON.stringify(req.body.quotes_snapshot||[]),JSON.stringify(req.body.computed_results||{}),req.session.user.id,now]);
-  await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, updated_at=? WHERE id=?', [now, now, line.id]);
+  const compCurrency = req.body.comparison_currency || line.comparison_currency || line.target_currency || 'INR';
+  const compPriority = req.body.comparison_priority || line.comparison_priority || ['price','lead','terms'];
+  const compPriorityJson = typeof compPriority === 'string' ? compPriority : JSON.stringify(compPriority);
+
+  await runAsync('INSERT INTO rfq_award_snapshots(id,rfq_line_id,version,kind,comparison_currency,comparison_mode,awarded_supplier_id,fx_rates_used,quotes_snapshot,computed_results,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,Number(previous?.version||0)+1,'saved',compCurrency,compPriorityJson,null,JSON.stringify(req.body.fx_rates_used||{}),JSON.stringify(req.body.quotes_snapshot||[]),JSON.stringify(req.body.computed_results||{}),req.session.user.id,now]);
+  try {
+    await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, comparison_currency=?, comparison_priority=?, updated_at=? WHERE id=?', [now, compCurrency, compPriorityJson, now, line.id]);
+  } catch(e) {
+    await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, updated_at=? WHERE id=?', [now, now, line.id]);
+  }
   saveNow(); res.json({ ok: true });
 }));
 
@@ -2719,8 +2770,9 @@ app.get('/api/reports/summary', auth, asyncRoute(async (req, res) => {
   const finCustAdvance = await g("SELECT COUNT(*) as c FROM orders WHERE status='payment_approval' AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid'))");
   const finCustNet     = await g("SELECT COUNT(*) as c FROM orders WHERE status NOT IN ('closed','cancelled','deleted','payment_approval') AND (customer_payment_status IS NULL OR customer_payment_status NOT IN ('paid')) AND payment_terms NOT LIKE 'Advance%' AND payment_terms LIKE 'Net%'");
   const finSupNet      = await g(`SELECT COUNT(*) as c FROM supplier_orders so
-    WHERE so.payment_terms_type='net'
+    WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
       AND so.status NOT IN ('paid','cancelled')
+      AND (so.net_total_paid IS NULL OR so.confirmed_price IS NULL OR so.confirmed_price <= 0 OR so.net_total_paid < (so.confirmed_price - 0.01))
       AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
       AND NOT EXISTS (
         SELECT 1 FROM finance_queue fq
@@ -3997,13 +4049,14 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   // Do NOT set 'paid' here — that only happens when Finance explicitly clicks Release.
   const healPromises = [];
   for (const o of enriched) {
+    const isNetOrOther = !isAdvanceTerms(o.payment_terms) && !isPartialAdvanceTerms(o.payment_terms);
     const releaseDueTotal = requiredCustomerPaymentTotal(o._computed_total, o.payment_terms);
     const releasePaid = releaseDueTotal > 0 && (o._computed_paid + 0.01) >= releaseDueTotal;
     const fullPaid = o._computed_total > 0 && (o._computed_paid + 0.01) >= o._computed_total;
-    if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
-      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
-    } else if (fullPaid && !isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'paid') {
+    if (fullPaid && o.customer_payment_status !== 'paid') {
       healPromises.push(runAsync("UPDATE orders SET customer_payment_status='paid' WHERE id=?", [o.id]).catch(()=>{}));
+    } else if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
+      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
     }
   }
   if (healPromises.length) await Promise.all(healPromises);
@@ -4012,14 +4065,14 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     const releaseDueTotal = requiredCustomerPaymentTotal(_computed_total, o.payment_terms);
     const releasePaid = releaseDueTotal > 0 && (_computed_paid + 0.01) >= releaseDueTotal;
     const fullPaid = _computed_total > 0 && (_computed_paid + 0.01) >= _computed_total;
+    if (fullPaid) {
+      return { ...o, customer_payment_status: 'paid' };
+    }
     if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
       return { ...o, customer_payment_status: 'payment_recorded' };
     }
-    if (fullPaid && !isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'paid') {
-      return { ...o, customer_payment_status: 'paid' };
-    }
     return o;
-  }).filter(o => o.customer_payment_status !== 'paid');
+  }).filter(o => o.customer_payment_status !== 'paid' && o.full_balance_due > 0.009);
   res.json(result);
 }));
 
@@ -4128,10 +4181,10 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
   const fullBalance  = parseFloat(Math.max(0, total-newPaid).toFixed(2));
-  const releaseBalance = parseFloat(Math.max(0, releaseDueTotal-newPaid).toFixed(2));
-  const paymentStatus = fullBalance <= 0
-    ? 'payment_recorded'
-    : releaseBalance <= 0 && isAwaitingCustomerReleaseStatus(o.status)
+  const isNetOrOther = !isAdvanceTerms(o.payment_terms) && !isPartialAdvanceTerms(o.payment_terms);
+  const paymentStatus = fullBalance <= 0.009
+    ? (isNetOrOther ? 'paid' : (isAwaitingCustomerReleaseStatus(o.status) ? 'payment_recorded' : 'paid'))
+    : releaseBalance <= 0.009 && isAwaitingCustomerReleaseStatus(o.status)
       ? 'payment_recorded'
       : 'pending';
   await runAsync(`INSERT INTO customer_payments(
@@ -4331,9 +4384,25 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
   try { advRows = await allAsync("SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
+
+  // Auto-heal in PostgreSQL/SQLite: mark any fully paid Net PO as status='paid'
+  try {
+    await runAsync(`UPDATE supplier_orders
+      SET status='paid'
+      WHERE (payment_terms_type='net' OR payment_terms_type IS NULL)
+        AND status NOT IN ('paid','cancelled')
+        AND net_total_paid IS NOT NULL
+        AND confirmed_price IS NOT NULL
+        AND confirmed_price > 0
+        AND net_total_paid >= (confirmed_price - 0.01)`);
+  } catch(e) {
+    console.warn('[FINANCE] supplier-queue auto-heal error:', e?.message || e);
+  }
+
   const netRows = await allAsync(`SELECT so.* FROM supplier_orders so
-    WHERE so.payment_terms_type='net'
+    WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
       AND so.status NOT IN ('paid','cancelled')
+      AND (so.net_total_paid IS NULL OR so.confirmed_price IS NULL OR so.confirmed_price <= 0 OR so.net_total_paid < (so.confirmed_price - 0.01))
       AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
       AND NOT EXISTS (
         SELECT 1 FROM finance_queue fq
@@ -4359,7 +4428,13 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
         release_ready: releaseReady ? 1 : 0,
       };
     }),
-    net:     netRows.map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
+    net: netRows
+      .filter(r => {
+        const total = parseFloat(r.confirmed_price) || 0;
+        const paid = parseFloat(r.net_total_paid) || 0;
+        return total <= 0 || (total - paid) > 0.009;
+      })
+      .map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
   });
 }));
 
@@ -4641,8 +4716,8 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
 
   const prevPaid     = parseFloat(so.net_total_paid) || 0;
   const newTotalPaid = prevPaid + actualAmount;
-  const isFullyPaid  = grandTotal > 0 ? newTotalPaid >= grandTotal : true;
-  const newStatus    = 'net_payment_recorded';
+  const isFullyPaid  = grandTotal > 0 ? (newTotalPaid + 0.01) >= grandTotal : true;
+  const newStatus    = isFullyPaid ? 'paid' : 'partial_paid';
   const remaining    = Math.max(0, grandTotal - newTotalPaid);
   const now = nowStr();
 
@@ -4807,7 +4882,7 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
   }
   for (const soId of affectedSOIds) {
     const soRow = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [soId]);
-    if (!soRow || soRow.status === 'cancelled') continue;
+    if (!soRow || soRow.status === 'cancelled' || soRow.status === 'paid') continue;
     const poItemRows = await allAsync('SELECT item_id FROM supplier_order_items WHERE supplier_order_id=?', [soId]);
     const poItemIds = poItemRows.map(r => r.item_id);
     let poAllFull = true, poAnyReceived = false;
@@ -5129,6 +5204,40 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
                    ORDER BY l.paid_at DESC`);
   } catch(_) {}
+
+  // Fallback: supplier_orders on net terms paid/settled without an installment log row
+  try {
+    const legacyNet = await allAsync(`SELECT
+                          so.id,
+                          COALESCE(NULLIF(so.net_paid_at,''), so.received_at, so.created_at) AS paid_at,
+                          so.net_paid_by AS paid_by,
+                          COALESCE(so.net_actual_amount, so.net_total_paid, so.confirmed_price) AS amount,
+                          so.confirmed_currency AS currency,
+                          so.net_payment_ref AS payment_ref,
+                          COALESCE(NULLIF(so.net_payment_date,''), SUBSTRING(so.net_paid_at, 1, 10), '') AS payment_date,
+                          so.net_payment_method AS payment_method,
+                          so.net_payment_notes AS notes,
+                          so.zoho_po_number, so.supplier_ref,
+                          so.net_total_paid AS total_paid_snapshot,
+                          0 AS remaining_snapshot,
+                          so.confirmed_price AS grand_total,
+                          so.net_additional_charges AS additional_charges,
+                          so.net_actual_amount AS actual_amount,
+                          so.net_amount_change_note AS amount_change_note,
+                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          so.supplier_id, so.confirmed_currency,
+                          s.name AS supplier_name,
+                          'net' AS payment_kind
+                   FROM supplier_orders so
+                   LEFT JOIN suppliers s ON s.id=so.supplier_id
+                   WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
+                     AND (so.status='paid' OR (so.net_total_paid IS NOT NULL AND so.confirmed_price IS NOT NULL AND so.confirmed_price > 0 AND so.net_total_paid >= (so.confirmed_price - 0.01)))
+                     AND NOT EXISTS (SELECT 1 FROM supplier_net_payment_logs l WHERE l.supplier_order_id=so.id)
+                   ORDER BY COALESCE(so.net_paid_at, so.received_at, so.created_at) DESC`);
+    netPmts = [...netPmts, ...legacyNet];
+  } catch(e) {
+    console.warn('[FINANCE] history legacyNet error:', e?.message || e);
+  }
 
   const allSupPmts = [...supPmts, ...netPmts].sort((a,b)=>{
     const da = a.paid_at||''; const db = b.paid_at||'';
