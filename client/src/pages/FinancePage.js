@@ -1630,6 +1630,7 @@ export default function FinancePage() {
     const p = new URLSearchParams(window.location.search).get('tab');
     return p || 'cust-advance';
   });
+  const [historyTab, setHistoryTab] = useState('customer');
   const [payModal,     setPayModal]     = useState(null);  // { item, type }
   const [viewPayModal, setViewPayModal] = useState(null); // { item } — view/edit recorded payment
   const [bankModal, setBankModal] = useState(null); // { supplier }
@@ -1830,12 +1831,12 @@ export default function FinancePage() {
   }, [history.customer, history.supplier]);
 
   const TABS = [
-    { k:'cust-advance', icon:'🧾', label:'Customer Advance' },
-    { k:'cust-net',     icon:'📅', label:'Customer Net/Other' },
-    { k:'sup-advance',  icon:'💸', label:'Supplier Advance' },
-    { k:'sup-net',      icon:'📅', label:'Supplier Net' },
-    { k:'po-requests',  icon:'📋', label:'PO Requests' },
-    { k:'history',      icon:'✅', label:'History' },
+    { k:'cust-advance', icon:'🧾', label:'Customer Advance', count:custAdvance.length },
+    { k:'cust-net',     icon:'📅', label:'Customer Net/Other', count:custNet.length + custOther.length },
+    { k:'sup-advance',  icon:'💸', label:'Supplier Advance', count:supAdvance.length },
+    { k:'sup-net',      icon:'📅', label:'Supplier Net', count:supNet.length },
+    { k:'po-requests',  icon:'📋', label:'PO Requests', count:pendingPORequests.length },
+    { k:'history',      icon:'✅', label:'History', count:(history.customer || []).length + (history.supplier || []).length },
   ];
 
   const handleGeneratePI = async (order) => {
@@ -1889,10 +1890,10 @@ export default function FinancePage() {
     });
   }, [history.supplier, historyFilter, hq]);
 
-  const combinedHistory = useMemo(() => [
-    ...filteredCustomerHistory.map(item => ({ type:'customer', item, date:item.payment_date || item.recorded_at })),
-    ...filteredSupplierHistory.map(item => ({ type:'supplier', item, date:item.payment_date || item.paid_at }))
-  ].sort((a,b) => new Date(b.date || 0) - new Date(a.date || 0)), [filteredCustomerHistory, filteredSupplierHistory]);
+  const historyPayments = historyTab === 'customer'
+    ? filteredCustomerHistory.map(item => ({ type:'customer', item, date:item.payment_date || item.recorded_at }))
+    : filteredSupplierHistory.map(item => ({ type:'supplier', item, date:item.payment_date || item.paid_at }));
+  historyPayments.sort((a,b) => new Date(b.date || 0) - new Date(a.date || 0));
 
   const sq = search.toLowerCase();
   const filterCust = arr => !search ? arr : arr.filter(o =>
@@ -2341,11 +2342,21 @@ export default function FinancePage() {
               <input className="input" type="date" value={historyFilter.to}
                 onChange={e=>setHistoryFilter(f=>({...f, to:e.target.value}))}/>
             </div>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <div style={{fontWeight:700,fontSize:13}}>All Paid History ({combinedHistory.length})</div>
-              <div style={{fontSize:11,color:'var(--text3)'}}>Customer and supplier payments</div>
+            <div style={{display:'flex',borderBottom:'1px solid var(--border)',marginBottom:14}}>
+              {[{key:'customer',label:'Customer Payments',count:filteredCustomerHistory.length,color:'var(--accent)'},
+                {key:'supplier',label:'Supplier Payments',count:filteredSupplierHistory.length,color:'var(--teal,#0d9488)'}].map(view=>(
+                <div key={view.key} onClick={()=>setHistoryTab(view.key)} style={{padding:'9px 16px',fontSize:12,fontWeight:600,cursor:'pointer',
+                  borderBottom:historyTab===view.key?'2px solid '+view.color:'2px solid transparent',
+                  color:historyTab===view.key?view.color:'var(--text3)'}}>
+                  {view.label} <strong style={{color:'var(--green)',fontWeight:900}}>({view.count})</strong>
+                </div>
+              ))}
             </div>
-            <CombinedPaymentHistory payments={combinedHistory} onSelect={setHistoryDetail}/>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{fontWeight:700,fontSize:13}}>{historyTab === 'customer' ? 'Customer Payment History' : 'Supplier Payment History'} ({historyPayments.length})</div>
+              <div style={{fontSize:11,color:'var(--text3)'}}>Recorded paid transactions</div>
+            </div>
+            <CombinedPaymentHistory payments={historyPayments} onSelect={setHistoryDetail}/>
           </div>
         </div>
       )}

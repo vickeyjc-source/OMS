@@ -2,6 +2,7 @@
 // Stage 7 — Inbound Delivery Hub: receive goods, GRN, move to Logistics
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { fmt, fmtCur, StatusBadge, DaysBadge } from '../utils/helpers';
@@ -933,6 +934,7 @@ function ConfirmDeliveryModal({ order, shipment, onClose, onSaved }) {
 
 export default function DeliveryHubPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [selected,         setSelected]         = useState(null);
   const [selectedPoId,     setSelectedPoId]     = useState(null);
@@ -1180,7 +1182,18 @@ export default function DeliveryHubPage() {
                       <span className="mono" style={{
                         fontWeight: seg.strong ? 800 : 600,
                         color: seg.strong ? 'var(--accent)' : 'var(--text3)',
-                      }}>{seg.value}</span>
+                        cursor: seg.label === 'ENQ' || seg.label === 'QT' ? 'pointer' : 'default',
+                        textDecoration: seg.label === 'ENQ' || seg.label === 'QT' ? 'underline' : 'none',
+                      }}
+                        title={seg.label === 'ENQ' ? 'Open enquiry' : seg.label === 'QT' ? 'Open quote' : undefined}
+                        onClick={e=>{
+                          if (seg.label !== 'ENQ' && seg.label !== 'QT') return;
+                          e.stopPropagation();
+                          if (seg.label === 'ENQ' && (order.enquiry_id || order.enquiry_no)) navigate('/enquiries/' + (order.enquiry_id || order.enquiry_no));
+                          if (seg.label === 'QT' && (order.quote_id || order.quote_no)) navigate('/quotes?quote=' + encodeURIComponent(order.quote_id || order.quote_no));
+                        }}>
+                        {seg.value}
+                      </span>
                     </span>
                   ))}
                   <StatusBadge s={order.status}/>

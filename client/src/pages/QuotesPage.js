@@ -1018,6 +1018,18 @@ export default function QuotesPage() {
     return matchFilter && matchSearch;
   }).sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
 
+  useEffect(() => {
+    if (!quotes.length || selected) return;
+    const targetRef = new URLSearchParams(window.location.search).get('quote');
+    if (!targetRef) return;
+    const target = quotes.find(q => q.id === targetRef || q.quote_no === targetRef);
+    if (target) {
+      setSelected(target);
+      markSeen(target.id);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [quotes, selected]);
+
   const counts = {
     all:                   enquiryGroups.length,
     active:                enquiryGroups.filter(q=>q.status==='active').length,
