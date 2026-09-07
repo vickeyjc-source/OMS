@@ -555,8 +555,8 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
           </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
-        <fieldset disabled={readOnly} style={{border:'none',margin:0,padding:0,minWidth:0}}>
         <div className="modal-body">
+          <fieldset disabled={readOnly} style={{border:'none',margin:0,padding:0,minWidth:0,width:'100%'}}>
           {/* Preview of PO split */}
           {Object.keys(grouped).length > 0 && (
             <div style={{marginBottom:14,padding:'10px 14px',background:'var(--accent-lt)',
@@ -835,8 +835,8 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
               </tbody>
             </table>
           </div>
+          </fieldset>
         </div>
-        </fieldset>
         <div className="modal-footer" style={{justifyContent:'space-between',alignItems:'center'}}>
           <div style={{fontSize:12,color:'var(--text2)'}}>
             {Object.keys(grouped).length > 0

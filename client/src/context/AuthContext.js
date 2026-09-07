@@ -17,6 +17,13 @@ export function AuthProvider({ children }) {
     setUser(r.data); return r.data;
   };
   const logout = async () => { try { await api.post('/auth/logout'); } catch {} setUser(null); };
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>;
+  // Re-fetch the current user's profile (e.g. after permission changes).
+  const refreshUser = async () => {
+    try {
+      const r = await api.get('/auth/me');
+      if (r.data?.id) setUser(r.data);
+    } catch {}
+  };
+  return <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>{children}</AuthContext.Provider>;
 }
 export const useAuth = () => useContext(AuthContext);

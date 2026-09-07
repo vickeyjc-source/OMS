@@ -31,7 +31,12 @@ export const ALL_SECTION_KEYS = SECTION_DEFINITIONS.map(s => s.key);
 export function canAccessSection(user, key) {
   if (!user) return false;
   if (user.role === 'admin') return true;
-  const allowed = user.allowedSections || user.allowed_sections;
+  // allowedSections is explicitly set by the server after login.
+  // - null / undefined  → permissions not yet loaded, allow as safe fallback.
+  // - []                → user has NO granted sections (deny all).
+  // - ['key1', ...]     → check membership.
+  const allowed = user.allowedSections ?? user.allowed_sections;
+  if (allowed === null || allowed === undefined) return true;
   if (!Array.isArray(allowed)) return true;
   return allowed.includes(key);
 }

@@ -1222,21 +1222,24 @@ async function initDb() {
   );
 
 
+  // NOTE: list must match SECTION_DEFINITIONS in server/index.js exactly.
   const sections = [
     'dashboard','enquiries','new-enquiry','quotes','orders','new-order',
+    'rfq-analysis',                                           // ← was missing
     'sourcing-bin','procurement-bin','delivery-hub','inventory','closed-bin',
+    'audit-bin',                                              // ← was missing
     'deleted-bin','finance','customers','suppliers','linecards','users',
     'approvals','settings','tax-settings','reports',
   ];
   const departments = ['sales','sourcing','procurement','accounts','logistics','approvers','management'];
   const defaults = {
-    sales: ['dashboard','enquiries','new-enquiry','quotes','orders','new-order','closed-bin','customers','suppliers','linecards','reports'],
-    sourcing: ['dashboard','enquiries','sourcing-bin','closed-bin','suppliers','linecards','reports'],
-    procurement: ['dashboard','orders','procurement-bin','delivery-hub','inventory','closed-bin','suppliers','linecards','reports'],
-    accounts: ['dashboard','orders','finance','customers','suppliers','closed-bin','reports'],
-    logistics: ['dashboard','orders','delivery-hub','closed-bin','reports'],
-    approvers: ['dashboard','orders','approvals','closed-bin','reports'],
-    management: sections,
+    sales:       ['dashboard','enquiries','new-enquiry','quotes','orders','new-order','closed-bin','customers','suppliers','linecards','reports'],
+    sourcing:    ['dashboard','enquiries','rfq-analysis','sourcing-bin','closed-bin','suppliers','linecards','reports'],
+    procurement: ['dashboard','orders','rfq-analysis','procurement-bin','delivery-hub','inventory','closed-bin','audit-bin','suppliers','linecards','reports'],
+    accounts:    ['dashboard','orders','finance','customers','suppliers','closed-bin','audit-bin','reports'],
+    logistics:   ['dashboard','orders','delivery-hub','closed-bin','reports'],
+    approvers:   ['dashboard','orders','approvals','closed-bin','reports'],
+    management:  sections,
   };
   const now = new Date().toISOString().slice(0,16).replace('T',' ');
   for (const role of ['user','manager','admin']) {
@@ -1252,6 +1255,7 @@ async function initDb() {
       }
     }
   }
+
 
   return pool;
 }

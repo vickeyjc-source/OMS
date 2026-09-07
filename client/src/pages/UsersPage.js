@@ -105,14 +105,42 @@ const ROLES = [
 
 function SectionPermissions() {
   const qc = useQueryClient();
+  const { refreshUser } = useAuth();
   const [role, setRole] = useState('user');
   const [department, setDepartment] = useState('sales');
-  const { data } = useQuery({
+  // Optimistic local state: key → boolean. null means "use server value".
+  const [localOverrides, setLocalOverrides] = useState({});
+  const [pendingKey, setPendingKey] = useState(null);
+
+  const { data, isFetching } = useQuery({
     queryKey: ['section-permissions', role, department],
     queryFn: () => api.get('/section-permissions', { params: { role, department } }).then(r => r.data),
   });
+
+  // When server data arrives (after save or role/dept change), clear optimistic overrides.
+  const prevDataRef = React.useRef(null);
+  React.useEffect(() => {
+    if (data && data !== prevDataRef.current) {
+      prevDataRef.current = data;
+      setLocalOverrides({});
+      setPendingKey(null);
+    }
+  }, [data]);
+
+  // Reset overrides when role or department changes.
+  React.useEffect(() => {
+    setLocalOverrides({});
+    setPendingKey(null);
+  }, [role, department]);
+
   const serverByKey = Object.fromEntries((data?.sections || []).map(s => [s.key, s]));
-  const sections = SECTION_DEFINITIONS.map(s => ({ ...s, enabled: Boolean(serverByKey[s.key]?.enabled) }));
+  // Merge server state with local optimistic overrides.
+  const sections = SECTION_DEFINITIONS.map(s => ({
+    ...s,
+    enabled: s.key in localOverrides
+      ? localOverrides[s.key]
+      : Boolean(serverByKey[s.key]?.enabled),
+  }));
   const grouped = sections.reduce((acc, section) => {
     const group = section.group || 'Sections';
     acc[group] = acc[group] || [];
@@ -125,14 +153,29 @@ function SectionPermissions() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['section-permissions', role, department] });
       qc.invalidateQueries({ queryKey: ['users'] });
-      toast.success('Section permissions synced');
+      // Refresh the logged-in user's session so sidebar reflects new permissions immediately.
+      refreshUser();
+      toast.success('Permissions saved');
     },
-    onError: e => toast.error(e.response?.data?.error || 'Permission sync failed'),
+    onError: (e, nextSections) => {
+      // Roll back the optimistic override on error.
+      setLocalOverrides({});
+      setPendingKey(null);
+      toast.error(e.response?.data?.error || 'Permission sync failed');
+    },
   });
 
   const toggle = (key) => {
-    const next = sections.map(s => s.key === key ? { ...s, enabled: !s.enabled } : s);
-    save.mutate(next.map(({ key, enabled }) => ({ key, enabled })));
+    if (save.isPending) return;
+    const currentEnabled = sections.find(s => s.key === key)?.enabled ?? false;
+    const nextEnabled = !currentEnabled;
+    // Apply optimistic update immediately.
+    setLocalOverrides(prev => ({ ...prev, [key]: nextEnabled }));
+    setPendingKey(key);
+    const nextSections = sections.map(s =>
+      s.key === key ? { key: s.key, enabled: nextEnabled } : { key: s.key, enabled: s.enabled }
+    );
+    save.mutate(nextSections);
   };
 
   return (
@@ -145,44 +188,52 @@ function SectionPermissions() {
         <div className="form-grid-2" style={{maxWidth:520,margin:0}}>
           <div className="form-group" style={{marginBottom:0}}>
             <label className="label">Choose Role</label>
-            <select className="input" value={role} onChange={e=>setRole(e.target.value)}>
+            <select className="input" value={role} onChange={e=>setRole(e.target.value)} disabled={save.isPending}>
               {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
             </select>
           </div>
           <div className="form-group" style={{marginBottom:0}}>
             <label className="label">Department</label>
-            <select className="input" value={department} onChange={e=>setDepartment(e.target.value)}>
+            <select className="input" value={department} onChange={e=>setDepartment(e.target.value)} disabled={save.isPending}>
               {DEPARTMENTS.map(d=><option key={d} value={d}>{DEPT_LABEL[d]}</option>)}
             </select>
           </div>
         </div>
       </div>
 
+      {isFetching && !data && (
+        <div style={{textAlign:'center',padding:'24px 0',color:'var(--text3)',fontSize:13}}>Loading permissions…</div>
+      )}
+
       <div className="section-permission-list">
         {Object.entries(grouped).map(([group, rows]) => (
           <div key={group} className="section-permission-group">
             <div className="section-permission-group-title">{group}</div>
-            {rows.map(section => (
-              <div key={section.key} className="section-permission-row" style={section.locked?{opacity:0.6}:undefined}>
-                <div>
-                  <div className="section-permission-name">
-                    {section.label}
-                    {section.locked && <span style={{marginLeft:8,fontSize:10,fontWeight:700,color:'var(--red)',background:'var(--red-lt)',padding:'1px 6px',borderRadius:999}}>🔒 ADMIN ONLY</span>}
+            {rows.map(section => {
+              const isBusy = save.isPending && pendingKey === section.key;
+              return (
+                <div key={section.key} className="section-permission-row" style={section.locked?{opacity:0.6}:undefined}>
+                  <div>
+                    <div className="section-permission-name">
+                      {section.label}
+                      {section.locked && <span style={{marginLeft:8,fontSize:10,fontWeight:700,color:'var(--red)',background:'var(--red-lt)',padding:'1px 6px',borderRadius:999}}>🔒 ADMIN ONLY</span>}
+                    </div>
+                    <div className="section-permission-path">{section.locked ? 'Hard-coded — cannot be changed' : section.path}</div>
                   </div>
-                  <div className="section-permission-path">{section.locked ? 'Hard-coded — cannot be changed' : section.path}</div>
+                  <button
+                    type="button"
+                    className={`toggle-switch ${section.enabled ? 'on' : ''}`}
+                    aria-pressed={section.enabled}
+                    onClick={() => !section.locked && toggle(section.key)}
+                    disabled={save.isPending || section.locked}
+                    title={section.locked ? 'Admin only — cannot be changed' : (section.enabled ? 'Click to disable' : 'Click to enable')}
+                    style={isBusy ? {opacity:0.7} : undefined}
+                  >
+                    <span />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className={`toggle-switch ${section.enabled ? 'on' : ''}`}
-                  aria-pressed={section.enabled}
-                  onClick={() => !section.locked && toggle(section.key)}
-                  disabled={save.isPending || section.locked}
-                  title={section.locked ? 'Admin only — cannot be changed' : (section.enabled ? 'Enabled' : 'Disabled')}
-                >
-                  <span />
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ))}
       </div>

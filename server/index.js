@@ -284,6 +284,7 @@ const SECTION_DEFINITIONS = [
   { key: 'quotes', label: 'Quotes' },
   { key: 'orders', label: 'All Orders' },
   { key: 'new-order', label: 'New Order' },
+  { key: 'rfq-analysis', label: 'RFQ Analysis' },
   { key: 'sourcing-bin', label: 'Sourcing Bin' },
   { key: 'procurement-bin', label: 'Procurement Bin' },
   { key: 'delivery-hub', label: 'Delivery Hub' },
@@ -5248,6 +5249,45 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
 }));
 
   console.log('[STARTUP] All routes registered.');
+
+  // ── STARTUP BACKFILL: insert any section_permissions rows that are missing ──
+  // This runs every restart but is safe — ON CONFLICT DO NOTHING never overwrites
+  // rows that admins have already configured through the UI.
+  (async () => {
+    try {
+      const ROLES_ALL  = ['user', 'manager', 'admin'];
+      const DEPTS_ALL  = ['sales','sourcing','procurement','accounts','logistics','approvers','management'];
+      const DEFAULT_BY_DEPT = {
+        sales:       ['dashboard','enquiries','new-enquiry','quotes','orders','new-order','closed-bin','customers','suppliers','linecards','reports'],
+        sourcing:    ['dashboard','enquiries','rfq-analysis','sourcing-bin','closed-bin','suppliers','linecards','reports'],
+        procurement: ['dashboard','orders','rfq-analysis','procurement-bin','delivery-hub','inventory','closed-bin','audit-bin','suppliers','linecards','reports'],
+        accounts:    ['dashboard','orders','finance','customers','suppliers','closed-bin','audit-bin','reports'],
+        logistics:   ['dashboard','orders','delivery-hub','closed-bin','reports'],
+        approvers:   ['dashboard','orders','approvals','closed-bin','reports'],
+        management:  SECTION_KEYS,
+      };
+      const now = nowStr();
+      let inserted = 0;
+      for (const role of ROLES_ALL) {
+        for (const dept of DEPTS_ALL) {
+          const allowed = role === 'user' ? (DEFAULT_BY_DEPT[dept] || DEFAULT_BY_DEPT.sales) : SECTION_KEYS;
+          for (const section of SECTION_DEFINITIONS) {
+            const enabled = section.locked ? 0 : (allowed.includes(section.key) ? 1 : 0);
+            const result = await runAsync(
+              `INSERT INTO section_permissions(role,department,section_key,enabled,updated_at,updated_by)
+               VALUES(?,?,?,?,?,?)
+               ON CONFLICT(role,department,section_key) DO NOTHING`,
+              [role, dept, section.key, enabled, now, 'system-backfill']
+            );
+            if (result?.changes > 0) inserted++;
+          }
+        }
+      }
+      if (inserted > 0) console.log(`[STARTUP] Backfilled ${inserted} missing section_permissions rows.`);
+    } catch (e) {
+      console.warn('[STARTUP] Section permissions backfill warning:', e?.message || e);
+    }
+  })();
 
 // ── CATCH-ALL inside .then — registers AFTER all API routes ─────────────────
   app.get('*', (req, res) => {
