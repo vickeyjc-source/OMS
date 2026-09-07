@@ -227,6 +227,7 @@ export default function AnalysisLineDetailPage() {
   const { data: customers = [] } = useQuery({ queryKey: ['customers'], queryFn: () => api.get('/customers').then(r => r.data) });
   const { data: inventoryItems = [] } = useQuery({ queryKey: ['inventory'], queryFn: () => api.get('/inventory').then(r => r.data) });
   const { data: settings = {} } = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings').then(r => r.data) });
+  const { data: users = [] } = useQuery({ queryKey: ['users'], queryFn: () => api.get('/users').then(r => r.data).catch(() => []) });
   const suppliersById = Object.fromEntries(suppliers.map(s => [s.id, s]));
 
   const effectiveCompareCurrency = CURRENCIES.includes(compareCurrency)
@@ -656,21 +657,40 @@ export default function AnalysisLineDetailPage() {
           
           {showHistory && (
             <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {line.award_snapshots.filter(s => s.kind !== 'award').map(s => (
-                <div key={s.id} style={{ 
-                  display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', 
-                  background: 'var(--surface2)', borderRadius: 6, fontSize: 12 
-                }}>
-                  <div className="badge badge-amber">v{s.version}</div>
-                  <div style={{ flex: 1 }}>
-                    Saved comparison in <strong>{s.comparison_currency}</strong>
+              {line.award_snapshots.filter(s => s.kind !== 'award').map(s => {
+                const u = users.find(x => x.id === s.created_by || x.username === s.created_by);
+                const displayName = s.user_name || u?.name || u?.username || s.created_by || '—';
+                const displayRole = s.user_role || u?.role;
+                const displayEmail = s.user_email || u?.email;
+                return (
+                  <div key={s.id} style={{ 
+                    display: 'flex', alignItems: 'center', gap: 12, padding: '10px 12px', 
+                    background: 'var(--surface2)', borderRadius: 6, fontSize: 12 
+                  }}>
+                    <div className="badge badge-amber">v{s.version}</div>
+                    <div style={{ flex: 1 }}>
+                      Saved comparison in <strong>{s.comparison_currency}</strong>
+                    </div>
+                    <div style={{ color: 'var(--text3)', display: 'flex', alignItems: 'center', gap: 12 }}>
+                      <span title={displayEmail ? `${displayName} (${displayEmail})` : displayName} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                        <span>👤</span>
+                        <strong style={{ color: 'var(--text)' }}>{displayName}</strong>
+                        {displayRole && (
+                          <span className="badge" style={{ fontSize: 10, padding: '1px 6px', textTransform: 'capitalize' }}>
+                            {displayRole}
+                          </span>
+                        )}
+                        {displayEmail && (
+                          <span style={{ fontSize: 11, color: 'var(--text3)' }}>
+                            ({displayEmail})
+                          </span>
+                        )}
+                      </span>
+                      <span>🕒 {String(s.created_at).slice(0, 16).replace('T', ' ')}</span>
+                    </div>
                   </div>
-                  <div style={{ color: 'var(--text3)', display: 'flex', alignItems: 'center', gap: 12 }}>
-                    <span>👤 {s.created_by}</span>
-                    <span>🕒 {String(s.created_at).slice(0, 16).replace('T', ' ')}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

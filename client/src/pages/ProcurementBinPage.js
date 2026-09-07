@@ -2941,10 +2941,30 @@ export default function ProcurementBinPage() {
     if (fresh && fresh !== previewOrder) setPreviewOrder(fresh);
   }, [safeOrders, previewOrder]);
   const READ_ONLY_STATUSES = ['delivery_hub','partial_hub','transit_hub','partial_dispatched','transit_customer','closed'];
-  const procOrders = safeOrders.filter(o =>
-    ['procurement','sup_payment_update', ...READ_ONLY_STATUSES].includes(o.status) &&
-    (o.lineItems||[]).some(li=>!['delivered','closed'].includes(li.line_status))
-  );
+  const procOrders = safeOrders.filter(o => {
+    if (!o || ['closed', 'cancelled', 'deleted'].includes(o.status)) return false;
+    if (['delivery_hub', 'transit_customer', 'partial_dispatched'].includes(o.status)) return false;
+
+    const soList = o.supplierOrders || [];
+    const allItems = o.lineItems || [];
+    const poItemIds = soList.flatMap(so => so.items || []);
+    const rowEnquiry = findEnquiry(o.enquiry_id, o.enquiry_no);
+    const hasUnallocatedItems = allItems.some(li => !poItemIds.includes(li.id) && !getSourcedSupplierId(li, rowEnquiry));
+    const allPOsReceived = soList.length > 0 && soList.every(so => so.status === 'received');
+
+    // If all items are allocated and all POs are received, procurement is complete -> order belongs in Delivery Hub
+    if (!hasUnallocatedItems && allPOsReceived) return false;
+
+    // Active procurement orders
+    if (['procurement', 'sup_payment_update'].includes(o.status)) return true;
+
+    // In-transit or partial hub orders with procurement pending
+    if (['transit_hub', 'partial_hub'].includes(o.status)) {
+      return hasUnallocatedItems || !allPOsReceived;
+    }
+
+    return false;
+  });
 
   const filteredOrders = useMemo(() => {
     let list = procOrders.filter(o => {

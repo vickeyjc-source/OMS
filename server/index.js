@@ -1872,7 +1872,13 @@ app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
   line.enquiry_created_at = enquiry?.enquiry_created_at || line.enquiry_created_at;
   line.enquiry_no = enquiry?.enquiry_no || line.enquiry_id;
   line.comparison_complete = Boolean(line.comparison_completed_at);
-  line.award_snapshots = await allAsync('SELECT * FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC', [line.id]);
+  line.award_snapshots = await allAsync(`
+    SELECT s.*, u.name AS user_name, u.username, u.email AS user_email, u.role AS user_role, u.department AS user_department
+    FROM rfq_award_snapshots s
+    LEFT JOIN users u ON u.id = s.created_by
+    WHERE s.rfq_line_id=?
+    ORDER BY s.version DESC
+  `, [line.id]);
   const latestSnap = (line.award_snapshots || [])[0];
   if (latestSnap) {
     if (!line.comparison_currency && latestSnap.comparison_currency) {
@@ -4386,6 +4392,21 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
   try { advRows = await allAsync("SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
 
+  // Auto-heal in PostgreSQL/SQLite: mark any fully paid Advance queue row as status='paid'
+  // when balance is cleared and not awaiting release
+  try {
+    await runAsync(`UPDATE finance_queue
+      SET status='paid'
+      WHERE status='pending'
+        AND paid_amount IS NOT NULL
+        AND amount IS NOT NULL
+        AND amount > 0
+        AND paid_amount >= (amount - 0.01)
+        AND (release_pending IS NULL OR release_pending=0)`);
+  } catch(e) {
+    console.warn('[FINANCE] supplier-queue advance auto-heal error:', e?.message || e);
+  }
+
   // Auto-heal in PostgreSQL/SQLite: mark any fully paid Net PO as status='paid'
   try {
     await runAsync(`UPDATE supplier_orders
@@ -4412,23 +4433,31 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
   res.json({
-    advance: advRows.map(r => {
-      const total = parseFloat(r.amount) || parseFloat(r.confirmed_price) || 0;
-      const paid = parseFloat(r.paid_amount) || 0;
-      const releaseTotal = requiredSupplierReleaseTotal(total, r);
-      const fullBalance = Math.max(0, total - paid);
-      const releaseBalance = Math.max(0, releaseTotal - paid);
-      const releaseReady = paid >= releaseTotal;
-      const dueNow = r.payment_blocked === 0 ? fullBalance : (releaseBalance > 0 ? releaseBalance : 0);
-      return {
-        ...r,
-        supplier: supMap[r.supplier_id]||null,
-        payment_due_total: parseFloat(dueNow.toFixed(2)),
-        release_due_total: parseFloat(releaseTotal.toFixed(2)),
-        full_balance_due: parseFloat(fullBalance.toFixed(2)),
-        release_ready: releaseReady ? 1 : 0,
-      };
-    }),
+    advance: advRows
+      .map(r => {
+        const total = parseFloat(r.amount) || parseFloat(r.confirmed_price) || 0;
+        const paid = parseFloat(r.paid_amount) || 0;
+        const releaseTotal = requiredSupplierReleaseTotal(total, r);
+        const fullBalance = Math.max(0, total - paid);
+        const releaseBalance = Math.max(0, releaseTotal - paid);
+        const releaseReady = paid >= releaseTotal;
+        const dueNow = r.payment_blocked === 0 ? fullBalance : (releaseBalance > 0 ? releaseBalance : 0);
+        return {
+          ...r,
+          supplier: supMap[r.supplier_id]||null,
+          payment_due_total: parseFloat(dueNow.toFixed(2)),
+          release_due_total: parseFloat(releaseTotal.toFixed(2)),
+          full_balance_due: parseFloat(fullBalance.toFixed(2)),
+          release_ready: releaseReady ? 1 : 0,
+        };
+      })
+      .filter(r => {
+        const releasePending = r.release_pending === 1 || r.release_pending === true;
+        // If entire balance is completed/nil (<= 0.009) and NOT awaiting release,
+        // this advance payment is completed and moves out of pending queue.
+        if (r.full_balance_due <= 0.009 && !releasePending) return false;
+        return true;
+      }),
     net: netRows
       .filter(r => {
         const total = parseFloat(r.confirmed_price) || 0;
@@ -5164,7 +5193,9 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           l.total_paid_snapshot, l.remaining_snapshot, l.grand_total,
                           l.additional_charges, l.actual_amount, l.amount_change_note,
                           l.amount AS paid_amount,
-                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          COALESCE(NULLIF(l.order_id, ''), so.order_id) AS order_id,
+                          COALESCE(NULLIF(l.order_id, ''), so.order_id) AS linked_order_id,
+                          so.internal_po_no, so.po_no,
                           so.confirmed_currency, so.confirmed_price,
                           s.name AS supplier_name,
                           'advance' AS payment_kind
@@ -5175,9 +5206,12 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
   } catch(_) { supPmts = []; }
   // Legacy fallback: finance_queue rows paid BEFORE the per-installment log existed.
   try {
-    const legacy = await allAsync(`SELECT fq.*, so.internal_po_no, so.po_no, so.supplier_ref,
+    const legacy = await allAsync(`SELECT fq.*,
+                           COALESCE(NULLIF(fq.order_id, ''), so.order_id) AS order_id,
+                           COALESCE(NULLIF(fq.order_id, ''), so.order_id) AS linked_order_id,
+                           so.internal_po_no, so.po_no, so.supplier_ref,
                            so.confirmed_currency, so.confirmed_price,
-                           so.order_id AS linked_order_id, s.name AS supplier_name,
+                           s.name AS supplier_name,
                            'advance' AS payment_kind
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
@@ -5196,7 +5230,8 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           l.zoho_po_number, l.supplier_ref,
                           l.total_paid_snapshot, l.remaining_snapshot, l.grand_total,
                           l.additional_charges, l.actual_amount, l.amount_change_note,
-                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          so.order_id, so.order_id AS linked_order_id,
+                          so.internal_po_no, so.po_no,
                           so.supplier_id, so.confirmed_currency,
                           s.name AS supplier_name,
                           'net' AS payment_kind
@@ -5225,7 +5260,8 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           so.net_additional_charges AS additional_charges,
                           so.net_actual_amount AS actual_amount,
                           so.net_amount_change_note AS amount_change_note,
-                          so.internal_po_no, so.po_no, so.order_id AS linked_order_id,
+                          so.order_id, so.order_id AS linked_order_id,
+                          so.internal_po_no, so.po_no,
                           so.supplier_id, so.confirmed_currency,
                           s.name AS supplier_name,
                           'net' AS payment_kind

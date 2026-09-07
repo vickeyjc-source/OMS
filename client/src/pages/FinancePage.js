@@ -1600,7 +1600,7 @@ function CombinedPaymentHistory({ payments, onSelect }) {
                   {isCustomer ? 'Customer' : 'Supplier'}
                 </span>
                 <span className="mono" style={{fontWeight:700,color:isCustomer?'var(--accent)':'var(--teal,#0d9488)'}}>
-                  {isCustomer ? payment.order_id : (payment.internal_po_no || payment.supplier_order_id)}
+                  {payment.order_id || payment.linked_order_id || (isCustomer ? '—' : (payment.internal_po_no || payment.supplier_order_id))}
                 </span>
               </div>
               <span style={{fontWeight:800,color:'var(--green)',fontSize:14}}>{fmtM(amount, currency)}</span>
@@ -1804,7 +1804,16 @@ export default function FinancePage() {
     const bal = o.balance_due !== undefined ? Number(o.balance_due) : Math.max(0, (Number(o.order_total || o.total_amount || 0)) - Number(o.total_paid || 0));
     return bal > 0.009;
   });
-  const supAdvance  = supQueue.advance || [];
+  const supAdvance  = (supQueue.advance || []).filter(r => {
+    if (r.status === 'paid') return false;
+    const releasePending = r.release_pending === 1 || r.release_pending === true;
+    const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
+      ? parseFloat(r.full_balance_due) || 0
+      : Math.max(0, (parseFloat(r.amount) || 0) - (parseFloat(r.paid_amount) || 0));
+    // If advance payment is fully paid/nil and not awaiting release, it moves out of queue
+    if (balance <= 0.009 && !releasePending) return false;
+    return true;
+  });
   const supNet      = (supQueue.net || []).filter(r => {
     if (r.status === 'paid') return false;
     const total = parseFloat(r.confirmed_price || r.total_amount || 0);

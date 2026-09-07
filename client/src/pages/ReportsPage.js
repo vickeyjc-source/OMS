@@ -134,10 +134,15 @@ function OverviewSection({ summary, orders, enquiries, quotes }) {
 }
 
 // ── Detail View Modal (read-only) ─────────────────────────────────────────────
-function ReportDetailModal({ record, type, onClose, customers, orders }) {
+function ReportDetailModal({ record, type, onClose, customers, orders, users = [] }) {
   const navigate  = useNavigate();
   const custName  = id => customers.find(c => c.id === id)?.name || id;
   const inrFmt    = n => '₹' + parseFloat(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const userName  = id => {
+    if (!id) return '—';
+    const u = users.find(x => x.id === id || x.username === id);
+    return u ? `${u.name}${u.role ? ` (${u.role})` : ''}` : id;
+  };
 
   const handleDownload = () => {
     const cust = customers.find(c => c.id === record.customer_id);
@@ -277,7 +282,7 @@ function ReportDetailModal({ record, type, onClose, customers, orders }) {
                 <tr><td className="label">Priority</td><td><span className={`badge ${record.priority === 'urgent' ? 'badge-red' : record.priority === 'high' ? 'badge-amber' : 'badge-gray'}`}>{record.priority || '—'}</span></td></tr>
                 <tr><td className="label">Buying Type</td><td>{record.buying_type || '—'}</td></tr>
                 <tr><td className="label">Sourcing No.</td><td>{record.sourcing_no || '—'}</td></tr>
-                <tr><td className="label">Assigned To</td><td>{record.assigned_to || 'Unassigned'}</td></tr>
+                <tr><td className="label">Assigned To</td><td>{record.assigned_to ? userName(record.assigned_to) : 'Unassigned'}</td></tr>
                 <tr><td className="label">Created</td><td>{(record.created_at || '').slice(0, 10)}</td></tr>
               </tbody>
             </table>
@@ -589,8 +594,14 @@ export default function ReportsPage() {
   const { data: customers = [] } = useQuery({ queryKey: ['customers'], queryFn: () => api.get('/customers').then(r => r.data).catch(() => []) });
   const { data: summary   = {} } = useQuery({ queryKey: ['summary'],   queryFn: () => api.get('/reports/summary').then(r => r.data).catch(() => ({})) });
   const { data: financeQ  = [] } = useQuery({ queryKey: ['finance'],   queryFn: () => api.get('/finance-queue').then(r => r.data).catch(() => []) });
+  const { data: users     = [] } = useQuery({ queryKey: ['users'],     queryFn: () => api.get('/users').then(r => r.data).catch(() => []) });
 
   const custName = id => customers.find(c => c.id === id)?.name || id;
+  const getUserName = id => {
+    if (!id) return '—';
+    const u = users.find(x => x.id === id || x.username === id);
+    return u ? `${u.name || u.username}${u.role ? ` (${u.role})` : ''}` : id;
+  };
   const today = new Date();
 
   // ── Group quotes by enquiry_id — one row per enquiry (latest/primary) ──
@@ -664,7 +675,7 @@ export default function ReportsPage() {
       component: r => <span className="badge badge-blue">{r.items?.length || 0}</span> },
     { key: 'status',      label: 'Status',       render: r => r.status,
       component: r => <StatusBadge s={r.status} /> },
-    { key: 'assigned_to', label: 'Assigned To',  render: r => r.assigned_to || '—' },
+    { key: 'assigned_to', label: 'Assigned To',  render: r => getUserName(r.assigned_to) },
     { key: 'days',        label: 'Days in Stage',
       render: r => { const d = r.updated_at || r.created_at; return d ? Math.floor((Date.now() - new Date(d.replace(' ','T'))) / 86400000) + 'd' : '—'; },
       component: r => <DaysBadge updatedAt={r.updated_at || r.created_at} /> },
@@ -703,7 +714,7 @@ export default function ReportsPage() {
       }
     },
     { key: 'status',      label: 'Status',       render: r => r.status, component: r => <StatusBadge s={r.status} /> },
-    { key: 'assigned_to', label: 'Assigned To',  render: r => r.assigned_to || '—' },
+    { key: 'assigned_to', label: 'Assigned To',  render: r => getUserName(r.assigned_to) },
     { key: 'days',        label: 'Days in Stage', render: r => '—', component: r => <DaysBadge updatedAt={r.updated_at || r.created_at} /> },
   ];
 
@@ -846,6 +857,7 @@ export default function ReportsPage() {
           onClose={closeDetail}
           customers={customers}
           orders={orders}
+          users={users}
         />
       )}
     </div>

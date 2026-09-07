@@ -123,6 +123,16 @@ async function nextIdAsync(table, prefix, pad) {
 // ── assembleOrder / assembleEnquiry ───────────────────────────────────────────
 async function assembleOrder(order) {
   const o = { ...order };
+  if (o.created_by && !o.created_by_name) {
+    const creator = await getAsync('SELECT name, username, email, role, department FROM users WHERE id=?', [o.created_by]);
+    if (creator) {
+      o.created_by_name = creator.name;
+      o.created_by_username = creator.username;
+      o.created_by_email = creator.email;
+      o.created_by_role = creator.role;
+      o.created_by_department = creator.department;
+    }
+  }
   o.lineItems = await allAsync('SELECT * FROM order_items WHERE order_id=? ORDER BY sort_order', [o.id]);
   const sos     = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [o.id]);
   const soIds   = sos.map(s => s.id);
@@ -170,6 +180,26 @@ async function assembleOrder(order) {
 
 async function assembleEnquiry(enq) {
   const e = { ...enq };
+  if (e.assigned_to && !e.assigned_to_name) {
+    const assignee = await getAsync('SELECT name, username, email, role, department FROM users WHERE id=?', [e.assigned_to]);
+    if (assignee) {
+      e.assigned_to_name = assignee.name;
+      e.assigned_to_username = assignee.username;
+      e.assigned_to_email = assignee.email;
+      e.assigned_to_role = assignee.role;
+      e.assigned_to_department = assignee.department;
+    }
+  }
+  if (e.created_by && !e.created_by_name) {
+    const creator = await getAsync('SELECT name, username, email, role, department FROM users WHERE id=?', [e.created_by]);
+    if (creator) {
+      e.created_by_name = creator.name;
+      e.created_by_username = creator.username;
+      e.created_by_email = creator.email;
+      e.created_by_role = creator.role;
+      e.created_by_department = creator.department;
+    }
+  }
   e.items   = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? ORDER BY sort_order', [e.id]);
   e.sourcing= await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=?', [e.id]);
   e.history = await allAsync('SELECT * FROM enquiry_history WHERE enquiry_id=? ORDER BY ts DESC', [e.id]);

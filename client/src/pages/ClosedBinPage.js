@@ -17,6 +17,7 @@ export default function ClosedBinPage() {
     refetchInterval:60000,
   });
   const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data) });
+  const { data: users=[] }     = useQuery({ queryKey:['users'],     queryFn:()=>api.get('/users').then(r=>r.data).catch(()=>[]) });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
 
@@ -97,7 +98,26 @@ export default function ClosedBinPage() {
                       ✓ {fmt(o.closed_at)}
                     </span>
                   </td>
-                  <td style={{fontSize:12}}>{o.created_by||'—'}</td>
+                  <td style={{fontSize:12}}>
+                    {(() => {
+                      const u = users.find(x => x.id === o.created_by || x.username === o.created_by);
+                      const name = o.created_by_name || u?.name || u?.username || o.created_by || '—';
+                      const role = o.created_by_role || u?.role;
+                      const email = o.created_by_email || u?.email;
+                      return (
+                        <div title={email ? `${name} (${email})` : name}>
+                          <div style={{fontWeight:600,color:'var(--text)'}}>{name}</div>
+                          {(role || email) && (
+                            <div style={{fontSize:11,color:'var(--text3)',marginTop:1}}>
+                              {role && <span style={{textTransform:'capitalize',fontWeight:600,color:'var(--accent)'}}>{role}</span>}
+                              {role && email && ' • '}
+                              {email}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td style={{fontSize:12,color:'var(--text2)'}}>{(o.lineItems||[]).length} line(s)</td>
                 </tr>
               ))}
