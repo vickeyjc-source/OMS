@@ -1770,7 +1770,7 @@ async function getFxRate(from, to, actorId) {
   }
 }
 
-app.get('/api/fx-rate', auth, sectionGateAny(['rfq-analysis', 'sourcing-bin', 'procurement-bin']), asyncRoute(async (req, res) => {
+app.get(['/api/fx-rate', '/api/fx/rate'], auth, sectionGateAny(['rfq-analysis', 'sourcing-bin', 'procurement-bin']), asyncRoute(async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from and to are required' });
   const result = await getFxRate(String(from).toUpperCase(), String(to).toUpperCase(), req.session.user.id);
@@ -1802,15 +1802,61 @@ app.get('/api/rfq', auth, asyncRoute(async (req, res) => {
     FROM rfq_lines rl JOIN enquiries e ON e.id=rl.enquiry_id ORDER BY rl.created_at DESC`);
   try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_currency TEXT DEFAULT ''"); } catch(_) {}
   try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_priority TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_mode TEXT DEFAULT 'unit_price'"); } catch(_) {}
+  try { await runAsync(`CREATE TABLE IF NOT EXISTS rfq_additional_charges (
+    id TEXT PRIMARY KEY,
+    rfq_line_id TEXT NOT NULL,
+    charge_name TEXT NOT NULL,
+    charge_type TEXT NOT NULL DEFAULT 'other',
+    currency TEXT NOT NULL DEFAULT 'INR',
+    created_at TEXT,
+    updated_at TEXT
+  )`); } catch(_) {}
+  try { await runAsync("ALTER TABLE rfq_additional_charges ADD COLUMN total_amount REAL DEFAULT 0"); } catch(_) {}
+  try { await runAsync(`CREATE TABLE IF NOT EXISTS rfq_charge_supplier_amounts (
+    id TEXT PRIMARY KEY,
+    charge_id TEXT NOT NULL,
+    rfq_line_id TEXT NOT NULL,
+    supplier_id TEXT NOT NULL,
+    amount REAL DEFAULT 0,
+    updated_at TEXT
+  )`); } catch(_) {}
+  const allCharges = await allAsync('SELECT * FROM rfq_additional_charges');
+  const allAmounts = await allAsync('SELECT * FROM rfq_charge_supplier_amounts');
+  const amountsByCharge = {};
+  for (const a of (allAmounts || [])) {
+    (amountsByCharge[a.charge_id] ||= []).push(a);
+  }
+  const chargesByLine = {};
+  for (const c of (allCharges || [])) {
+    c.supplier_amounts = amountsByCharge[c.id] || [];
+    (chargesByLine[c.rfq_line_id] ||= []).push(c);
+  }
+
   for (const row of rows) {
     row.quotes = await allAsync('SELECT * FROM rfq_quotes WHERE rfq_line_id=? ORDER BY created_at', [row.id]);
-    const snap = await getAsync('SELECT comparison_mode, comparison_currency FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC LIMIT 1', [row.id]);
+    row.additional_charges = chargesByLine[row.id] || [];
+    const snap = await getAsync('SELECT comparison_mode, comparison_currency, fx_rates_used FROM rfq_award_snapshots WHERE rfq_line_id=? ORDER BY version DESC LIMIT 1', [row.id]);
     if (snap) {
       if (!row.comparison_currency && snap.comparison_currency) {
         row.comparison_currency = snap.comparison_currency;
       }
       if (!row.comparison_priority && snap.comparison_mode) {
         row.comparison_priority = snap.comparison_mode;
+      }
+      if (snap.fx_rates_used) {
+        try {
+          row.saved_fx_rates = typeof snap.fx_rates_used === 'string' ? JSON.parse(snap.fx_rates_used) : snap.fx_rates_used;
+        } catch(_) {
+          row.saved_fx_rates = {};
+        }
+      }
+    }
+    if (!row.saved_fx_rates && row.fx_rates_used) {
+      try {
+        row.saved_fx_rates = typeof row.fx_rates_used === 'string' ? JSON.parse(row.fx_rates_used) : row.fx_rates_used;
+      } catch(_) {
+        row.saved_fx_rates = {};
       }
     }
     if (typeof row.comparison_priority === 'string') {
@@ -1865,6 +1911,27 @@ app.get('/api/rfq/ciflux-history', auth, asyncRoute(async (req, res) => {
   res.json(purchases);
 }));
 app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
+  // Ensure migrations
+  try { await runAsync("ALTER TABLE rfq_lines ADD COLUMN comparison_mode TEXT DEFAULT 'unit_price'"); } catch(_) {}
+  try { await runAsync(`CREATE TABLE IF NOT EXISTS rfq_additional_charges (
+    id TEXT PRIMARY KEY,
+    rfq_line_id TEXT NOT NULL,
+    charge_name TEXT NOT NULL,
+    charge_type TEXT NOT NULL DEFAULT 'other',
+    currency TEXT NOT NULL DEFAULT 'INR',
+    created_at TEXT,
+    updated_at TEXT
+  )`); } catch(_) {}
+  try { await runAsync("ALTER TABLE rfq_additional_charges ADD COLUMN total_amount REAL DEFAULT 0"); } catch(_) {}
+  try { await runAsync(`CREATE TABLE IF NOT EXISTS rfq_charge_supplier_amounts (
+    id TEXT PRIMARY KEY,
+    charge_id TEXT NOT NULL,
+    rfq_line_id TEXT NOT NULL,
+    supplier_id TEXT NOT NULL,
+    amount REAL DEFAULT 0,
+    updated_at TEXT
+  )`); } catch(_) {}
+
   const line = await ensureRfqLine(req.params.lineId);
   if (!line) return res.status(404).json({ error: 'RFQ line not found' });
   line.quotes = await allAsync('SELECT * FROM rfq_quotes WHERE rfq_line_id=? ORDER BY created_at', [line.id]);
@@ -1887,6 +1954,20 @@ app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
     if (!line.comparison_priority && latestSnap.comparison_mode) {
       line.comparison_priority = latestSnap.comparison_mode;
     }
+    if (latestSnap.fx_rates_used) {
+      try {
+        line.saved_fx_rates = typeof latestSnap.fx_rates_used === 'string' ? JSON.parse(latestSnap.fx_rates_used) : latestSnap.fx_rates_used;
+      } catch(_) {
+        line.saved_fx_rates = {};
+      }
+    }
+  }
+  if (!line.saved_fx_rates && line.fx_rates_used) {
+    try {
+      line.saved_fx_rates = typeof line.fx_rates_used === 'string' ? JSON.parse(line.fx_rates_used) : line.fx_rates_used;
+    } catch(_) {
+      line.saved_fx_rates = {};
+    }
   }
   if (typeof line.comparison_priority === 'string') {
     try {
@@ -1899,7 +1980,83 @@ app.get('/api/rfq/:lineId', auth, asyncRoute(async (req, res) => {
   if (!Array.isArray(line.comparison_priority) || line.comparison_priority.length !== 3) {
     line.comparison_priority = ['price','lead','terms'];
   }
+  // Load additional charges with per-supplier amounts
+  const charges = await allAsync('SELECT * FROM rfq_additional_charges WHERE rfq_line_id=? ORDER BY created_at', [line.id]);
+  for (const charge of charges) {
+    charge.supplier_amounts = await allAsync('SELECT * FROM rfq_charge_supplier_amounts WHERE charge_id=?', [charge.id]);
+  }
+  line.additional_charges = charges;
+  // Comparison mode
+  if (!line.comparison_mode || !['unit_price','total_cost'].includes(line.comparison_mode)) {
+    line.comparison_mode = 'unit_price';
+  }
   res.json(line);
+}));
+
+// GET additional charges for a line
+app.get('/api/rfq/:lineId/charges', auth, asyncRoute(async (req, res) => {
+  const charges = await allAsync('SELECT * FROM rfq_additional_charges WHERE rfq_line_id=? ORDER BY created_at', [req.params.lineId]);
+  for (const charge of charges) {
+    charge.supplier_amounts = await allAsync('SELECT * FROM rfq_charge_supplier_amounts WHERE charge_id=?', [charge.id]);
+  }
+  res.json(charges);
+}));
+
+// POST upsert a charge
+app.post('/api/rfq/:lineId/charges', auth, asyncRoute(async (req, res) => {
+  const lineId = req.params.lineId;
+  const d = req.body;
+  const now = nowStr();
+  if (!d.charge_name) return res.status(400).json({ error: 'charge_name required' });
+  if (d.id) {
+    await runAsync('UPDATE rfq_additional_charges SET charge_name=?,charge_type=?,currency=?,total_amount=?,updated_at=? WHERE id=? AND rfq_line_id=?',
+      [d.charge_name, d.charge_type||'other', d.currency||'INR', d.total_amount ?? 0, now, d.id, lineId]);
+  } else {
+    const chargeId = uuid();
+    await runAsync('INSERT INTO rfq_additional_charges(id,rfq_line_id,charge_name,charge_type,currency,total_amount,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+      [chargeId, lineId, d.charge_name, d.charge_type||'other', d.currency||'INR', d.total_amount ?? 0, now, now]);
+    d.id = chargeId;
+  }
+  // Upsert supplier amounts if provided
+  if (Array.isArray(d.supplier_amounts)) {
+    for (const sa of d.supplier_amounts) {
+      if (!sa.supplier_id) continue;
+      const existing = await getAsync('SELECT id FROM rfq_charge_supplier_amounts WHERE charge_id=? AND supplier_id=?', [d.id, sa.supplier_id]);
+      if (existing) {
+        await runAsync('UPDATE rfq_charge_supplier_amounts SET amount=?,updated_at=? WHERE id=?', [sa.amount ?? 0, now, existing.id]);
+      } else {
+        await runAsync('INSERT INTO rfq_charge_supplier_amounts(id,charge_id,rfq_line_id,supplier_id,amount,updated_at) VALUES(?,?,?,?,?,?)',
+          [uuid(), d.id, lineId, sa.supplier_id, sa.amount ?? 0, now]);
+      }
+    }
+  }
+  saveNow();
+  res.json({ ok: true, id: d.id });
+}));
+
+// POST upsert a supplier amount for a specific charge
+app.post('/api/rfq/:lineId/charges/:chargeId/supplier-amount', auth, asyncRoute(async (req, res) => {
+  const { lineId, chargeId } = req.params;
+  const { supplier_id, amount } = req.body;
+  if (!supplier_id) return res.status(400).json({ error: 'supplier_id required' });
+  const now = nowStr();
+  const existing = await getAsync('SELECT id FROM rfq_charge_supplier_amounts WHERE charge_id=? AND supplier_id=?', [chargeId, supplier_id]);
+  if (existing) {
+    await runAsync('UPDATE rfq_charge_supplier_amounts SET amount=?,updated_at=? WHERE id=?', [amount ?? 0, now, existing.id]);
+  } else {
+    await runAsync('INSERT INTO rfq_charge_supplier_amounts(id,charge_id,rfq_line_id,supplier_id,amount,updated_at) VALUES(?,?,?,?,?,?)',
+      [uuid(), chargeId, lineId, supplier_id, amount ?? 0, now]);
+  }
+  saveNow();
+  res.json({ ok: true });
+}));
+
+// DELETE a charge
+app.delete('/api/rfq/:lineId/charges/:chargeId', auth, asyncRoute(async (req, res) => {
+  await runAsync('DELETE FROM rfq_charge_supplier_amounts WHERE charge_id=?', [req.params.chargeId]);
+  await runAsync('DELETE FROM rfq_additional_charges WHERE id=? AND rfq_line_id=?', [req.params.chargeId, req.params.lineId]);
+  saveNow();
+  res.json({ ok: true });
 }));
 
 app.post('/api/rfq/:lineId/quotes', auth, asyncRoute(async (req, res) => {
@@ -1923,12 +2080,21 @@ app.post('/api/rfq/:lineId/save-comparison', auth, asyncRoute(async (req, res) =
   const compCurrency = req.body.comparison_currency || line.comparison_currency || line.target_currency || 'INR';
   const compPriority = req.body.comparison_priority || line.comparison_priority || ['price','lead','terms'];
   const compPriorityJson = typeof compPriority === 'string' ? compPriority : JSON.stringify(compPriority);
+  const compMode = req.body.comparison_mode || line.comparison_mode || 'unit_price';
 
-  await runAsync('INSERT INTO rfq_award_snapshots(id,rfq_line_id,version,kind,comparison_currency,comparison_mode,awarded_supplier_id,fx_rates_used,quotes_snapshot,computed_results,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,Number(previous?.version||0)+1,'saved',compCurrency,compPriorityJson,null,JSON.stringify(req.body.fx_rates_used||{}),JSON.stringify(req.body.quotes_snapshot||[]),JSON.stringify(req.body.computed_results||{}),req.session.user.id,now]);
+  const fxRatesJson = JSON.stringify(req.body.fx_rates_used || {});
+  await runAsync('INSERT INTO rfq_award_snapshots(id,rfq_line_id,version,kind,comparison_currency,comparison_mode,awarded_supplier_id,fx_rates_used,quotes_snapshot,computed_results,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [uuid(),line.id,Number(previous?.version||0)+1,'saved',compCurrency,compPriorityJson,null,fxRatesJson,JSON.stringify(req.body.quotes_snapshot||[]),JSON.stringify(req.body.computed_results||{}),req.session.user.id,now]);
   try {
-    await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, comparison_currency=?, comparison_priority=?, updated_at=? WHERE id=?', [now, compCurrency, compPriorityJson, now, line.id]);
+    await runAsync('ALTER TABLE rfq_lines ADD COLUMN fx_rates_used TEXT DEFAULT "{}"');
+  } catch(_) {}
+  try {
+    await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, comparison_currency=?, comparison_priority=?, comparison_mode=?, fx_rates_used=?, updated_at=? WHERE id=?', [now, compCurrency, compPriorityJson, compMode, fxRatesJson, now, line.id]);
   } catch(e) {
-    await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, updated_at=? WHERE id=?', [now, now, line.id]);
+    try {
+      await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, comparison_currency=?, comparison_priority=?, updated_at=? WHERE id=?', [now, compCurrency, compPriorityJson, now, line.id]);
+    } catch(e2) {
+      await runAsync('UPDATE rfq_lines SET comparison_completed_at=?, updated_at=? WHERE id=?', [now, now, line.id]);
+    }
   }
   saveNow(); res.json({ ok: true });
 }));

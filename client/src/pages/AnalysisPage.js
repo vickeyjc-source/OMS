@@ -75,13 +75,13 @@ function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, 
 
           <div style={{ width: 120, flexShrink: 0, fontSize: 13 }}>
             <span className="badge badge-green">
-              {Math.max(0, Math.floor((Date.now() - new Date(allInEnq[0]?.enquiry_created_at || allInEnq[0]?.created_at).getTime()) / (1000 * 3600 * 24)))}d
+              {Math.max(0, Math.floor((Date.now() - new Date(String(allInEnq[0]?.enquiry_created_at || allInEnq[0]?.created_at || '').replace(' ', 'T')).getTime()) / (1000 * 3600 * 24)))}d
             </span>
           </div>
 
           <div style={{ flex: 1, fontSize: 13 }}>
             <span style={{ color: 'var(--text1)' }}>
-              {allInEnq[0]?.enquiry_created_at ? new Date(allInEnq[0].enquiry_created_at).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : lineDate(allInEnq[0])}
+              {allInEnq[0]?.enquiry_created_at ? new Date(String(allInEnq[0].enquiry_created_at).replace(' ', 'T')).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : lineDate(allInEnq[0])}
             </span>
           </div>
         </div>
@@ -104,10 +104,11 @@ function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, 
           </thead>
           <tbody>
             {rows.map((line, idx) => {
-              const priority = line.comparison_priority || ['price', 'lead', 'terms'];
+              const priority = (line.comparison_priority || ['total_cost', 'lead', 'terms']).map(p => (p === 'price' ? 'total_cost' : p));
               const compareCurr = line.comparison_currency || line.target_currency || 'INR';
-              const { ranked } = rankLine(line.quotes, suppliersById, { compareCurrency: compareCurr, rates: ratesFor(compareCurr), priority, qty: line.quantity });
-              const priorityLabel = p => p === 'price' ? 'Price' : p === 'lead' ? 'Lead' : p === 'terms' ? 'Terms' : '—';
+              const lineRates = Object.assign({}, ratesFor(compareCurr), line.saved_fx_rates || {});
+              const { ranked } = rankLine(line.quotes, suppliersById, { compareCurrency: compareCurr, rates: lineRates, priority, qty: line.quantity, additionalCharges: line.additional_charges || [] });
+              const priorityLabel = p => (p === 'price' || p === 'total_cost') ? 'Total Cost' : p === 'lead' ? 'Lead' : p === 'terms' ? 'Terms' : '—';
               const first = ranked[0], second = ranked[1], third = ranked[2];
               const resizeRow = e => { e.stopPropagation(); startRowDrag(e, line.id, e.currentTarget.closest('tr').getBoundingClientRect().height); };
               const autoFitThisRow = e => { e.stopPropagation(); autoFitRow(gridRef, line.id); };
@@ -118,10 +119,18 @@ function EnquiryGroupGrid({ enqId, rows, allInEnq, customerName, suppliersById, 
                 const isInvStock = r.supplier_id?.startsWith('__inv__');
                 const invStockHit = isInvStock ? (inventoryItems || []).find(h => h.id === r.supplier_id.slice(7)) : null;
                 const supName = isInvStock ? ((invStockHit?.holder_display || invStockHit?.holder_name || 'Warehouse') + ' (Stock)') : (suppliersById[r.supplier_id]?.name || r.supplier_id);
+                const displayCost = r.normalizedTotalCost !== null && r.normalizedTotalCost !== undefined ? r.normalizedTotalCost : r.normalizedPrice;
                 return (
-                  <div className={`rfq-choice rfq-choice-${tone}`}>
-                    <span className="rfq-choice-name">{supName}</span>
-                    <span className="rfq-choice-price">{compareCurr} {fmt(r.normalizedPrice)}</span>
+                  <div className={`rfq-choice rfq-choice-${tone}`} style={{ padding: '5px 8px', textAlign: 'center' }}>
+                    <span className="rfq-choice-name" style={{ fontWeight: 800, fontSize: 12 }}>{supName}</span>
+                    <span className="rfq-choice-price" style={{ fontSize: 11, marginTop: 2 }}>
+                      Price: <strong>{compareCurr} {fmt(displayCost)}</strong>
+                    </span>
+                    {r.score !== undefined && (
+                      <span className="rfq-choice-score" style={{ fontSize: 11, fontWeight: 700 }}>
+                        Score: <strong>{r.score}</strong>
+                      </span>
+                    )}
                   </div>
                 );
               };

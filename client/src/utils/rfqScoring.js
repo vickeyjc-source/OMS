@@ -8,15 +8,18 @@
 export const CURRENCIES = ['INR', 'USD', 'EUR'];
 
 export const COST_TYPES = [
-  { value: 'lab_testing', label: 'Lab / Testing' },
-  { value: 'inspection', label: 'Inspection' },
-  { value: 'local_transport', label: 'Local Transportation' },
-  { value: 'freight', label: 'Freight' },
-  { value: 'handling', label: 'Handling' },
-  { value: 'customs_duty', label: 'Customs / Duty' },
-  { value: 'documentation', label: 'Documentation' },
-  { value: 'other_local', label: 'Other Local Charges' },
-  { value: 'other_manual', label: 'Other' },
+  { value: 'freight',        label: 'Freight Charges' },
+  { value: 'courier',        label: 'Courier Charges' },
+  { value: 'bank_charges',   label: 'Bank Charges' },
+  { value: 'lab_testing',    label: 'Lab / Testing' },
+  { value: 'inspection',     label: 'Inspection' },
+  { value: 'customs_duty',   label: 'Customs / Duty' },
+  { value: 'documentation',  label: 'Documentation' },
+  { value: 'handling',       label: 'Handling Charges' },
+  { value: 'local_transport',label: 'Local Transportation' },
+  { value: 'insurance',      label: 'Insurance' },
+  { value: 'packing',        label: 'Packing Charges' },
+  { value: 'other',          label: 'Other' },
 ];
 export const costTypeLabel = v => COST_TYPES.find(c => c.value === v)?.label || v;
 
@@ -56,9 +59,17 @@ export function costPerUnit(cost, compareCurrency, rates, qty) {
   return cost.allocation === 'per_unit' ? converted : (qty > 0 ? converted / qty : converted);
 }
 
-// opts: { compareCurrency, rates, priority: ['price', 'lead', 'terms'], qty }
+// opts: { compareCurrency, rates, priority: ['total_cost', 'lead', 'terms'], qty, additionalCharges }
+// additionalCharges: array of { id, charge_name, total_amount, currency, supplier_amounts: [{supplier_id, amount}] }
 export function rankLine(quotes, suppliersById, opts = {}) {
-  const { compareCurrency = 'INR', rates = {}, priority = ['price', 'lead', 'terms'], qty = 1 } = opts;
+  const {
+    compareCurrency = 'INR',
+    rates = {},
+    priority = ['total_cost', 'lead', 'terms'],
+    qty = 1,
+    additionalCharges = []
+  } = opts;
+
   const filled = (quotes || []).filter(q => q.price !== null && q.price !== '' && !isNaN(q.price));
   if (!filled.length) {
     return { ranked: [], bestPrice: null, bestPriceSupplierId: null, bestTotalCost: null, bestTotalCostSupplierId: null, fastestLead: null, fastestLeadSupplierId: null, reason: 'Awaiting quotes' };
@@ -67,56 +78,130 @@ export function rankLine(quotes, suppliersById, opts = {}) {
   const enriched = filled.map(q => {
     const normalizedPrice = convert(q.price, q.currency, compareCurrency, rates);
     const actualQty = Number(q.available_qty) || qty;
+    // Legacy per-quote costs (keep backward compat)
     const costsPerUnit = (q.costs || []).map(c => costPerUnit(c, compareCurrency, rates, actualQty));
     const costsResolved = costsPerUnit.every(v => v !== null);
-    const totalAddlPerUnit = costsResolved ? costsPerUnit.reduce((a, b) => a + b, 0) : null;
-    const normalizedTotalCost = (normalizedPrice !== null && totalAddlPerUnit !== null) ? normalizedPrice + totalAddlPerUnit : null;
-    return { ...q, normalizedPrice, totalAddlPerUnit, normalizedTotalCost };
+    const legacyAddlPerUnit = costsResolved ? costsPerUnit.reduce((a, b) => a + b, 0) : 0;
+    // Per-line additional charges — each charge has per-supplier amounts
+    let additionalChargesTotal = 0;
+    let allChargesResolved = true;
+    for (const charge of additionalCharges) {
+      const saEntry = (charge.supplier_amounts || []).find(sa => sa.supplier_id === q.supplier_id);
+      const chargeAmt = saEntry ? Number(saEntry.amount) || 0 : 0;
+      const convertedCharge = convert(chargeAmt, charge.currency || compareCurrency, compareCurrency, rates);
+      if (convertedCharge === null) { allChargesResolved = false; break; }
+      additionalChargesTotal += convertedCharge;
+    }
+    const totalAddlPerUnit = allChargesResolved ? (legacyAddlPerUnit + additionalChargesTotal / Math.max(actualQty, 1)) : null;
+    const normalizedTotalCost = (normalizedPrice !== null && totalAddlPerUnit !== null) ? normalizedPrice + totalAddlPerUnit : normalizedPrice;
+    return { ...q, normalizedPrice, totalAddlPerUnit, normalizedTotalCost, additionalChargesTotal };
   });
 
-  const valid = enriched.filter(q => q.normalizedPrice !== null); // has a usable FX rate for its quote currency
+  const valid = enriched.filter(q => q.normalizedPrice !== null);
   if (!valid.length) {
     return { ranked: [], bestPrice: null, bestPriceSupplierId: null, bestTotalCost: null, bestTotalCostSupplierId: null, fastestLead: null, fastestLeadSupplierId: null, reason: 'FX rate unavailable for these currencies' };
   }
 
+  // Cost comparison always compares Total Cost (which equals Unit Price if no additional charges)
+  const totalCostVals = valid.map(q => (q.normalizedTotalCost !== null ? q.normalizedTotalCost : q.normalizedPrice));
   const prices = valid.map(q => q.normalizedPrice);
-  const totalCostVals = valid.filter(q => q.normalizedTotalCost !== null).map(q => q.normalizedTotalCost);
   const leadsArr = valid.filter(q => q.lead_days !== null && q.lead_days !== '').map(q => Number(q.lead_days));
   const termScores = valid.map(q => paymentScore(suppliersById[q.supplier_id]));
 
   const minP = Math.min(...prices), maxP = Math.max(...prices);
-  const minTC = totalCostVals.length ? Math.min(...totalCostVals) : null, maxTC = totalCostVals.length ? Math.max(...totalCostVals) : null;
-  const minL = leadsArr.length ? Math.min(...leadsArr) : null, maxL = leadsArr.length ? Math.max(...leadsArr) : null;
+  const minTC = totalCostVals.length ? Math.min(...totalCostVals) : minP;
+  const maxTC = totalCostVals.length ? Math.max(...totalCostVals) : maxP;
+  const minL = leadsArr.length ? Math.min(...leadsArr) : null;
+  const maxL = leadsArr.length ? Math.max(...leadsArr) : null;
   const minT = Math.min(...termScores), maxT = Math.max(...termScores);
 
   const bestPriceSupplierId = valid.find(q => q.normalizedPrice === minP)?.supplier_id || null;
-  const bestTotalCostSupplierId = minTC !== null ? (valid.find(q => q.normalizedTotalCost === minTC)?.supplier_id || null) : null;
+  const bestTotalCostSupplierId = valid.find(q => (q.normalizedTotalCost !== null ? q.normalizedTotalCost : q.normalizedPrice) === minTC)?.supplier_id || null;
   const fastestLeadSupplierId = minL !== null ? (valid.find(q => Number(q.lead_days) === minL)?.supplier_id || null) : null;
 
-  const scored = valid.map(q => {
-    const basisValue = q.normalizedPrice;
-    const basisMin = minP;
-    const basisMax = maxP;
-    const priceScore = basisMax === basisMin ? 100 : (basisMax - basisValue) / (basisMax - basisMin) * 100;
-    const l = q.lead_days !== null && q.lead_days !== '' ? Number(q.lead_days) : null;
-    const leadScore = (l === null || minL === null) ? 0 : (maxL === minL ? 100 : (maxL - l) / (maxL - minL) * 100);
-    const ts = paymentScore(suppliersById[q.supplier_id]);
-    const termsScore = maxT === minT ? 100 : (ts - minT) / (maxT - minT) * 100;
-    
-    const weights = { [priority[0]]: 0.4, [priority[1]]: 0.3, [priority[2]]: 0.3 };
-    const combined = (weights.price || 0) * priceScore + (weights.lead || 0) * leadScore + (weights.terms || 0) * termsScore;
-    
-    return { ...q, combined };
+  // Compute weights from priority slots: 1st Priority = 40%, 2nd Priority = 30%, 3rd Priority = 30%
+  const normPriority = (priority || []).map(p => (p === 'price' ? 'total_cost' : p));
+  const weights = { total_cost: 0, lead: 0, terms: 0 };
+  normPriority.forEach((p, idx) => {
+    const w = idx === 0 ? 0.40 : 0.30;
+    if (weights[p] !== undefined) weights[p] += w;
   });
-  scored.sort((a, b) => b.combined - a.combined);
+  if (weights.total_cost === 0 && weights.lead === 0 && weights.terms === 0) {
+    weights.total_cost = 0.40;
+    weights.lead = 0.30;
+    weights.terms = 0.30;
+  }
+
+  const scored = valid.map(q => {
+    // 1. Total Cost score (0 - 100) — lowest cost gets 100
+    const myCost = q.normalizedTotalCost !== null ? q.normalizedTotalCost : q.normalizedPrice;
+    const costScore = maxTC === minTC ? 100 : Math.max(0, Math.min(100, ((maxTC - myCost) / (maxTC - minTC)) * 100));
+
+    // 2. Lead Time score (0 - 100) — fastest lead gets 100
+    const l = (q.lead_days !== null && q.lead_days !== '') ? Number(q.lead_days) : null;
+    const leadScore = (l === null || minL === null) ? 0 : (maxL === minL ? 100 : Math.max(0, Math.min(100, ((maxL - l) / (maxL - minL)) * 100)));
+
+    // 3. Payment Terms score (0 - 100) — best terms get 100
+    const ts = paymentScore(suppliersById[q.supplier_id]);
+    const termsScore = maxT === minT ? 100 : Math.max(0, Math.min(100, ((ts - minT) / (maxT - minT)) * 100));
+
+    // Combined score out of 100 based on weightage
+    const weightedCost = weights.total_cost * costScore;
+    const weightedLead = weights.lead * leadScore;
+    const weightedTerms = weights.terms * termsScore;
+    const totalScore = Math.round((weightedCost + weightedLead + weightedTerms) * 10) / 10;
+
+    return {
+      ...q,
+      score: totalScore,
+      combined: totalScore,
+      costScore: Math.round(costScore * 10) / 10,
+      leadScore: Math.round(leadScore * 10) / 10,
+      termsScore: Math.round(termsScore * 10) / 10,
+      scoreBreakdown: {
+        cost: Math.round(weightedCost * 10) / 10,
+        lead: Math.round(weightedLead * 10) / 10,
+        terms: Math.round(weightedTerms * 10) / 10,
+        rawCost: Math.round(costScore * 10) / 10,
+        rawLead: Math.round(leadScore * 10) / 10,
+        rawTerms: Math.round(termsScore * 10) / 10,
+        weights: {
+          cost: Math.round(weights.total_cost * 100),
+          lead: Math.round(weights.lead * 100),
+          terms: Math.round(weights.terms * 100),
+        }
+      }
+    };
+  });
+
+  // Sort by highest score first, then by lower total cost
+  scored.sort((a, b) => (b.score - a.score) || ((a.normalizedTotalCost ?? a.normalizedPrice) - (b.normalizedTotalCost ?? b.normalizedPrice)));
   const ranked = scored.map((q, i) => ({ ...q, rank: i + 1 }));
 
   const top = ranked[0];
-  const winsPrice = top.supplier_id === bestPriceSupplierId, winsLead = top.supplier_id === fastestLeadSupplierId;
-  const wins = [winsPrice && 'lowest price', winsLead && 'fastest lead'].filter(Boolean);
-  const reason = wins.length ? wins.join(' + ') + '; best overall combination' : 'Best overall combination of price, lead time & payment terms';
+  const topCost = top.normalizedTotalCost !== null ? top.normalizedTotalCost : top.normalizedPrice;
+  const winsCost = topCost === minTC;
+  const winsLead = top.lead_days !== null && top.lead_days !== '' && Number(top.lead_days) === minL;
+  const winsTerms = paymentScore(suppliersById[top.supplier_id]) === maxT;
+  const wins = [
+    winsCost && 'lowest total cost',
+    winsLead && 'fastest lead',
+    winsTerms && 'best payment terms',
+  ].filter(Boolean);
+  const reason = wins.length
+    ? `${wins.join(' + ')} (Score: ${top.score}/100)`
+    : `Top ranked combination (Score: ${top.score}/100)`;
 
-  return { ranked, bestPrice: minP, bestPriceSupplierId, bestTotalCost: minTC, bestTotalCostSupplierId, fastestLead: minL, fastestLeadSupplierId, reason };
+  return {
+    ranked,
+    bestPrice: minP,
+    bestPriceSupplierId,
+    bestTotalCost: minTC,
+    bestTotalCostSupplierId,
+    fastestLead: minL,
+    fastestLeadSupplierId,
+    reason
+  };
 }
 
 export function rankBg(r){ return r===1 ? 'var(--green-lt, #c6efce)' : r===2 ? 'var(--amber-lt, #ffeb9c)' : r===3 ? 'var(--blue-lt, #cfe2ff)' : 'transparent'; }
