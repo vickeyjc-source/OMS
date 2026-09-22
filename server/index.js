@@ -4354,6 +4354,7 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
   const fullBalance  = parseFloat(Math.max(0, total-newPaid).toFixed(2));
+  const releaseBalance = parseFloat(Math.max(0, releaseDueTotal - newPaid).toFixed(2));
   const isNetOrOther = !isAdvanceTerms(o.payment_terms) && !isPartialAdvanceTerms(o.payment_terms);
   const paymentStatus = fullBalance <= 0.009
     ? (isNetOrOther ? 'paid' : (isAwaitingCustomerReleaseStatus(o.status) ? 'payment_recorded' : 'paid'))
