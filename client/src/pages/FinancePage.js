@@ -2969,7 +2969,7 @@ export default function FinancePage() {
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
   const custAdvance = custQueue.filter(o => {
-    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) {
+    if ((o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009) {
       return isAdvanceTerms(o.payment_terms) || !isNetTerms(o.payment_terms);
     }
     return (
@@ -2980,7 +2980,7 @@ export default function FinancePage() {
     );
   });
   const custNet     = custQueue.filter(o => {
-    if ((o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) && isNetTerms(o.payment_terms)) {
+    if ((o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009 && isNetTerms(o.payment_terms)) {
       return true;
     }
     if (o.status === 'payment_approval') return false;
@@ -3231,7 +3231,7 @@ export default function FinancePage() {
                     </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
-                        {o.status === 'cancelled' || o.settlement_status === 'pending' ? (
+                        {(o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009 ? (
                           <button className="btn btn-xs"
                             style={{fontSize:11,background:'var(--red,#dc2626)',color:'#fff',borderColor:'var(--red,#dc2626)',fontWeight:700}}
                             onClick={()=>setSettleModal(o)}>
@@ -3364,7 +3364,7 @@ export default function FinancePage() {
                         )}
                       </td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                        {o.status === 'cancelled' || o.settlement_status === 'pending' ? (
+                        {(o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009 ? (
                           <button className="btn btn-xs"
                             style={{fontSize:11,background:'var(--red,#dc2626)',color:'#fff',borderColor:'var(--red,#dc2626)',fontWeight:700}}
                             onClick={()=>setSettleModal(o)}>

@@ -3197,6 +3197,20 @@ app.post('/api/orders/:id/cancel', auth, asyncRoute(async (req, res) => {
           `Order ${oid} cancelled: ₹${balDue.toFixed(2)} credit obligation released, available limit restored`, u.name, cancelAt
         ]
       );
+      await runAsync(
+        `INSERT INTO customer_payments(
+           id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+           payment_type, amount, currency, payment_method, payment_ref, payment_date,
+           advance_pct, balance_due, status, recorded_by, recorded_at, notes
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), oid, o.po_number || '', o.finance_po_no || '', '', '',
+          'credit_adjustment', -balDue, dd.currency || 'INR',
+          'Ciflux Credit Line', `CREDIT-CANCEL-${oid}`, cancelAt.slice(0, 10),
+          0, 0, 'paid', u.name, cancelAt,
+          `Order ${oid} cancelled: ₹${balDue.toFixed(2)} credit obligation released`
+        ]
+      );
     }
   }
 
@@ -3332,9 +3346,10 @@ app.post('/api/orders/:id/settle', auth, asyncRoute(async (req, res) => {
   }, 0);
   const excessPaid = totalPaid > (activeTotal + 0.009) ? (totalPaid - activeTotal) : 0;
 
-  const isEligible = o.status === 'cancelled' || o.settlement_status === 'pending' || excessPaid > 0.009;
+  const isEligible = (o.settlement_status === 'pending' && parseFloat(o.unsettled_amount) > 0.009)
+    || (o.status === 'cancelled' && parseFloat(o.unsettled_amount) > 0.009);
   if (!isEligible) {
-    return res.status(400).json({ error: 'Only cancelled orders or orders with pending settlements can be settled' });
+    return res.status(400).json({ error: 'Only orders with pending bank cash settlements can be settled' });
   }
 
   const {
@@ -3357,7 +3372,7 @@ app.post('/api/orders/:id/settle', auth, asyncRoute(async (req, res) => {
 
   const availableUnsettled = (o.unsettled_amount !== undefined && o.unsettled_amount !== null && Number(o.unsettled_amount) > 0)
     ? Number(o.unsettled_amount)
-    : (excessPaid > 0 ? parseFloat(excessPaid.toFixed(2)) : (Number(o.total_paid) || totalPaid || 0));
+    : 0;
 
   if (settleAmount > (availableUnsettled + 0.01)) {
     return res.status(400).json({ error: `Settlement amount (₹${settleAmount}) exceeds unsettled balance (₹${availableUnsettled.toFixed(2)})` });
@@ -3830,6 +3845,21 @@ app.post('/api/orders/:id/items/:itemId/cancel', auth, asyncRoute(async (req, re
           `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${creditRelief.toFixed(2)} credit obligation released, available limit restored`, u.name, cancelAt
         ]
       );
+
+      await runAsync(
+        `INSERT INTO customer_payments(
+           id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+           payment_type, amount, currency, payment_method, payment_ref, payment_date,
+           advance_pct, balance_due, status, recorded_by, recorded_at, notes
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), oid, o.po_number || '', o.finance_po_no || '', '', '',
+          'credit_adjustment', -creditRelief, activeDd.currency || 'INR',
+          'Ciflux Credit Line', `CREDIT-ITEM-CANCEL-${oid}`, cancelAt.slice(0, 10),
+          0, 0, 'paid', u.name, cancelAt,
+          `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${creditRelief.toFixed(2)} credit obligation released`
+        ]
+      );
       remainingExcess = Math.max(0, parseFloat((remainingExcess - creditRelief).toFixed(2)));
     }
 
@@ -3864,6 +3894,21 @@ app.post('/api/orders/:id/items/:itemId/cancel', auth, asyncRoute(async (req, re
           walletRefund, o.currency || 'INR', 'Customer Wallet', `WALLET-ITEM-CANCEL-${oid}`,
           currentCreditLimit, 0, newWalletBal,
           `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${walletRefund.toFixed(2)} refunded to customer wallet`, u.name, cancelAt
+        ]
+      );
+
+      await runAsync(
+        `INSERT INTO customer_payments(
+           id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+           payment_type, amount, currency, payment_method, payment_ref, payment_date,
+           advance_pct, balance_due, status, recorded_by, recorded_at, notes
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), oid, o.po_number || '', o.finance_po_no || '', '', '',
+          'wallet_refund', -walletRefund, o.currency || 'INR',
+          'Customer Wallet', `WALLET-ITEM-CANCEL-${oid}`, cancelAt.slice(0, 10),
+          0, 0, 'paid', u.name, cancelAt,
+          `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${walletRefund.toFixed(2)} refunded to customer wallet`
         ]
       );
       remainingExcess = Math.max(0, parseFloat((remainingExcess - walletRefund).toFixed(2)));
@@ -5500,7 +5545,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const filtered = orders.filter(o => {
-    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) return true;
+    if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
     // Returned from Finance: keep it visible/editable in Orders only until the
     // order team explicitly sends it back with status='payment_approval'.
@@ -5547,10 +5592,8 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       : fullBalance;
 
     const excessPaid = (paid > (total + 0.009)) ? (paid - total) : 0;
-    const isPendingSettlement = o.settlement_status === 'pending' || (excessPaid > 0.009 && o.settlement_status !== 'settled');
-    const activeUnsettled = isPendingSettlement
-      ? (parseFloat(o.unsettled_amount) > 0 ? parseFloat(o.unsettled_amount) : parseFloat(excessPaid.toFixed(2)))
-      : 0;
+    const isPendingSettlement = o.settlement_status === 'pending' && parseFloat(o.unsettled_amount) > 0.009;
+    const activeUnsettled = isPendingSettlement ? parseFloat(o.unsettled_amount) : 0;
 
     const orderDrawdown = drawdownsByOrder[o.id] || null;
     let creditBadge = null;
@@ -5588,7 +5631,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => o).filter(o => {
-    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) return true;
+    if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
     if (o.customer_payment_status === 'paid') return false;
     return o.customer_payment_status === 'payment_recorded' || o.full_balance_due > 0.009;
