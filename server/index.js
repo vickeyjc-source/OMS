@@ -925,6 +925,380 @@ app.post('/api/customers/:id/restore', auth, asyncRoute(async (req, res) => {
   await logActivity({ action:'restore', area:'recycle', module:'customers', label:'Customers', entity_type:'customer', entity_id:c.id, entity_name:c.name, entity_email:c.email||'', row_count:1 }, req.session.user);
   saveNow(); res.json({ ok: true });
 }));
+
+// ── CUSTOMER CREDIT LINE & WALLET SYSTEM ─────────────────────────
+
+// GET /api/customers/:id/credit-profile — retrieve credit line, wallet, score & statement
+app.get('/api/customers/:id/credit-profile', auth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const c = await getAsync('SELECT * FROM customers WHERE id=?', [id]);
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+
+  // Ensure credit columns exist / migrated
+  try {
+    await runAsync("ALTER TABLE customers ADD COLUMN credit_enabled INTEGER DEFAULT 0");
+    await runAsync("ALTER TABLE customers ADD COLUMN credit_limit NUMERIC DEFAULT 1000000");
+    await runAsync("ALTER TABLE customers ADD COLUMN credit_days INTEGER DEFAULT 30");
+    await runAsync("ALTER TABLE customers ADD COLUMN wallet_balance NUMERIC DEFAULT 0");
+    await runAsync("ALTER TABLE customers ADD COLUMN credit_score NUMERIC DEFAULT 100");
+    await runAsync("ALTER TABLE customers ADD COLUMN on_time_count INTEGER DEFAULT 0");
+    await runAsync("ALTER TABLE customers ADD COLUMN overdue_count INTEGER DEFAULT 0");
+  } catch(_) {}
+
+  let drawdowns = [];
+  try {
+    drawdowns = await allAsync(
+      `SELECT d.*, o.po_number, o.customer_payment_status, o.payment_terms,
+        COALESCE((SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) FROM order_items WHERE order_id = o.id), 0) AS order_total
+       FROM customer_credit_drawdowns d
+       LEFT JOIN orders o ON o.id = d.order_id
+       WHERE d.customer_id=?
+       ORDER BY d.drawn_at DESC`,
+      [id]
+    );
+  } catch(e) {
+    console.error('[CREDIT-PROFILE] Error fetching drawdowns:', e);
+  }
+
+  let ledger = [];
+  try {
+    ledger = await allAsync(
+      'SELECT * FROM customer_credit_ledger WHERE customer_id=? ORDER BY created_at DESC',
+      [id]
+    );
+  } catch(_) {}
+
+  const today = todayStr();
+  const todayDate = new Date(today);
+
+  // Compute countdown, overdue status, and repaid amount for active drawdowns
+  const enrichedDrawdowns = drawdowns.map(d => {
+    const origAmt = parseFloat(d.amount) || 0;
+    const balDue = parseFloat(d.balance_due) || 0;
+    const repaidAmt = Math.max(0, origAmt - balDue);
+    const isCleared = balDue <= 0.01 || d.status === 'cleared';
+    let daysRemaining = 0;
+    let countdownBadge = 'cleared';
+    if (!isCleared && d.due_date) {
+      const due = new Date(d.due_date);
+      const diffTime = due.getTime() - todayDate.getTime();
+      daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      if (daysRemaining < 0) {
+        countdownBadge = 'overdue';
+      } else if (daysRemaining === 0) {
+        countdownBadge = 'due_today';
+      } else if (daysRemaining === 1) {
+        countdownBadge = '1_day';
+      } else if (daysRemaining === 2) {
+        countdownBadge = '2_days';
+      } else if (daysRemaining === 3) {
+        countdownBadge = '3_days';
+      } else {
+        countdownBadge = 'normal';
+      }
+    }
+    return {
+      ...d,
+      amount: origAmt,
+      balance_due: balDue,
+      repaid_amount: parseFloat(repaidAmt.toFixed(2)),
+      days_remaining: daysRemaining,
+      countdown_badge: countdownBadge,
+      is_cleared: isCleared,
+    };
+  });
+
+  const totalOutstandingDue = enrichedDrawdowns
+    .filter(d => !d.is_cleared)
+    .reduce((s, d) => s + (parseFloat(d.balance_due) || 0), 0);
+
+  const creditLimit = parseFloat(c.credit_limit) >= 0 ? parseFloat(c.credit_limit) : 1000000;
+  const availableCredit = Math.max(0, creditLimit - totalOutstandingDue);
+  const walletBalance = parseFloat(c.wallet_balance) || 0;
+
+  // Credit reliability score calculation
+  const onTime = parseInt(c.on_time_count) || 0;
+  const overdue = parseInt(c.overdue_count) || 0;
+  const totalRepayments = onTime + overdue;
+  let creditScore = 100;
+  if (totalRepayments > 0) {
+    creditScore = Math.max(20, Math.min(100, Math.round((onTime / totalRepayments) * 100)));
+  } else if (overdue > 0) {
+    creditScore = Math.max(20, 100 - (overdue * 15));
+  }
+
+  res.json({
+    customer_id: c.id,
+    customer_name: c.name,
+    credit_enabled: c.credit_enabled === 1 || c.credit_enabled === true,
+    credit_limit: creditLimit,
+    credit_days: parseInt(c.credit_days) || 30,
+    wallet_balance: parseFloat(walletBalance.toFixed(2)),
+    total_outstanding_due: parseFloat(totalOutstandingDue.toFixed(2)),
+    available_credit: parseFloat(availableCredit.toFixed(2)),
+    credit_score: creditScore,
+    on_time_count: onTime,
+    overdue_count: overdue,
+    drawdowns: enrichedDrawdowns,
+    ledger: ledger,
+  });
+}));
+
+// PUT /api/customers/:id/credit-settings — update credit limit, enabled toggle & credit days
+app.put('/api/customers/:id/credit-settings', auth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const c = await getAsync('SELECT * FROM customers WHERE id=?', [id]);
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const u = req.session.user;
+  const { credit_enabled, credit_limit, credit_days } = req.body || {};
+
+  const enabled = credit_enabled === 1 || credit_enabled === true || credit_enabled === '1' ? 1 : 0;
+  const limit = parseFloat(credit_limit) >= 0 ? parseFloat(credit_limit) : 1000000;
+  const days = parseInt(credit_days) > 0 ? parseInt(credit_days) : 30;
+
+  await runAsync(
+    'UPDATE customers SET credit_enabled=?, credit_limit=?, credit_days=? WHERE id=?',
+    [enabled, limit, days, id]
+  );
+
+  // Log in ledger if limit or toggle changed
+  const now = nowStr();
+  try {
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), id, '', '', 'settings_change',
+        limit, c.currency || 'INR', '', '',
+        limit, 0, parseFloat(c.wallet_balance) || 0,
+        `Credit settings updated: ${enabled ? 'Enabled' : 'Disabled'}, Limit: ₹${limit}, Days: ${days}`,
+        u.name, now
+      ]
+    );
+  } catch(_) {}
+
+  saveNow();
+  res.json({ ok: true, credit_enabled: enabled, credit_limit: limit, credit_days: days });
+}));
+
+// POST /api/customers/:id/credit-repay — record repayment of credit line dues
+app.post('/api/customers/:id/credit-repay', auth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const c = await getAsync('SELECT * FROM customers WHERE id=?', [id]);
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const u = req.session.user;
+
+  const { amount, drawdown_id, payment_method, payment_ref, receipt_file_url, notes } = req.body || {};
+  const repayAmount = parseFloat(amount) || 0;
+  if (repayAmount <= 0) return res.status(400).json({ error: 'Repayment amount must be greater than zero' });
+
+  const now = nowStr();
+  const today = todayStr();
+  const method = payment_method || 'Bank Transfer';
+  const ref = payment_ref || `REPAY-${Date.now().toString().slice(-6)}`;
+
+  // Find active drawdowns to repay (either specific drawdown or FIFO across oldest active)
+  let activeDrawdowns = [];
+  if (drawdown_id) {
+    const specific = await getAsync('SELECT * FROM customer_credit_drawdowns WHERE id=? AND customer_id=?', [drawdown_id, id]);
+    if (specific) activeDrawdowns = [specific];
+  }
+  if (!activeDrawdowns.length) {
+    activeDrawdowns = await allAsync(
+      "SELECT * FROM customer_credit_drawdowns WHERE customer_id=? AND status != 'cleared' AND balance_due > 0.01 ORDER BY due_date ASC, drawn_at ASC",
+      [id]
+    );
+  }
+
+  let remainingToApply = repayAmount;
+  let onTimeInc = 0;
+  let overdueInc = 0;
+
+  for (const dd of activeDrawdowns) {
+    if (remainingToApply <= 0.009) break;
+    const dueAmt = parseFloat(dd.balance_due) || 0;
+    const paymentForThis = Math.min(dueAmt, remainingToApply);
+    const newBal = Math.max(0, dueAmt - paymentForThis);
+    remainingToApply -= paymentForThis;
+
+    const isFullyCleared = newBal <= 0.01;
+    const isOverdue = dd.due_date && today > dd.due_date;
+    if (isFullyCleared) {
+      if (isOverdue) overdueInc++;
+      else onTimeInc++;
+    }
+
+    await runAsync(
+      "UPDATE customer_credit_drawdowns SET balance_due=?, status=?, cleared_at=? WHERE id=?",
+      [newBal, isFullyCleared ? 'cleared' : (isOverdue ? 'overdue' : 'active'), isFullyCleared ? now : (dd.cleared_at || ''), dd.id]
+    );
+  }
+
+  // Update customer on_time / overdue count
+  const currentOnTime = (parseInt(c.on_time_count) || 0) + onTimeInc;
+  const currentOverdue = (parseInt(c.overdue_count) || 0) + overdueInc;
+  const totalR = currentOnTime + currentOverdue;
+  const newScore = totalR > 0 ? Math.max(20, Math.min(100, Math.round((currentOnTime / totalR) * 100))) : 100;
+
+  await runAsync(
+    "UPDATE customers SET on_time_count=?, overdue_count=?, credit_score=? WHERE id=?",
+    [currentOnTime, currentOverdue, newScore, id]
+  );
+
+  // Recompute available credit
+  const remainingDues = await allAsync("SELECT balance_due FROM customer_credit_drawdowns WHERE customer_id=? AND status NOT IN ('cleared', 'cancelled')", [id]);
+  const newTotalDue = remainingDues.reduce((s, r) => s + (parseFloat(r.balance_due) || 0), 0);
+  const creditLimit = parseFloat(c.credit_limit) >= 0 ? parseFloat(c.credit_limit) : 1000000;
+  const newAvailable = Math.max(0, creditLimit - newTotalDue);
+
+  // Insert into credit ledger
+  await runAsync(
+    `INSERT INTO customer_credit_ledger(
+       id, customer_id, order_id, drawdown_id, transaction_type,
+       amount, currency, payment_method, payment_ref, receipt_file_url,
+       credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+       notes, recorded_by, created_at
+     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      uuid(),
+      id,
+      '',
+      drawdown_id || '',
+      'credit_repayment',
+      repayAmount,
+      c.currency || 'INR',
+      method,
+      ref,
+      receipt_file_url || '',
+      creditLimit,
+      newAvailable,
+      parseFloat(c.wallet_balance) || 0,
+      `Credit line repayment: ₹${repayAmount.toFixed(2)}. ${notes || ''}`,
+      u.name,
+      now
+    ]
+  );
+
+  saveNow();
+  res.json({
+    ok: true,
+    repaid: repayAmount,
+    available_credit: newAvailable,
+    total_outstanding_due: newTotalDue,
+    credit_score: newScore,
+    on_time_count: currentOnTime,
+    overdue_count: currentOverdue
+  });
+}));
+
+// POST /api/customers/:id/wallet-deposit — manual wallet deposit if customer deposits advance funds
+app.post('/api/customers/:id/wallet-deposit', auth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const c = await getAsync('SELECT * FROM customers WHERE id=?', [id]);
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const u = req.session.user;
+
+  const { amount, payment_method, payment_ref, receipt_file_url, notes } = req.body || {};
+  const depositAmount = parseFloat(amount) || 0;
+  if (depositAmount <= 0) return res.status(400).json({ error: 'Deposit amount must be greater than zero' });
+
+  const now = nowStr();
+  const method = payment_method || 'Bank Transfer';
+  const ref = payment_ref || `DEP-${Date.now().toString().slice(-6)}`;
+
+  const currentWallet = parseFloat(c.wallet_balance) || 0;
+  const newWallet = currentWallet + depositAmount;
+
+  await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWallet, id]);
+
+  await runAsync(
+    `INSERT INTO customer_credit_ledger(
+       id, customer_id, order_id, drawdown_id, transaction_type,
+       amount, currency, payment_method, payment_ref, receipt_file_url,
+       credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+       notes, recorded_by, created_at
+     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      uuid(),
+      id,
+      '',
+      '',
+      'wallet_deposit',
+      depositAmount,
+      c.currency || 'INR',
+      method,
+      ref,
+      receipt_file_url || '',
+      parseFloat(c.credit_limit) || 1000000,
+      0,
+      newWallet,
+      `Manual advance deposit to customer wallet: ₹${depositAmount.toFixed(2)}. ${notes || ''}`,
+      u.name,
+      now
+    ]
+  );
+
+  saveNow();
+  res.json({ ok: true, wallet_balance: newWallet });
+}));
+
+// POST /api/customers/:id/wallet-withdraw — payout / send funds from customer wallet back to customer
+app.post('/api/customers/:id/wallet-withdraw', auth, asyncRoute(async (req, res) => {
+  const { id } = req.params;
+  const c = await getAsync('SELECT * FROM customers WHERE id=?', [id]);
+  if (!c) return res.status(404).json({ error: 'Customer not found' });
+  const u = req.session.user;
+
+  const { amount, payment_method, payment_ref, notes } = req.body || {};
+  const withdrawAmount = parseFloat(amount) || 0;
+  if (withdrawAmount <= 0) return res.status(400).json({ error: 'Amount must be greater than zero' });
+
+  const currentWallet = parseFloat(c.wallet_balance) || 0;
+  if (withdrawAmount > (currentWallet + 0.009)) {
+    return res.status(400).json({ error: `Amount (₹${withdrawAmount.toFixed(2)}) exceeds available wallet balance (₹${currentWallet.toFixed(2)})` });
+  }
+
+  const now = nowStr();
+  const method = payment_method || 'Bank Transfer';
+  const ref = payment_ref || `PAYOUT-${Date.now().toString().slice(-6)}`;
+
+  const newWallet = Math.max(0, parseFloat((currentWallet - withdrawAmount).toFixed(2)));
+
+  await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWallet, id]);
+
+  await runAsync(
+    `INSERT INTO customer_credit_ledger(
+       id, customer_id, order_id, drawdown_id, transaction_type,
+       amount, currency, payment_method, payment_ref,
+       credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+       notes, recorded_by, created_at
+     ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      uuid(),
+      id,
+      '',
+      '',
+      'wallet_payout',
+      withdrawAmount,
+      c.currency || 'INR',
+      method,
+      ref,
+      parseFloat(c.credit_limit) || 1000000,
+      0,
+      newWallet,
+      `Payout / Sent to customer: ₹${withdrawAmount.toFixed(2)} via ${method} (Ref: ${ref}). ${notes || ''}`.trim(),
+      u.name,
+      now
+    ]
+  );
+
+  saveNow();
+  res.json({ ok: true, wallet_balance: newWallet });
+}));
 // Customer template download
 app.get('/api/customers/template', auth, (req, res) => {
   const headers = [
@@ -2528,6 +2902,16 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
 
   const d = req.body;
 
+  // Block general modifications if order is on hold (unless explicit unhold or updating hold)
+  if ((o.is_on_hold === 1 || o.status === 'hold') && d.status !== 'hold' && !d._unhold) {
+    return res.status(400).json({ error: 'This order is on hold. Please unhold the order before making modifications.' });
+  }
+
+  // Prevent cancelling a closed order
+  if (['failed', 'cancelled'].includes(d.status) && (o.status === 'closed' || o.closed_at)) {
+    return res.status(400).json({ error: 'Cannot cancel an order that is already closed' });
+  }
+
   // Prevent closing if any line item undelivered
   if (d.status === 'closed') {
     const undelivered = await allAsync("SELECT id FROM order_items WHERE order_id=? AND line_status != 'delivered'", [oid]);
@@ -2646,6 +3030,942 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
 }));
 app.delete('/api/orders/:id', adminOnly, asyncRoute(async (req, res) => {
   await runAsync('DELETE FROM orders WHERE id=?', [req.params.id]); saveNow(); res.json({ ok: true });
+}));
+
+// POST /api/orders/:id/hold — Place order on hold with reason note
+app.post('/api/orders/:id/hold', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const o = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const u = req.session.user;
+  const allowedSections = await getAllowedSections(u);
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS);
+  if (!canEdit) return res.status(403).json({ error: 'Permission denied: Cannot put this order on hold' });
+
+  const { reason, comment } = req.body || {};
+  const holdNote = (reason || comment || '').trim();
+  if (!holdNote) {
+    return res.status(400).json({ error: 'Hold reason / note is required' });
+  }
+
+  if (o.closed_at || ['closed', 'cancelled', 'failed', 'delivered'].includes((o.status || '').toLowerCase())) {
+    return res.status(400).json({ error: 'Cannot put a closed or completed order on hold' });
+  }
+
+  if (o.is_on_hold === 1 || o.status === 'hold') {
+    return res.status(400).json({ error: 'Order is already on hold' });
+  }
+
+  const prevStatus = (o.status && o.status !== 'hold') ? o.status : (o.hold_prev_status || 'open');
+  const holdAt = nowStr();
+
+  await runAsync(
+    'UPDATE orders SET is_on_hold=1, hold_reason=?, hold_by=?, hold_at=?, hold_prev_status=?, status=\'hold\' WHERE id=?',
+    [holdNote, u.name, holdAt, prevStatus, oid]
+  );
+
+  await runAsync(
+    'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), oid, 'Order placed on hold', u.name, holdNote, holdAt]
+  );
+
+  saveNow();
+  const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
+}));
+
+// POST /api/orders/:id/unhold — Resume order from hold back to previous status
+app.post('/api/orders/:id/unhold', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const o = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const u = req.session.user;
+  const allowedSections = await getAllowedSections(u);
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS);
+  if (!canEdit) return res.status(403).json({ error: 'Permission denied: Cannot unhold this order' });
+
+  if (o.is_on_hold !== 1 && o.status !== 'hold') {
+    return res.status(400).json({ error: 'Order is not currently on hold' });
+  }
+
+  const restoredStatus = (o.hold_prev_status && o.hold_prev_status !== 'hold') ? o.hold_prev_status : 'open';
+  const unholdAt = nowStr();
+
+  await runAsync(
+    'UPDATE orders SET is_on_hold=0, hold_reason=\'\', hold_by=\'\', hold_at=\'\', hold_prev_status=\'\', status=? WHERE id=?',
+    [restoredStatus, oid]
+  );
+
+  await runAsync(
+    'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), oid, 'Order unheld', u.name, `Resumed to ${restoredStatus} status`, unholdAt]
+  );
+
+  saveNow();
+  const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
+}));
+
+// POST /api/orders/:id/cancel — Cancel complete order, remove from procurement/delivery, flag for finance settlement if customer paid
+app.post('/api/orders/:id/cancel', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const o = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const u = req.session.user;
+  const allowedSections = await getAllowedSections(u);
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS);
+  if (!canEdit) return res.status(403).json({ error: 'Permission denied: Cannot cancel this order' });
+
+  if (o.status === 'closed' || o.closed_at) {
+    return res.status(400).json({ error: 'Cannot cancel an order that is already closed' });
+  }
+
+  const { reason, comment } = req.body || {};
+  const cancelReason = (reason || comment || '').trim();
+  if (!cancelReason) {
+    return res.status(400).json({ error: 'Cancellation reason is required' });
+  }
+
+  const cancelAt = nowStr();
+
+  // 1. Check for credit drawdowns and wallet usage on this order
+  const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+  const currentCreditLimit = parseFloat(cust?.credit_limit) >= 0 ? parseFloat(cust.credit_limit) : 1000000;
+  const currentWalletBal = parseFloat(cust?.wallet_balance) || 0;
+
+  // A. Wallet: find wallet usage on this order and auto-refund back to customer wallet
+  const walletRows = await allAsync(
+    "SELECT COALESCE(SUM(amount), 0) AS total_wallet FROM customer_credit_ledger WHERE order_id=? AND transaction_type='wallet_usage'",
+    [oid]
+  );
+  const walletUsed = parseFloat(walletRows?.[0]?.total_wallet) || 0;
+  let newWalletBal = currentWalletBal;
+
+  if (walletUsed > 0.009) {
+    newWalletBal = currentWalletBal + walletUsed;
+    await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWalletBal, o.customer_id]);
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), o.customer_id, oid, '', 'order_cancellation_refund',
+        walletUsed, o.currency || 'INR', 'Customer Wallet', `WALLET-REFUND-${oid}`,
+        currentCreditLimit, 0, newWalletBal,
+        `Order ${oid} cancelled: ₹${walletUsed.toFixed(2)} refunded back to customer wallet`, u.name, cancelAt
+      ]
+    );
+  }
+
+  // B. Credit drawdowns: find ACTIVE (non-cancelled) drawdowns linked to this order and release un-repaid credit obligation
+  const orderDrawdowns = await allAsync(
+    "SELECT * FROM customer_credit_drawdowns WHERE order_id=? AND status != 'cancelled'",
+    [oid]
+  );
+  let totalCreditDrawn = 0;
+  let totalCreditBalanceDue = 0;
+  let totalCreditCashRepaid = 0;
+
+  for (const dd of orderDrawdowns) {
+    if (dd.status === 'cancelled') continue;
+    const origAmt = parseFloat(dd.amount) || 0;
+    const balDue = parseFloat(dd.balance_due) || 0;
+    const repaidCash = Math.max(0, origAmt - balDue);
+    totalCreditDrawn += origAmt;
+    totalCreditBalanceDue += balDue;
+    totalCreditCashRepaid += repaidCash;
+
+    await runAsync(
+      "UPDATE customer_credit_drawdowns SET status='cancelled', balance_due=0, cleared_at=?, notes=COALESCE(notes, '') || ' [Cancelled with order]' WHERE id=?",
+      [cancelAt, dd.id]
+    );
+    if (balDue > 0.009) {
+      await runAsync(
+        `INSERT INTO customer_credit_ledger(
+           id, customer_id, order_id, drawdown_id, transaction_type,
+           amount, currency, payment_method, payment_ref,
+           credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+           notes, recorded_by, created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), o.customer_id, oid, dd.id, 'credit_cancellation_release',
+          balDue, dd.currency || 'INR', 'Ciflux Credit Line', `CREDIT-CANCEL-${oid}`,
+          currentCreditLimit, 0, newWalletBal,
+          `Order ${oid} cancelled: ₹${balDue.toFixed(2)} credit obligation released, available limit restored`, u.name, cancelAt
+        ]
+      );
+    }
+  }
+
+  // C. Calculate actual bank transfer cash paid on this order requiring Finance settlement
+  const paidRow = await getAsync(
+    "SELECT COALESCE(SUM(amount), 0) AS total_paid FROM customer_payments WHERE order_id=? AND status='paid'",
+    [oid]
+  );
+  const totalRecordedPaid = Math.max(0, parseFloat(paidRow?.total_paid) || 0);
+
+  // Bank transfer cash is total recorded payment minus wallet portion and minus credit facility drawn
+  const realCashPaid = Math.max(0, parseFloat((totalRecordedPaid - walletUsed - totalCreditDrawn).toFixed(2)));
+
+  // If customer had already repaid any credit in cash on this cancelled order, credit it back to their wallet
+  if (totalCreditCashRepaid > 0.009) {
+    newWalletBal = newWalletBal + totalCreditCashRepaid;
+    await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWalletBal, o.customer_id]);
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), o.customer_id, oid, '', 'order_cancellation_refund',
+        totalCreditCashRepaid, o.currency || 'INR', 'Customer Wallet', `CREDIT-REPAY-REFUND-${oid}`,
+        currentCreditLimit, 0, newWalletBal,
+        `Order ${oid} cancelled: ₹${totalCreditCashRepaid.toFixed(2)} repaid credit refunded to customer wallet`, u.name, cancelAt
+      ]
+    );
+  }
+
+  const settlementStatus = realCashPaid > 0.009 ? 'pending' : 'none';
+  const unsettledAmount = realCashPaid;
+
+  // 2. Mark order as cancelled
+  await runAsync(
+    `UPDATE orders SET
+       status='cancelled',
+       cancelled_at=?,
+       cancelled_by=?,
+       cancel_reason=?,
+       settlement_status=?,
+       unsettled_amount=?
+     WHERE id=?`,
+    [cancelAt, u.name, cancelReason, settlementStatus, unsettledAmount, oid]
+  );
+
+  // 3. Mark non-cancelled order line items as cancelled, preserving individual item reasons
+  await runAsync(
+    `UPDATE order_items SET
+       line_status='cancelled',
+       cancelled_at=COALESCE(cancelled_at, ?),
+       cancelled_by=COALESCE(cancelled_by, ?),
+       cancellation_reason=COALESCE(cancellation_reason, ?)
+     WHERE order_id=? AND (line_status != 'cancelled' OR cancellation_reason IS NULL OR cancellation_reason = '')`,
+    [cancelAt, u.name, cancelReason, oid]
+  );
+
+  // 4. Cancel all supplier orders and flag for Finance recovery if supplier was already paid
+  const existingSos = await allAsync("SELECT * FROM supplier_orders WHERE order_id=?", [oid]);
+  for (const so of existingSos) {
+    const advLogs = await allAsync("SELECT amount FROM supplier_advance_payment_logs WHERE supplier_order_id=?", [so.id]);
+    const netLogs = await allAsync("SELECT amount FROM supplier_net_payment_logs WHERE supplier_order_id=?", [so.id]);
+    const totalSupPaid = [...advLogs, ...netLogs].reduce((s, p) => s + (parseFloat(p.amount) || 0), 0)
+      || (so.advance_actual_amount !== null ? parseFloat(so.advance_actual_amount) : 0)
+      || (so.net_actual_amount !== null ? parseFloat(so.net_actual_amount) : 0);
+
+    if (totalSupPaid > 0.009) {
+      await runAsync(
+        "UPDATE supplier_orders SET status='cancelled', settlement_status='pending', unsettled_amount=? WHERE id=?",
+        [parseFloat(totalSupPaid.toFixed(2)), so.id]
+      );
+    } else {
+      await runAsync(
+        "UPDATE supplier_orders SET status='cancelled', settlement_status='none', unsettled_amount=0 WHERE id=?",
+        [so.id]
+      );
+    }
+  }
+
+  // 5. Remove pending items from finance_queue (Supplier Advance queue)
+  await runAsync(
+    "DELETE FROM finance_queue WHERE order_id=? AND status='pending'",
+    [oid]
+  );
+
+  // 6. Cancel any shipments / delivery hub entries
+  await runAsync(
+    "UPDATE shipments SET status='cancelled' WHERE order_id=?",
+    [oid]
+  );
+
+  // 7. Audit log in order_history
+  const historySummary = [
+    `Reason: ${cancelReason}`,
+    walletUsed > 0 ? `Wallet Refunded: ₹${walletUsed.toFixed(2)}` : null,
+    totalCreditDrawn > 0 ? `Credit Released: ₹${totalCreditBalanceDue.toFixed(2)}` : null,
+    realCashPaid > 0 ? `Bank Settlement Required: ₹${realCashPaid.toFixed(2)}` : 'No cash settlement required'
+  ].filter(Boolean).join(' | ');
+
+  await runAsync(
+    'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), oid, 'Order Cancelled', u.name, historySummary, cancelAt]
+  );
+
+  saveNow();
+  const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
+}));
+
+// POST /api/orders/:id/settle — Settle customer funds from cancelled order (Transfer to another order or Refund)
+app.post('/api/orders/:id/settle', auth, asyncRoute(async (req, res) => {
+  const oid = req.params.id;
+  const o = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const u = req.session.user;
+  const allowedSections = await getAllowedSections(u);
+  const canSettle = ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ['finance','orders']);
+  if (!canSettle) return res.status(403).json({ error: 'Permission denied: Cannot perform financial settlement' });
+
+  // Dynamically check if customer overpaid on active items
+  const custPayments = await allAsync("SELECT * FROM customer_payments WHERE order_id=? AND status='paid'", [oid]);
+  const totalPaid = custPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const activeItems = await allAsync(
+    "SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)",
+    [oid]
+  );
+  const activeTotal = activeItems.reduce((s, li) => {
+    const b = (parseFloat(li.qty) || 0) * (parseFloat(li.unit_price) || 0);
+    return s + b + (b * (parseFloat(li.tax_rate) || 0) / 100);
+  }, 0);
+  const excessPaid = totalPaid > (activeTotal + 0.009) ? (totalPaid - activeTotal) : 0;
+
+  const isEligible = o.status === 'cancelled' || o.settlement_status === 'pending' || excessPaid > 0.009;
+  if (!isEligible) {
+    return res.status(400).json({ error: 'Only cancelled orders or orders with pending settlements can be settled' });
+  }
+
+  const {
+    settlement_type, // 'transfer_to_order' | 'refund'
+    amount,
+    target_order_id,
+    payment_method,
+    payment_ref,
+    receipt_file_url,
+    notes,
+    remainder_action, // 'refund' | 'keep_pending'
+    remainder_payment_ref,
+    remainder_payment_method
+  } = req.body || {};
+
+  const settleAmount = parseFloat(amount) || 0;
+  if (settleAmount <= 0) {
+    return res.status(400).json({ error: 'Settlement amount must be greater than 0' });
+  }
+
+  const availableUnsettled = (o.unsettled_amount !== undefined && o.unsettled_amount !== null && Number(o.unsettled_amount) > 0)
+    ? Number(o.unsettled_amount)
+    : (excessPaid > 0 ? parseFloat(excessPaid.toFixed(2)) : (Number(o.total_paid) || totalPaid || 0));
+
+  if (settleAmount > (availableUnsettled + 0.01)) {
+    return res.status(400).json({ error: `Settlement amount (₹${settleAmount}) exceeds unsettled balance (₹${availableUnsettled.toFixed(2)})` });
+  }
+
+  const now = nowStr();
+
+  // Find original payment on source order to automatically reuse UTR & Payment Method if not provided
+  const origPmt = await getAsync(
+    "SELECT * FROM customer_payments WHERE order_id=? AND status='paid' AND amount > 0 ORDER BY recorded_at DESC LIMIT 1",
+    [oid]
+  );
+  const usedMethod = payment_method || origPmt?.payment_method || 'Bank Transfer';
+  const usedRef = payment_ref || origPmt?.payment_ref || `TRANSFER-${oid}`;
+
+  if (settlement_type === 'transfer_to_order') {
+    if (!target_order_id) {
+      return res.status(400).json({ error: 'Target order is required for fund transfer' });
+    }
+    const targetOrder = await getAsync('SELECT * FROM orders WHERE id=?', [target_order_id]);
+    if (!targetOrder) {
+      return res.status(404).json({ error: 'Target order not found' });
+    }
+    if (targetOrder.customer_id !== o.customer_id) {
+      return res.status(400).json({ error: 'Target order must belong to the same customer' });
+    }
+    if (['closed', 'cancelled', 'failed'].includes(targetOrder.status)) {
+      return res.status(400).json({ error: 'Cannot transfer funds to a closed or cancelled order' });
+    }
+
+    // 1a. Insert negative payment log for source order so history and balance update
+    await runAsync(
+      `INSERT INTO customer_payments(
+         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+         payment_type, amount, currency, payment_method, payment_ref, payment_date,
+         advance_pct, balance_due, status, recorded_by, recorded_at, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        o.po_number || '',
+        o.finance_po_no || '',
+        '',
+        '',
+        'transfer_out',
+        -Math.abs(settleAmount),
+        origPmt?.currency || 'INR',
+        usedMethod,
+        usedRef + ` (To ${target_order_id})`,
+        now.slice(0, 10),
+        0,
+        0,
+        'paid',
+        u.name,
+        now,
+        `Transferred ₹${settleAmount.toFixed(2)} to Order ${target_order_id}. ${notes || ''}`
+      ]
+    );
+
+    // 1b. Insert customer_payment record into target order reusing existing UTR & payment method
+    const pmtId = uuid();
+    await runAsync(
+      `INSERT INTO customer_payments(
+         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+         payment_type, amount, currency, payment_method, payment_ref, payment_date,
+         advance_pct, balance_due, status, recorded_by, recorded_at, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        pmtId,
+        target_order_id,
+        targetOrder.po_number || '',
+        targetOrder.finance_po_no || '',
+        '',
+        '',
+        'advance',
+        settleAmount,
+        targetOrder.currency || origPmt?.currency || 'INR',
+        usedMethod,
+        usedRef + ` (From ${oid})`,
+        now.slice(0, 10),
+        0,
+        0,
+        'paid',
+        u.name,
+        now,
+        `Transferred ₹${settleAmount} from cancelled Order ${oid}. ${notes || ''}`
+      ]
+    );
+
+    // 2. Recompute target order's total_paid and balance_due
+    const targetItems = await allAsync("SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)", [target_order_id]);
+    const targetTotal = targetItems.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
+    const targetPaidRow = await getAsync(
+      "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
+      [target_order_id]
+    );
+    const targetPaidTotal = parseFloat(targetPaidRow?.total) || 0;
+    const targetFullPaid = targetTotal > 0 && (targetPaidTotal + 0.01) >= targetTotal;
+    const targetNewPaymentStatus = targetFullPaid ? 'paid' : (targetPaidTotal > 0 ? 'payment_recorded' : 'pending');
+
+    await runAsync(
+      "UPDATE orders SET customer_payment_status=? WHERE id=?",
+      [targetNewPaymentStatus, target_order_id]
+    );
+
+    // 3. Log settlement record
+    await runAsync(
+      `INSERT INTO order_settlements(
+         id, from_order_id, to_order_id, customer_id, settlement_type,
+         amount, currency, payment_method, payment_ref, receipt_file_url,
+         notes, settled_by, settled_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        target_order_id,
+        o.customer_id,
+        'transfer_to_order',
+        settleAmount,
+        origPmt?.currency || 'INR',
+        usedMethod,
+        usedRef,
+        receipt_file_url || '',
+        notes || '',
+        u.name,
+        now
+      ]
+    );
+
+    // 4. Log history in both orders
+    await runAsync(
+      'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), oid, 'Funds Transferred to Order', u.name, `Transferred ₹${settleAmount.toFixed(2)} to Order ${target_order_id} using Ref: ${usedRef}`, now]
+    );
+    await runAsync(
+      'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), target_order_id, 'Funds Received from Cancelled Order', u.name, `Received ₹${settleAmount.toFixed(2)} credit from cancelled Order ${oid} (Ref: ${usedRef})`, now]
+    );
+
+  } else if (settlement_type === 'refund') {
+    // Direct refund to customer
+    const refundRef = payment_ref || `REFUND-${oid}`;
+    const refundMethod = payment_method || 'Bank Transfer';
+
+    // 1. Record refund in customer_payments as a negative entry
+    await runAsync(
+      `INSERT INTO customer_payments(
+         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+         payment_type, amount, currency, payment_method, payment_ref, payment_date,
+         advance_pct, balance_due, status, recorded_by, recorded_at, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        o.po_number || '',
+        o.finance_po_no || '',
+        '',
+        '',
+        'refund',
+        -Math.abs(settleAmount),
+        origPmt?.currency || 'INR',
+        refundMethod,
+        refundRef,
+        now.slice(0, 10),
+        0,
+        0,
+        'paid',
+        u.name,
+        now,
+        `Refund to customer: ₹${settleAmount.toFixed(2)}. ${notes || ''}`
+      ]
+    );
+
+    // 2. Log settlement record
+    await runAsync(
+      `INSERT INTO order_settlements(
+         id, from_order_id, to_order_id, customer_id, settlement_type,
+         amount, currency, payment_method, payment_ref, receipt_file_url,
+         notes, settled_by, settled_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        '',
+        o.customer_id,
+        'refund',
+        settleAmount,
+        origPmt?.currency || 'INR',
+        refundMethod,
+        refundRef,
+        receipt_file_url || '',
+        notes || '',
+        u.name,
+        now
+      ]
+    );
+
+    // 3. Log history
+    await runAsync(
+      'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), oid, 'Customer Refund Processed', u.name, `Refunded ₹${settleAmount.toFixed(2)} via ${refundMethod} (Ref: ${refundRef})`, now]
+    );
+  } else if (settlement_type === 'credit_to_wallet') {
+    const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+    const prevWallet = parseFloat(cust?.wallet_balance) || 0;
+    const newWallet = prevWallet + settleAmount;
+    await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWallet, o.customer_id]);
+
+    // 1. Record in customer_payments as a negative entry
+    await runAsync(
+      `INSERT INTO customer_payments(
+         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+         payment_type, amount, currency, payment_method, payment_ref, payment_date,
+         advance_pct, balance_due, status, recorded_by, recorded_at, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        o.po_number || '',
+        o.finance_po_no || '',
+        '',
+        '',
+        'wallet_deposit',
+        -Math.abs(settleAmount),
+        origPmt?.currency || 'INR',
+        'Customer Wallet',
+        `WALLET-DEP-${oid}`,
+        now.slice(0, 10),
+        0,
+        0,
+        'paid',
+        u.name,
+        now,
+        `Credit deposited into customer wallet: ₹${settleAmount.toFixed(2)}. ${notes || ''}`
+      ]
+    );
+
+    // 2. Insert into customer_credit_ledger
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), o.customer_id, oid, '', 'wallet_deposit',
+        settleAmount, origPmt?.currency || 'INR', 'Customer Wallet Deposit', `SETTLE-${oid}`,
+        parseFloat(cust?.credit_limit) || 1000000, 0, newWallet,
+        `Deposited ₹${settleAmount.toFixed(2)} from cancelled Order ${oid} into Customer Wallet`, u.name, now
+      ]
+    );
+
+    // 3. Log settlement record
+    await runAsync(
+      `INSERT INTO order_settlements(
+         id, from_order_id, to_order_id, customer_id, settlement_type,
+         amount, currency, payment_method, payment_ref, receipt_file_url,
+         notes, settled_by, settled_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), oid, '', o.customer_id, 'credit_to_wallet',
+        settleAmount, origPmt?.currency || 'INR', 'Customer Wallet', `WALLET-DEP-${oid}`,
+        receipt_file_url || '', notes || 'Added to customer wallet balance', u.name, now
+      ]
+    );
+
+    // 4. Log history
+    await runAsync(
+      'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), oid, 'Funds Added to Customer Wallet', u.name, `Deposited ₹${settleAmount.toFixed(2)} into Customer Wallet`, now]
+    );
+  } else if (settlement_type === 'credit_line_restore') {
+    const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+    const activeDd = await getAsync(
+      "SELECT * FROM customer_credit_drawdowns WHERE customer_id=? AND status != 'cleared' AND balance_due > 0.009 ORDER BY due_date ASC LIMIT 1",
+      [o.customer_id]
+    );
+    if (activeDd) {
+      const bal = parseFloat(activeDd.balance_due) || 0;
+      const rel = Math.min(bal, settleAmount);
+      const newBal = Math.max(0, parseFloat((bal - rel).toFixed(2)));
+      await runAsync(
+        "UPDATE customer_credit_drawdowns SET balance_due=?, status=?, cleared_at=? WHERE id=?",
+        [newBal, newBal <= 0.01 ? 'cleared' : activeDd.status, newBal <= 0.01 ? now : (activeDd.cleared_at || ''), activeDd.id]
+      );
+    }
+    // Log in customer_credit_ledger
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), o.customer_id, oid, activeDd?.id || '', 'credit_cancellation_release',
+        settleAmount, origPmt?.currency || 'INR', 'Ciflux Credit Line', `SETTLE-CREDIT-${oid}`,
+        parseFloat(cust?.credit_limit) || 1000000, 0, parseFloat(cust?.wallet_balance) || 0,
+        `Credit settlement from Order ${oid}: ₹${settleAmount.toFixed(2)} credit obligation released`, u.name, now
+      ]
+    );
+    // Log order history
+    await runAsync(
+      'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), oid, 'Credit Line Restored', u.name, `Restored ₹${settleAmount.toFixed(2)} to Ciflux Credit line`, now]
+    );
+  }
+
+  // Handle remainder if remainder_action === 'refund'
+  const remaining = Math.max(0, availableUnsettled - settleAmount);
+  if (remaining > 0.01 && remainder_action === 'refund') {
+    const remRef = remainder_payment_ref || `REFUND-REM-${oid}`;
+    const remMethod = remainder_payment_method || 'Bank Transfer';
+    await runAsync(
+      `INSERT INTO customer_payments(
+         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
+         payment_type, amount, currency, payment_method, payment_ref, payment_date,
+         advance_pct, balance_due, status, recorded_by, recorded_at, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        o.po_number || '',
+        o.finance_po_no || '',
+        '',
+        '',
+        'refund',
+        -Math.abs(remaining),
+        origPmt?.currency || 'INR',
+        remMethod,
+        remRef,
+        now.slice(0, 10),
+        0,
+        0,
+        'paid',
+        u.name,
+        now,
+        `Refund remainder balance to customer: ₹${remaining.toFixed(2)}`
+      ]
+    );
+
+    await runAsync(
+      `INSERT INTO order_settlements(
+         id, from_order_id, to_order_id, customer_id, settlement_type,
+         amount, currency, payment_method, payment_ref, receipt_file_url,
+         notes, settled_by, settled_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        oid,
+        '',
+        o.customer_id,
+        'refund',
+        remaining,
+        origPmt?.currency || 'INR',
+        remMethod,
+        remRef,
+        receipt_file_url || '',
+        'Remainder balance refunded to customer',
+        u.name,
+        now
+      ]
+    );
+
+    await runAsync(
+      'UPDATE orders SET settlement_status=\'settled\', unsettled_amount=0 WHERE id=?',
+      [oid]
+    );
+  } else if (remaining <= 0.01) {
+    await runAsync(
+      'UPDATE orders SET settlement_status=\'settled\', unsettled_amount=0 WHERE id=?',
+      [oid]
+    );
+  } else {
+    // Still partially unsettled
+    await runAsync(
+      'UPDATE orders SET settlement_status=\'pending\', unsettled_amount=? WHERE id=?',
+      [remaining, oid]
+    );
+  }
+
+  saveNow();
+  const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
+}));
+
+// POST /api/orders/:id/items/:itemId/cancel — Cancel specific line item and adjust PO + Finance
+app.post('/api/orders/:id/items/:itemId/cancel', auth, asyncRoute(async (req, res) => {
+  const { id: oid, itemId } = req.params;
+  const o = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  const item = await getAsync('SELECT * FROM order_items WHERE id=? AND order_id=?', [itemId, oid]);
+  if (!item) return res.status(404).json({ error: 'Order item not found' });
+
+  const u = req.session.user;
+  const allowedSections = await getAllowedSections(u);
+  const canEdit = o.created_by === u.id || ['admin','manager'].includes(u.role) || hasAllowedSection(u, allowedSections, ORDER_FULL_ACCESS_SECTIONS);
+  if (!canEdit) return res.status(403).json({ error: 'Permission denied: Cannot cancel this item' });
+
+  if (item.line_status === 'cancelled') {
+    return res.status(400).json({ error: 'Item is already cancelled' });
+  }
+
+  const { reason, comment } = req.body || {};
+  const cancelReason = (reason || comment || '').trim();
+  if (!cancelReason) {
+    return res.status(400).json({ error: 'Cancellation reason is required' });
+  }
+
+  const cancelAt = nowStr();
+
+  // 1. Mark line item as cancelled
+  await runAsync(
+    "UPDATE order_items SET line_status='cancelled', cancelled_at=?, cancelled_by=?, cancellation_reason=? WHERE id=?",
+    [cancelAt, u.name, cancelReason, itemId]
+  );
+
+  // 1b. Check customer payments against new active order total and handle Credit, Wallet, and Bank adjustments
+  const custPayments = await allAsync("SELECT * FROM customer_payments WHERE order_id=? AND status='paid'", [oid]);
+  const totalCustomerPaid = custPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const activeOrderItems = await allAsync(
+    "SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)",
+    [oid]
+  );
+  const newActiveOrderTotal = activeOrderItems.reduce((s, li) => {
+    const base = (parseFloat(li.qty) || 0) * (parseFloat(li.unit_price) || 0);
+    return s + base + (base * (parseFloat(li.tax_rate) || 0) / 100);
+  }, 0);
+
+  const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+  const currentCreditLimit = parseFloat(cust?.credit_limit) >= 0 ? parseFloat(cust.credit_limit) : 1000000;
+  const currentWalletBal = parseFloat(cust?.wallet_balance) || 0;
+  let newWalletBal = currentWalletBal;
+
+  if (totalCustomerPaid > (newActiveOrderTotal + 0.009)) {
+    // Customer has overpaid against the new active items total (Excess exists!)
+    let excessPaid = parseFloat((totalCustomerPaid - newActiveOrderTotal).toFixed(2));
+    let remainingExcess = excessPaid;
+
+    // 1. Credit Drawdown Relief:
+    // If this order has an active credit drawdown with balance due, reduce credit obligation first
+    const activeDd = await getAsync(
+      "SELECT * FROM customer_credit_drawdowns WHERE order_id=? AND status NOT IN ('cleared', 'cancelled') AND balance_due > 0.009 ORDER BY due_date ASC LIMIT 1",
+      [oid]
+    );
+
+    if (activeDd && remainingExcess > 0.009) {
+      const balDue = parseFloat(activeDd.balance_due) || 0;
+      const creditRelief = Math.min(balDue, remainingExcess);
+      const newBalDue = Math.max(0, parseFloat((balDue - creditRelief).toFixed(2)));
+      const isCleared = newBalDue <= 0.01;
+
+      await runAsync(
+        "UPDATE customer_credit_drawdowns SET balance_due=?, status=?, cleared_at=? WHERE id=?",
+        [newBalDue, isCleared ? 'cleared' : activeDd.status, isCleared ? cancelAt : (activeDd.cleared_at || ''), activeDd.id]
+      );
+
+      await runAsync(
+        `INSERT INTO customer_credit_ledger(
+           id, customer_id, order_id, drawdown_id, transaction_type,
+           amount, currency, payment_method, payment_ref,
+           credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+           notes, recorded_by, created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), o.customer_id, oid, activeDd.id, 'credit_cancellation_release',
+          creditRelief, activeDd.currency || 'INR', 'Ciflux Credit Line', `CREDIT-ITEM-CANCEL-${oid}`,
+          currentCreditLimit, 0, newWalletBal,
+          `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${creditRelief.toFixed(2)} credit obligation released, available limit restored`, u.name, cancelAt
+        ]
+      );
+      remainingExcess = Math.max(0, parseFloat((remainingExcess - creditRelief).toFixed(2)));
+    }
+
+    // 2. Wallet Refund:
+    // If wallet was used on this order and there is remaining excess, refund that portion back to customer wallet
+    const walletUsageRows = await allAsync(
+      "SELECT COALESCE(SUM(amount), 0) AS total_wallet FROM customer_credit_ledger WHERE order_id=? AND transaction_type='wallet_usage'",
+      [oid]
+    );
+    const walletUsedTotal = parseFloat(walletUsageRows?.[0]?.total_wallet) || 0;
+    const walletRefundRows = await allAsync(
+      "SELECT COALESCE(SUM(amount), 0) AS total_refunded FROM customer_credit_ledger WHERE order_id=? AND transaction_type='order_cancellation_refund'",
+      [oid]
+    );
+    const walletRefundedTotal = parseFloat(walletRefundRows?.[0]?.total_refunded) || 0;
+    const availableWalletToRefund = Math.max(0, parseFloat((walletUsedTotal - walletRefundedTotal).toFixed(2)));
+
+    if (availableWalletToRefund > 0.009 && remainingExcess > 0.009) {
+      const walletRefund = Math.min(availableWalletToRefund, remainingExcess);
+      newWalletBal = parseFloat((newWalletBal + walletRefund).toFixed(2));
+      await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWalletBal, o.customer_id]);
+
+      await runAsync(
+        `INSERT INTO customer_credit_ledger(
+           id, customer_id, order_id, drawdown_id, transaction_type,
+           amount, currency, payment_method, payment_ref,
+           credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+           notes, recorded_by, created_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          uuid(), o.customer_id, oid, '', 'order_cancellation_refund',
+          walletRefund, o.currency || 'INR', 'Customer Wallet', `WALLET-ITEM-CANCEL-${oid}`,
+          currentCreditLimit, 0, newWalletBal,
+          `Item ${item.component || itemId} cancelled in Order ${oid}: ₹${walletRefund.toFixed(2)} refunded to customer wallet`, u.name, cancelAt
+        ]
+      );
+      remainingExcess = Math.max(0, parseFloat((remainingExcess - walletRefund).toFixed(2)));
+    }
+
+    // 3. Bank Cash Settlement:
+    // If remainingExcess > 0, it means real bank cash was paid, so flag for Finance settlement
+    if (remainingExcess > 0.009) {
+      await runAsync(
+        "UPDATE orders SET settlement_status='pending', unsettled_amount=?, customer_payment_status='paid' WHERE id=?",
+        [remainingExcess, oid]
+      );
+    } else {
+      // 100% absorbed by credit release and/or wallet refund! NO finance settlement needed!
+      await runAsync(
+        "UPDATE orders SET settlement_status='none', unsettled_amount=0, customer_payment_status='paid' WHERE id=?",
+        [oid]
+      );
+    }
+  } else {
+    // Branch A: totalCustomerPaid <= newActiveOrderTotal (e.g. 30% advance paid, remaining due just reduces!)
+    // Customer has NOT overpaid, so remaining balance due simply decreases. NO settlement needed!
+    const isFullyPaid = newActiveOrderTotal > 0 && (totalCustomerPaid + 0.009) >= newActiveOrderTotal;
+    const newStatus = isFullyPaid ? 'paid' : (totalCustomerPaid > 0.009 ? 'payment_recorded' : (o.customer_payment_status || 'pending'));
+
+    await runAsync(
+      "UPDATE orders SET settlement_status='none', unsettled_amount=0, customer_payment_status=? WHERE id=?",
+      [newStatus, oid]
+    );
+  }
+
+  // 2. If assigned to supplier order in procurement, adjust supplier order and finance queue
+  const soItem = await getAsync(
+    "SELECT soi.supplier_order_id AS so_id, so.confirmed_price, so.status AS so_status FROM supplier_order_items soi JOIN supplier_orders so ON so.id=soi.supplier_order_id WHERE soi.item_id=?",
+    [itemId]
+  );
+
+  if (soItem) {
+    // Unlink the cancelled item from this PO
+    await runAsync(
+      "DELETE FROM supplier_order_items WHERE supplier_order_id=? AND item_id=?",
+      [soItem.so_id, itemId]
+    );
+
+    // Recalculate supplier order price from remaining active items in this PO
+    const remainingSoItems = await allAsync(
+      "SELECT oi.procurement_price, oi.unit_price, oi.qty FROM supplier_order_items soi JOIN order_items oi ON oi.id=soi.item_id WHERE soi.supplier_order_id=? AND (oi.line_status != 'cancelled' OR oi.line_status IS NULL)",
+      [soItem.so_id]
+    );
+    const newConfirmedPrice = remainingSoItems.reduce((s, it) => {
+      const p = (parseFloat(it.procurement_price) > 0) ? parseFloat(it.procurement_price) : (parseFloat(it.unit_price) || 0);
+      return s + ((parseFloat(it.qty) || 0) * p);
+    }, 0);
+
+    const soRecord = await getAsync("SELECT * FROM supplier_orders WHERE id=?", [soItem.so_id]);
+    const taxRate = parseFloat(soRecord?.supplier_tax_rate) || 0;
+    const newTaxAmount = (newConfirmedPrice * taxRate) / 100;
+
+    // Check if supplier has already been paid
+    const advLogs = await allAsync("SELECT * FROM supplier_advance_payment_logs WHERE supplier_order_id=?", [soItem.so_id]);
+    const netLogs = await allAsync("SELECT * FROM supplier_net_payment_logs WHERE supplier_order_id=?", [soItem.so_id]);
+    const totalSupPaid = [...advLogs, ...netLogs].reduce((s, p) => s + (parseFloat(p.amount) || 0), 0)
+      || (soRecord?.advance_actual_amount !== null ? parseFloat(soRecord?.advance_actual_amount) : 0)
+      || (soRecord?.net_actual_amount !== null ? parseFloat(soRecord?.net_actual_amount) : 0);
+
+    const newTotalPayable = newConfirmedPrice + newTaxAmount;
+    let supSettlementStatus = soRecord?.settlement_status || 'none';
+    let supUnsettled = 0;
+    if (totalSupPaid > (newTotalPayable + 0.009)) {
+      supSettlementStatus = 'pending';
+      supUnsettled = totalSupPaid - newTotalPayable;
+    }
+
+    await runAsync(
+      "UPDATE supplier_orders SET confirmed_price=?, supplier_tax_amount=?, settlement_status=?, unsettled_amount=? WHERE id=?",
+      [newConfirmedPrice, parseFloat(newTaxAmount.toFixed(2)), supSettlementStatus, parseFloat(supUnsettled.toFixed(2)), soItem.so_id]
+    );
+
+    // If there is an advance queue row in finance_queue for this supplier order
+    const fq = await getAsync(
+      "SELECT * FROM finance_queue WHERE supplier_order_id=? AND status='pending'",
+      [soItem.so_id]
+    );
+    if (fq) {
+      const advPct = parseFloat(soRecord?.payment_advance_pct) || 100;
+      const newAdvAmount = (newConfirmedPrice * advPct) / 100;
+      await runAsync(
+        "UPDATE finance_queue SET amount=? WHERE id=?",
+        [newAdvAmount, fq.id]
+      );
+    }
+  }
+
+  // 3. Audit log in order_history
+  await runAsync(
+    'INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+    [uuid(), oid, 'Item Cancelled', u.name, `Cancelled item: ${item.component} (${item.ipn || 'No IPN'}). Reason: ${cancelReason}`, cancelAt]
+  );
+
+  saveNow();
+  const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
+  res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
 }));
 
 // ── APPROVAL WORKFLOWS ───────────────────────────────────────
@@ -3224,6 +4544,9 @@ app.post('/api/orders/:id/po', auth, asyncRoute(async (req, res) => {
   const d     = req.body;
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.is_on_hold === 1 || order.status === 'hold') {
+    return res.status(400).json({ error: 'Cannot create PO: This order is currently on hold.' });
+  }
   if (!d.supplier_id) return res.status(400).json({ error: 'Supplier required' });
   const now = nowStr();
 
@@ -4146,27 +5469,53 @@ function normalizedFinanceDocNo(prefix, orderId, existingValue) {
 
 // GET /api/finance/customer-queue
 app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
-  const orders = await allAsync("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') ORDER BY created_at DESC");
-  const customers = await allAsync('SELECT id, name, email, phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone FROM customers');
+  const orders = await allAsync("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') OR (status='cancelled' AND settlement_status='pending') ORDER BY created_at DESC");
+  const customers = await allAsync('SELECT id, name, email, phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone, credit_enabled, credit_limit, credit_days, wallet_balance, credit_score, on_time_count, overdue_count FROM customers');
   let payments = [];
   try { payments = await allAsync('SELECT * FROM customer_payments ORDER BY recorded_at DESC'); } catch(_) {}
+
+  let activeDrawdowns = [];
+  try {
+    activeDrawdowns = await allAsync("SELECT * FROM customer_credit_drawdowns WHERE status NOT IN ('cleared', 'cancelled') AND balance_due > 0.01");
+  } catch(_) {}
+  const drawdownsByCustomer = {};
+  const drawdownsByOrder = {};
+  activeDrawdowns.forEach(dd => {
+    (drawdownsByCustomer[dd.customer_id] = drawdownsByCustomer[dd.customer_id] || []).push(dd);
+    drawdownsByOrder[dd.order_id] = dd;
+  });
+
   const custMap = {};
-  customers.forEach(c => { custMap[c.id] = c; });
+  customers.forEach(c => {
+    const custDues = (drawdownsByCustomer[c.id] || []).reduce((s, d) => s + (parseFloat(d.balance_due) || 0), 0);
+    const limit = parseFloat(c.credit_limit) >= 0 ? parseFloat(c.credit_limit) : 1000000;
+    custMap[c.id] = {
+      ...c,
+      credit_enabled: c.credit_enabled === 1 || c.credit_enabled === true,
+      credit_limit: limit,
+      credit_days: parseInt(c.credit_days) || 30,
+      total_outstanding_due: parseFloat(custDues.toFixed(2)),
+      available_credit: parseFloat(Math.max(0, limit - custDues).toFixed(2)),
+      wallet_balance: parseFloat((parseFloat(c.wallet_balance) || 0).toFixed(2)),
+    };
+  });
   const filtered = orders.filter(o => {
-    if (o.customer_payment_status === 'paid') return false;
+    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) return true;
+    if (o.status === 'cancelled') return false;
     // Returned from Finance: keep it visible/editable in Orders only until the
     // order team explicitly sends it back with status='payment_approval'.
     if (o.status === 'cust_payment_update') return false;
     const SUPPLIER_ONLY_STATUSES = ['sourcing', 'enquiry', 'quote'];
     if (SUPPLIER_ONLY_STATUSES.includes(o.status)) return false;
     if (o.status === 'payment_approval' || o.status === 'waiting_for_payment') return true;
+    if (o.customer_payment_status === 'paid') return true; // Let enriched inspect for excess payment
     return (o.payment_terms || '').length > 0;
   });
   // Fetch all order items in one query then group by order_id
   const orderIds = filtered.map(o => o.id);
   let allItems = [];
   if (orderIds.length) {
-    allItems = await allAsync(`SELECT order_id, unit_price, qty, tax_rate FROM order_items WHERE order_id IN (${orderIds.map(()=>'?').join(',')})`, orderIds);
+    allItems = await allAsync(`SELECT order_id, unit_price, qty, tax_rate FROM order_items WHERE order_id IN (${orderIds.map(()=>'?').join(',')}) AND (line_status != 'cancelled' OR line_status IS NULL)`, orderIds);
   }
   const itemsByOrder = {};
   allItems.forEach(li => { (itemsByOrder[li.order_id] = itemsByOrder[li.order_id] || []).push(li); });
@@ -4196,6 +5545,24 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     const dueNow = isAwaitingCustomerReleaseStatus(o.status)
       ? Math.max(0, releaseDueTotal - paid)
       : fullBalance;
+
+    const excessPaid = (paid > (total + 0.009)) ? (paid - total) : 0;
+    const isPendingSettlement = o.settlement_status === 'pending' || (excessPaid > 0.009 && o.settlement_status !== 'settled');
+    const activeUnsettled = isPendingSettlement
+      ? (parseFloat(o.unsettled_amount) > 0 ? parseFloat(o.unsettled_amount) : parseFloat(excessPaid.toFixed(2)))
+      : 0;
+
+    const orderDrawdown = drawdownsByOrder[o.id] || null;
+    let creditBadge = null;
+    if (orderDrawdown && orderDrawdown.due_date) {
+      const today = todayStr();
+      const diff = Math.ceil((new Date(orderDrawdown.due_date) - new Date(today)) / (1000 * 60 * 60 * 24));
+      if (diff < 0) creditBadge = { type: 'overdue', label: `⚠️ Overdue by ${Math.abs(diff)}d`, days: diff };
+      else if (diff === 0) creditBadge = { type: 'due_today', label: '🚨 Due Today', days: 0 };
+      else if (diff <= 3) creditBadge = { type: 'urgent', label: `⏳ Due in ${diff}d`, days: diff };
+      else creditBadge = { type: 'normal', label: `Due in ${diff}d`, days: diff };
+    }
+
     return {
       ...o,
       customer: custMap[o.customer_id] || null,
@@ -4207,45 +5574,25 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       full_balance_due: parseFloat(fullBalance.toFixed(2)),
       total_paid:  parseFloat(paid.toFixed(2)),
       balance_due: parseFloat(dueNow.toFixed(2)),
+      settlement_status: isPendingSettlement ? 'pending' : (o.settlement_status || 'none'),
+      unsettled_amount: activeUnsettled,
       payment_type: isAdvanceTerms(effectivePaymentTerms) ? 'full_advance'
         : isPartialAdvanceTerms(effectivePaymentTerms) ? 'partial_advance'
         : isNetTerms(effectivePaymentTerms) ? 'net' : 'other',
       last_payment: orderPayments[0] || null,
       quote_additional_charges: quoteChargesById[o.quote_id] || [],
+      credit_drawdown: orderDrawdown,
+      credit_badge: creditBadge,
       _computed_total: total,
       _computed_paid: paid,
     };
   });
-  // Auto-heal: if actual payments already fully cover the total but status is still payment_approval
-  // (e.g. legacy data or test records), bump it to payment_recorded so Finance sees the Release button
-  // instead of a dead "Record Payment" that errors with "already fully paid".
-  // Do NOT set 'paid' here — that only happens when Finance explicitly clicks Release.
-  const healPromises = [];
-  for (const o of enriched) {
-    const isNetOrOther = !isAdvanceTerms(o.payment_terms) && !isPartialAdvanceTerms(o.payment_terms);
-    const releaseDueTotal = requiredCustomerPaymentTotal(o._computed_total, o.payment_terms);
-    const releasePaid = releaseDueTotal > 0 && (o._computed_paid + 0.01) >= releaseDueTotal;
-    const fullPaid = o._computed_total > 0 && (o._computed_paid + 0.01) >= o._computed_total;
-    if (fullPaid && o.customer_payment_status !== 'paid') {
-      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='paid' WHERE id=?", [o.id]).catch(()=>{}));
-    } else if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
-      healPromises.push(runAsync("UPDATE orders SET customer_payment_status='payment_recorded' WHERE id=?", [o.id]).catch(()=>{}));
-    }
-  }
-  if (healPromises.length) await Promise.all(healPromises);
-  const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => {
-    // Reflect healed status in response immediately without waiting for next request
-    const releaseDueTotal = requiredCustomerPaymentTotal(_computed_total, o.payment_terms);
-    const releasePaid = releaseDueTotal > 0 && (_computed_paid + 0.01) >= releaseDueTotal;
-    const fullPaid = _computed_total > 0 && (_computed_paid + 0.01) >= _computed_total;
-    if (fullPaid) {
-      return { ...o, customer_payment_status: 'paid' };
-    }
-    if (releasePaid && isAwaitingCustomerReleaseStatus(o.status) && o.customer_payment_status !== 'payment_recorded') {
-      return { ...o, customer_payment_status: 'payment_recorded' };
-    }
-    return o;
-  }).filter(o => o.customer_payment_status !== 'paid' && o.full_balance_due > 0.009);
+  const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => o).filter(o => {
+    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) return true;
+    if (o.status === 'cancelled') return false;
+    if (o.customer_payment_status === 'paid') return false;
+    return o.customer_payment_status === 'payment_recorded' || o.full_balance_due > 0.009;
+  });
   res.json(result);
 }));
 
@@ -4323,8 +5670,11 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   const d = req.body || {};
   const o = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
   if (!o) return res.status(404).json({ error: 'Order not found' });
+  if (o.is_on_hold === 1 || o.status === 'hold') {
+    return res.status(400).json({ error: 'Cannot record payment: Order is currently on hold.' });
+  }
   const now = nowStr();
-  const items = await allAsync('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
+  const items = await allAsync("SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)", [req.params.order_id]);
   const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
   let prevPaid = 0;
   let prevRows = [];
@@ -4354,13 +5704,117 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
   const releaseDueTotal = requiredCustomerPaymentTotal(total, o.payment_terms);
   const newPaid  = prevPaid + incomingAmount;
   const fullBalance  = parseFloat(Math.max(0, total-newPaid).toFixed(2));
-  const releaseBalance = parseFloat(Math.max(0, releaseDueTotal - newPaid).toFixed(2));
-  const isNetOrOther = !isAdvanceTerms(o.payment_terms) && !isPartialAdvanceTerms(o.payment_terms);
-  const paymentStatus = fullBalance <= 0.009
-    ? (isNetOrOther ? 'paid' : (isAwaitingCustomerReleaseStatus(o.status) ? 'payment_recorded' : 'paid'))
-    : releaseBalance <= 0.009 && isAwaitingCustomerReleaseStatus(o.status)
-      ? 'payment_recorded'
-      : 'pending';
+  const paymentStatus = 'payment_recorded';
+
+  const walletAmount = parseFloat(d.wallet_amount) > 0 ? parseFloat(d.wallet_amount) : (d.payment_source === 'customer_wallet' ? actualAmount : 0);
+  const creditAmount = parseFloat(d.credit_amount) > 0 ? parseFloat(d.credit_amount) : (d.payment_source === 'ciflux_credit' ? actualAmount : 0);
+  let bankAmount = d.bank_amount !== undefined && d.bank_amount !== null ? parseFloat(d.bank_amount) : (actualAmount - walletAmount - creditAmount);
+  if (bankAmount < 0) bankAmount = 0;
+
+  let usedMethod = d.payment_method || 'Bank Transfer';
+  let usedRef = d.payment_ref || '';
+  let paymentNote = d.notes || '';
+  const breakdownNotes = [];
+
+  // 1. Process Wallet Deduction if walletAmount > 0
+  if (walletAmount > 0) {
+    const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+    if (!cust) return res.status(404).json({ error: 'Customer not found' });
+    const walletBal = parseFloat(cust.wallet_balance) || 0;
+    if (walletAmount > (walletBal + 0.01)) {
+      return res.status(400).json({ error: `Wallet deduction (₹${walletAmount.toFixed(2)}) exceeds customer wallet balance (₹${walletBal.toFixed(2)})` });
+    }
+    const newWalletBal = Math.max(0, walletBal - walletAmount);
+    await runAsync('UPDATE customers SET wallet_balance=? WHERE id=?', [newWalletBal, cust.id]);
+
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), cust.id, o.id, '', 'wallet_usage',
+        walletAmount, d.currency || 'INR', 'Customer Wallet', `WALLET-${o.po_number || o.id}`,
+        parseFloat(cust.credit_limit) || 1000000, 0, newWalletBal,
+        `Order ${o.id}: ₹${walletAmount.toFixed(2)} paid from Customer Wallet Balance`, req.session.user.name, now
+      ]
+    );
+    breakdownNotes.push(`Wallet: ₹${walletAmount.toFixed(2)}`);
+  }
+
+  // 2. Process Ciflux Credit Drawdown if creditAmount > 0
+  if (creditAmount > 0) {
+    const cust = await getAsync('SELECT * FROM customers WHERE id=?', [o.customer_id]);
+    if (!cust) return res.status(404).json({ error: 'Customer not found' });
+    if (cust.credit_enabled !== 1 && cust.credit_enabled !== true) {
+      return res.status(400).json({ error: 'Credit line is not enabled for this customer' });
+    }
+    const remainingDues = await allAsync("SELECT balance_due FROM customer_credit_drawdowns WHERE customer_id=? AND status NOT IN ('cleared', 'cancelled')", [cust.id]);
+    const currentDues = remainingDues.reduce((s, r) => s + (parseFloat(r.balance_due) || 0), 0);
+    const creditLimit = parseFloat(cust.credit_limit) >= 0 ? parseFloat(cust.credit_limit) : 1000000;
+    const availableCredit = Math.max(0, creditLimit - currentDues);
+    if (creditAmount > (availableCredit + 0.01)) {
+      return res.status(400).json({ error: `Credit amount (₹${creditAmount.toFixed(2)}) exceeds available credit limit (₹${availableCredit.toFixed(2)})` });
+    }
+
+    const creditDays = parseInt(cust.credit_days) || 30;
+    const dueDate = addDaysIso(now.slice(0, 10), creditDays);
+    const ddId = uuid();
+
+    await runAsync(
+      `INSERT INTO customer_credit_drawdowns(
+         id, customer_id, order_id, amount, balance_due, currency,
+         drawn_at, due_date, status, notes
+       ) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      [
+        ddId, cust.id, o.id, creditAmount, creditAmount, d.currency || 'INR',
+        now, dueDate, 'active', `Credit line drawn for Order ${o.id}`
+      ]
+    );
+
+    await runAsync(
+      `INSERT INTO customer_credit_ledger(
+         id, customer_id, order_id, drawdown_id, transaction_type,
+         amount, currency, payment_method, payment_ref,
+         credit_limit_snapshot, credit_available_snapshot, wallet_balance_snapshot,
+         notes, recorded_by, created_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(), cust.id, o.id, ddId, 'credit_drawdown',
+        creditAmount, d.currency || 'INR', 'Ciflux Credit Line', `CREDIT-${o.po_number || o.id}`,
+        creditLimit, Math.max(0, availableCredit - creditAmount), parseFloat(cust.wallet_balance) || 0,
+        `Order ${o.id}: ₹${creditAmount.toFixed(2)} drawn via Ciflux Credit (Due: ${dueDate})`, req.session.user.name, now
+      ]
+    );
+    breakdownNotes.push(`Credit: ₹${creditAmount.toFixed(2)} (Due: ${dueDate})`);
+  }
+
+  // 3. Process Bank Transfer
+  if (bankAmount > 0.009) {
+    if (!usedRef.trim()) {
+      return res.status(400).json({ error: 'Bank transfer UTR / Reference number is required for the remaining bank payment' });
+    }
+    breakdownNotes.push(`Bank Transfer: ₹${bankAmount.toFixed(2)} (UTR: ${usedRef})`);
+  } else {
+    // 100% covered by wallet/credit
+    if (walletAmount > 0 && creditAmount > 0) {
+      usedMethod = 'Wallet + Credit Line';
+      usedRef = usedRef || `WALLET+CREDIT-${o.id}`;
+    } else if (walletAmount > 0) {
+      usedMethod = 'Customer Wallet';
+      usedRef = usedRef || `WALLET-${o.id}`;
+    } else if (creditAmount > 0) {
+      usedMethod = 'Ciflux Credit Line';
+      usedRef = usedRef || `CREDIT-${o.id}`;
+    }
+  }
+
+  if (breakdownNotes.length > 0) {
+    paymentNote = `${paymentNote ? paymentNote + ' | ' : ''}Breakdown: [${breakdownNotes.join(' · ')}]`;
+  }
+
   await runAsync(`INSERT INTO customer_payments(
         id, order_id, customer_po_no, finance_po_no, pi_no, pi_sent_at,
         payment_type, amount, currency, payment_method, payment_ref,
@@ -4370,9 +5824,9 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
     [uuid(), req.params.order_id, d.customer_po_no||o.po_number||'', d.finance_po_no||o.finance_po_no||'',
      d.pi_no||o.pi_no||'', d.pi_sent_at||'',
      d.payment_type||'advance', parseFloat(d.amount)||0, d.currency||'INR',
-     d.payment_method||'', d.payment_ref||'', d.payment_date||now.slice(0,10),
+     usedMethod, usedRef, d.payment_date||now.slice(0,10),
      parseFloat(d.advance_pct)||0, fullBalance, 'paid',
-     req.session.user.id, now, d.notes||'',
+     req.session.user.id, now, paymentNote,
      JSON.stringify(additionalCharges), actualAmount, (d.amount_change_note||'').trim()||null]);
   await runAsync('UPDATE orders SET customer_payment_status=? WHERE id=?', [paymentStatus, req.params.order_id]);
   const chargesDesc = additionalCharges.length > 0 ? ' | Charges: ' + additionalCharges.map(c => `${c.name} ${parseFloat(c.amount).toFixed(2)}`).join(', ') : '';
@@ -4388,7 +5842,7 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   const o = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.order_id]);
   if (!o) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
-  const items = await allAsync('SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=?', [req.params.order_id]);
+  const items = await allAsync("SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)", [req.params.order_id]);
   const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
   const paid = await getAsync(
     "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
@@ -4400,20 +5854,20 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   // to Procurement). Once it has already progressed to procurement or beyond, a later installment
   // must NOT drag it back to 'open' — that would re-show "Send to Procurement" on an order that's
   // already in procurement. In that case we only update the payment status.
-  const preProcurementStatuses = ['payment_approval','waiting_for_payment','cust_payment_update','payment_pending','draft'];
+  const preProcurementStatuses = ['payment_approval','waiting_for_payment','cust_payment_update','payment_pending','draft','open'];
   const newPaymentStatus = fullPaid ? 'paid' : 'pending';
   if (preProcurementStatuses.includes(o.status)) {
-    await runAsync("UPDATE orders SET status='open', customer_payment_status=? WHERE id=?",
+    await runAsync("UPDATE orders SET status='open', customer_payment_status=?, advance_released=1 WHERE id=?",
       [newPaymentStatus, req.params.order_id]);
   } else {
-    // Already 'open' or further along (procurement, shipped, …) — keep status, just record payment.
-    await runAsync("UPDATE orders SET customer_payment_status=? WHERE id=?",
+    // Already further along (procurement, shipped, …) — keep status, update payment status
+    await runAsync("UPDATE orders SET customer_payment_status=?, advance_released=1 WHERE id=?",
       [newPaymentStatus, req.params.order_id]);
   }
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
-  res.json({ ok: true });
+  res.json({ ok: true, advance_released: 1, customer_payment_status: newPaymentStatus });
 }));
 
 // POST /api/finance/customer-return/:order_id — return unpaid case to Order
@@ -4444,7 +5898,12 @@ app.post('/api/finance/customer-return/:order_id', auth, asyncRoute(async (req, 
 
 // GET /api/po-requests
 app.get('/api/po-requests', auth, asyncRoute(async (req, res) => {
-  const rows = await allAsync("SELECT * FROM po_requests ORDER BY requested_at DESC");
+  const rows = await allAsync(`
+    SELECT pr.*, o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status as order_status
+    FROM po_requests pr
+    LEFT JOIN orders o ON o.id=pr.order_id
+    ORDER BY pr.requested_at DESC
+  `);
   res.json(rows);
 }));
 
@@ -4452,6 +5911,10 @@ app.get('/api/po-requests', auth, asyncRoute(async (req, res) => {
 app.post('/api/po-requests', auth, asyncRoute(async (req, res) => {
   const d = req.body || {};
   if (!d.order_id || !d.supplier_id) return res.status(400).json({ error: 'order_id and supplier_id are required' });
+  const ord = await getAsync('SELECT is_on_hold, status FROM orders WHERE id=?', [d.order_id]);
+  if (ord && (ord.is_on_hold === 1 || ord.status === 'hold')) {
+    return res.status(400).json({ error: 'Cannot request PO details: Order is currently on hold.' });
+  }
   const now = nowStr();
   try {
     const existing = await getAsync("SELECT id FROM po_requests WHERE order_id=? AND supplier_id=? AND status='pending'",
@@ -4557,7 +6020,17 @@ app.get('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res)
 // GET /api/finance/supplier-queue
 app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   let advRows = [];
-  try { advRows = await allAsync("SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked, so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no FROM finance_queue fq LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id WHERE fq.status='pending'"); } catch(_) {}
+  try {
+    advRows = await allAsync(`
+      SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked,
+             so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no,
+             o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status
+      FROM finance_queue fq
+      LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
+      LEFT JOIN orders o ON o.id=fq.order_id
+      WHERE fq.status='pending'
+    `);
+  } catch(_) {}
 
   // Auto-heal in PostgreSQL/SQLite: mark any fully paid Advance queue row as status='paid'
   // when balance is cleared and not awaiting release
@@ -4588,7 +6061,10 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
     console.warn('[FINANCE] supplier-queue auto-heal error:', e?.message || e);
   }
 
-  const netRows = await allAsync(`SELECT so.* FROM supplier_orders so
+  const netRows = await allAsync(`SELECT so.*,
+      o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status
+    FROM supplier_orders so
+    LEFT JOIN orders o ON o.id=so.order_id
     WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
       AND so.status NOT IN ('paid','cancelled')
       AND (so.net_total_paid IS NULL OR so.confirmed_price IS NULL OR so.confirmed_price <= 0 OR so.net_total_paid < (so.confirmed_price - 0.01))
@@ -4599,32 +6075,98 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
       )`);
   const suppliers = await allAsync('SELECT id, name, type, bank_account_name, bank_account_no, bank_ifsc, bank_name, bank_branch, bank_swift, bank_iban, bank_aba, bank_country, bank_currency FROM suppliers');
   const supMap = {}; suppliers.forEach(s => { supMap[s.id] = s; });
+
+  // Check for any supplier orders with overpayment / recovery needed (e.g. from cancelled line items)
+  const allSos = await allAsync(`
+    SELECT so.*, o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status
+    FROM supplier_orders so
+    LEFT JOIN orders o ON o.id=so.order_id
+    WHERE so.status IN ('paid', 'draft', 'confirmed', 'net_payment_recorded')
+       OR so.settlement_status = 'pending'
+  `);
+  let allAdvLogs = [];
+  try { allAdvLogs = await allAsync("SELECT supplier_order_id, amount FROM supplier_advance_payment_logs"); } catch(_) {}
+  let allNetLogs = [];
+  try { allNetLogs = await allAsync("SELECT supplier_order_id, amount FROM supplier_net_payment_logs"); } catch(_) {}
+  const paidBySo = {};
+  allAdvLogs.forEach(l => { paidBySo[l.supplier_order_id] = (paidBySo[l.supplier_order_id] || 0) + (parseFloat(l.amount) || 0); });
+  allNetLogs.forEach(l => { paidBySo[l.supplier_order_id] = (paidBySo[l.supplier_order_id] || 0) + (parseFloat(l.amount) || 0); });
+
+  const soRecoveryRows = [];
+  for (const so of allSos) {
+    const rawPaid = (paidBySo[so.id] !== undefined && paidBySo[so.id] > 0)
+      ? paidBySo[so.id]
+      : (parseFloat(so.advance_actual_amount) || parseFloat(so.net_actual_amount) || 0);
+    if (rawPaid <= 0) continue;
+
+    // Calculate active items in this PO
+    const activeItems = await allAsync(
+      "SELECT oi.procurement_price, oi.unit_price, oi.qty FROM supplier_order_items soi JOIN order_items oi ON oi.id=soi.item_id WHERE soi.supplier_order_id=? AND (oi.line_status != 'cancelled' OR oi.line_status IS NULL)",
+      [so.id]
+    );
+    const activeCost = activeItems.reduce((s, it) => {
+      const p = (parseFloat(it.procurement_price) > 0) ? parseFloat(it.procurement_price) : (parseFloat(it.unit_price) || 0);
+      return s + ((parseFloat(it.qty) || 0) * p);
+    }, 0);
+    const taxRate = parseFloat(so.supplier_tax_rate) || 0;
+    const activeTax = (activeCost * taxRate) / 100;
+    const activePayable = activeCost + activeTax;
+
+    if (rawPaid > (activePayable + 0.01) && so.settlement_status !== 'settled') {
+      const excess = rawPaid - activePayable;
+      soRecoveryRows.push({
+        id: 'rec_' + so.id,
+        supplier_order_id: so.id,
+        order_id: so.order_id,
+        supplier_id: so.supplier_id,
+        internal_po_no: so.internal_po_no,
+        po_no: so.po_no,
+        supplier_ref: so.supplier_ref,
+        zoho_po_number: so.zoho_po_number,
+        confirmed_currency: so.confirmed_currency || 'INR',
+        confirmed_price: activeCost,
+        amount: activePayable,
+        paid_amount: rawPaid,
+        full_balance_due: 0,
+        unsettled_amount: parseFloat(excess.toFixed(2)),
+        is_recovery_pending: true,
+        settlement_status: 'pending',
+        payment_terms_type: so.payment_terms_type || 'advance',
+        payment_blocked: 0,
+        release_ready: 0,
+        is_on_hold: so.is_on_hold,
+        order_status: so.order_status,
+        supplier: supMap[so.supplier_id] || null,
+      });
+    }
+  }
+
+  const normalAdv = advRows
+    .map(r => {
+      const total = parseFloat(r.amount) || parseFloat(r.confirmed_price) || 0;
+      const paid = parseFloat(r.paid_amount) || 0;
+      const releaseTotal = requiredSupplierReleaseTotal(total, r);
+      const fullBalance = Math.max(0, total - paid);
+      const releaseBalance = Math.max(0, releaseTotal - paid);
+      const releaseReady = paid >= releaseTotal;
+      const dueNow = r.payment_blocked === 0 ? fullBalance : (releaseBalance > 0 ? releaseBalance : 0);
+      return {
+        ...r,
+        supplier: supMap[r.supplier_id]||null,
+        payment_due_total: parseFloat(dueNow.toFixed(2)),
+        release_due_total: parseFloat(releaseTotal.toFixed(2)),
+        full_balance_due: parseFloat(fullBalance.toFixed(2)),
+        release_ready: releaseReady ? 1 : 0,
+      };
+    })
+    .filter(r => {
+      const releasePending = r.release_pending === 1 || r.release_pending === true;
+      if (r.full_balance_due <= 0.009 && !releasePending) return false;
+      return true;
+    });
+
   res.json({
-    advance: advRows
-      .map(r => {
-        const total = parseFloat(r.amount) || parseFloat(r.confirmed_price) || 0;
-        const paid = parseFloat(r.paid_amount) || 0;
-        const releaseTotal = requiredSupplierReleaseTotal(total, r);
-        const fullBalance = Math.max(0, total - paid);
-        const releaseBalance = Math.max(0, releaseTotal - paid);
-        const releaseReady = paid >= releaseTotal;
-        const dueNow = r.payment_blocked === 0 ? fullBalance : (releaseBalance > 0 ? releaseBalance : 0);
-        return {
-          ...r,
-          supplier: supMap[r.supplier_id]||null,
-          payment_due_total: parseFloat(dueNow.toFixed(2)),
-          release_due_total: parseFloat(releaseTotal.toFixed(2)),
-          full_balance_due: parseFloat(fullBalance.toFixed(2)),
-          release_ready: releaseReady ? 1 : 0,
-        };
-      })
-      .filter(r => {
-        const releasePending = r.release_pending === 1 || r.release_pending === true;
-        // If entire balance is completed/nil (<= 0.009) and NOT awaiting release,
-        // this advance payment is completed and moves out of pending queue.
-        if (r.full_balance_due <= 0.009 && !releasePending) return false;
-        return true;
-      }),
+    advance: [...normalAdv, ...soRecoveryRows],
     net: netRows
       .filter(r => {
         const total = parseFloat(r.confirmed_price) || 0;
@@ -4705,6 +6247,12 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
   const d = req.body || {};
   const fq = await getAsync('SELECT * FROM finance_queue WHERE id=?', [req.params.fq_id]);
   if (!fq) return res.status(404).json({ error: 'Not found' });
+  if (fq.order_id) {
+    const o = await getAsync('SELECT is_on_hold, status FROM orders WHERE id=?', [fq.order_id]);
+    if (o && (o.is_on_hold === 1 || o.status === 'hold')) {
+      return res.status(400).json({ error: 'Cannot process payment: Linked order is currently on hold.' });
+    }
+  }
 
   let bankEntity = null;
   if (fq.supplier_id && fq.supplier_id.startsWith('__inv__')) {
@@ -4782,7 +6330,8 @@ app.put('/api/finance/supplier-pay/:fq_id', auth, asyncRoute(async (req, res) =>
       amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT, payment_method TEXT,
       zoho_po_number TEXT, supplier_ref TEXT, notes TEXT, paid_by TEXT, paid_at TEXT,
       total_paid_snapshot NUMERIC, remaining_snapshot NUMERIC, grand_total NUMERIC,
-      additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT
+      additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT,
+      receipt_file_url TEXT DEFAULT ''
     )`);
     await runAsync(
       `INSERT INTO supplier_advance_payment_logs(id,finance_queue_id,supplier_order_id,order_id,amount,currency,payment_ref,payment_date,payment_method,zoho_po_number,supplier_ref,notes,paid_by,paid_at,total_paid_snapshot,remaining_snapshot,grand_total,additional_charges,actual_amount,amount_change_note)
@@ -4861,6 +6410,12 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
   const d = req.body || {};
   const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [req.params.so_id]);
   if (!so) return res.status(404).json({ error: 'Supplier order not found' });
+  if (so.order_id) {
+    const o = await getAsync('SELECT is_on_hold, status FROM orders WHERE id=?', [so.order_id]);
+    if (o && (o.is_on_hold === 1 || o.status === 'hold')) {
+      return res.status(400).json({ error: 'Cannot process payment: Linked order is currently on hold.' });
+    }
+  }
 
   const zohoPo    = (d.zoho_po_number || '').trim();
   const supplierRef = (d.supplier_ref || '').trim();
@@ -4972,6 +6527,89 @@ app.post('/api/finance/supplier-net-release/:so_id', auth, asyncRoute(async (req
   res.json({ ok: true, status: nextStatus, balance_due: fullBalance });
 }));
 
+// POST /api/finance/supplier-recover/:so_id — record recovery/refund for overpaid supplier PO
+app.post('/api/finance/supplier-recover/:so_id', auth, asyncRoute(async (req, res) => {
+  const { so_id } = req.params;
+  const so = await getAsync('SELECT * FROM supplier_orders WHERE id=?', [so_id]);
+  if (!so) return res.status(404).json({ error: 'Supplier order not found' });
+  const u = req.session.user;
+  const { amount, payment_method, payment_ref, notes, receipt_file_url } = req.body || {};
+  const recoverAmount = parseFloat(amount) || 0;
+  if (recoverAmount <= 0) return res.status(400).json({ error: 'Recovery amount must be greater than zero' });
+
+  const now = nowStr();
+  const method = payment_method || 'Bank Transfer (Refund)';
+  const ref = payment_ref || `REC-${so.internal_po_no || so_id}`;
+
+  // Ensure receipt_file_url column exists on supplier_advance_payment_logs
+  try {
+    await runAsync("ALTER TABLE supplier_advance_payment_logs ADD COLUMN receipt_file_url TEXT DEFAULT ''");
+  } catch(_) {}
+
+  // Log as recovery in supplier_advance_payment_logs
+  try {
+    await runAsync(
+      `INSERT INTO supplier_advance_payment_logs(
+         id, supplier_order_id, order_id, amount, currency, payment_ref,
+         payment_date, payment_method, notes, paid_by, paid_at, receipt_file_url
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        so_id,
+        so.order_id || '',
+        -Math.abs(recoverAmount),
+        so.confirmed_currency || 'INR',
+        ref,
+        now.slice(0, 10),
+        method,
+        `Supplier Recovery: ₹${recoverAmount.toFixed(2)}. ${notes || ''}`,
+        u.name,
+        now,
+        receipt_file_url || ''
+      ]
+    );
+  } catch(err) {
+    console.warn('[SUPPLIER RECOVER] Insert with receipt_file_url failed, falling back:', err.message);
+    await runAsync(
+      `INSERT INTO supplier_advance_payment_logs(
+         id, supplier_order_id, order_id, amount, currency, payment_ref,
+         payment_date, payment_method, notes, paid_by, paid_at
+       ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        uuid(),
+        so_id,
+        so.order_id || '',
+        -Math.abs(recoverAmount),
+        so.confirmed_currency || 'INR',
+        ref,
+        now.slice(0, 10),
+        method,
+        `Supplier Recovery: ₹${recoverAmount.toFixed(2)}. ${notes || ''}`,
+        u.name,
+        now
+      ]
+    );
+  }
+
+  const prevUnsettled = parseFloat(so.unsettled_amount) || recoverAmount;
+  const rem = Math.max(0, prevUnsettled - recoverAmount);
+  const newStatus = rem <= 0.01 ? 'settled' : 'pending';
+
+  await runAsync(
+    "UPDATE supplier_orders SET settlement_status=?, unsettled_amount=? WHERE id=?",
+    [newStatus, rem, so_id]
+  );
+
+  try {
+    await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
+      [uuid(), so.order_id, 'Supplier Overpayment Recovered', u.name, `Recovered ₹${recoverAmount.toFixed(2)} from supplier PO ${so.internal_po_no || so_id} (Ref: ${ref})`, now]
+    );
+  } catch(_) {}
+
+  saveNow();
+  res.json({ ok: true, remaining: rem, settlement_status: newStatus });
+}));
+
 console.log('[STARTUP] Finance routes registered');
 // ── GRN ROUTES ───────────────────────────────────────────────────────────────
 // POST /api/orders/:id/grn — record goods receipt
@@ -4979,6 +6617,9 @@ app.post('/api/orders/:id/grn', auth, asyncRoute(async (req, res) => {
   const { records = [], partial = false, filter_po_id: filterPoId = '', credit_note_no: cnNoInput, credit_note_amount: cnAmtInput } = req.body;
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.is_on_hold === 1 || order.status === 'hold') {
+    return res.status(400).json({ error: 'Cannot record GRN: This order is currently on hold.' });
+  }
   if (!Array.isArray(records)) return res.status(400).json({ error: 'Invalid GRN records' });
   const now = nowStr();
 
@@ -5158,6 +6799,9 @@ app.post('/api/orders/:id/shipments', auth, asyncRoute(async (req, res) => {
   const d = req.body || {};
   const order = await getAsync('SELECT * FROM orders WHERE id=?', [req.params.id]);
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.is_on_hold === 1 || order.status === 'hold') {
+    return res.status(400).json({ error: 'Cannot create shipment: This order is currently on hold.' });
+  }
   if (!d.shipper_id) return res.status(400).json({ error: 'Carrier is required' });
   if (!d.tracking_no) return res.status(400).json({ error: 'AWB / Tracking number is required' });
   if (!Array.isArray(d.items) || d.items.length === 0) return res.status(400).json({ error: 'Shipment items are required' });

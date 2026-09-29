@@ -8,6 +8,8 @@ import { printDoc, generateEnquiryPDF } from '../utils/pdfUtils';
 import MergeEnquiryModal, { MERGEABLE_ENQ_STATUSES } from '../components/MergeEnquiryModal';
 import toast from 'react-hot-toast';
 
+const BUYING_TYPES = ['Shortage', 'Tactical', 'NPI', 'R&D', 'Production', 'Testing'];
+
 export default function EnquiryDetailPage() {
   const { id }    = useParams();
   const navigate  = useNavigate();
@@ -17,6 +19,8 @@ export default function EnquiryDetailPage() {
   const [confirmSubmit, setConfirmSubmit]   = useState(false);
   const [editPriority, setEditPriority]     = useState(null);
   const [savingPriority, setSavingPriority] = useState(false);
+  const [editBuyingType, setEditBuyingType] = useState(null);
+  const [savingBuyingType, setSavingBuyingType] = useState(false);
   const [showMerge, setShowMerge]           = useState(false);
 
   const submitToSourcing = async () => {
@@ -51,6 +55,22 @@ export default function EnquiryDetailPage() {
     }
   };
 
+  const saveBuyingType = async () => {
+    if (!editBuyingType || editBuyingType === enq?.buying_type) { setEditBuyingType(null); return; }
+    setSavingBuyingType(true);
+    try {
+      const updated = await api.put('/enquiries/' + id, { buying_type: editBuyingType, _action: `Buying Type changed to ${editBuyingType}` }).then(r => r.data);
+      qc.setQueryData(['enquiry', id], updated);
+      qc.invalidateQueries(['enquiries']);
+      toast.success(`Buying Type updated to ${editBuyingType}!`);
+      setEditBuyingType(null);
+    } catch(err) {
+      toast.error(err.response?.data?.error || 'Failed to update buying type');
+    } finally {
+      setSavingBuyingType(false);
+    }
+  };
+
   const { data: enq,       isLoading } = useQuery({ queryKey:['enquiry', id], queryFn:()=>api.get('/enquiries/'+id).then(r=>r.data) });
   const { data: customers=[] }         = useQuery({ queryKey:['customers'],   queryFn:()=>api.get('/customers').then(r=>r.data) });
   const { data: suppliers=[] }         = useQuery({ queryKey:['suppliers'],   queryFn:()=>api.get('/suppliers').then(r=>r.data) });
@@ -80,6 +100,8 @@ export default function EnquiryDetailPage() {
   const customer    = customers.find(c => c.id === enq.customer_id);
   const currentPriority = editPriority !== null ? editPriority : enq.priority;
   const priorityChanged = editPriority !== null && editPriority !== enq.priority;
+  const currentBuyingType = editBuyingType !== null ? editBuyingType : (enq.buying_type || '');
+  const buyingTypeChanged = editBuyingType !== null && editBuyingType !== (enq.buying_type || '');
 
   return (
     <div style={{maxWidth:1400}}>
@@ -144,7 +166,46 @@ export default function EnquiryDetailPage() {
                   </>
                 )}
               </span>
-              {enq.buying_type && <><span>·</span> <span>Type: <strong style={{color:'var(--accent)'}}>{enq.buying_type}</strong></span></>}
+              <span>·</span>
+              <span style={{display:'flex',alignItems:'center',gap:5}}>
+                <span>Type:</span>
+                <select
+                  className="input"
+                  style={{
+                    padding:'2px 8px',fontSize:12,height:26,minWidth:100,
+                    fontWeight:700,
+                    color: 'var(--accent)',
+                    borderColor: buyingTypeChanged ? 'var(--accent)' : undefined,
+                    background: buyingTypeChanged ? 'var(--accent-lt)' : undefined,
+                  }}
+                  value={currentBuyingType}
+                  onChange={e => setEditBuyingType(e.target.value)}
+                >
+                  <option value="">— Select Type —</option>
+                  {!BUYING_TYPES.includes(currentBuyingType) && currentBuyingType && (
+                    <option value={currentBuyingType}>{currentBuyingType}</option>
+                  )}
+                  {BUYING_TYPES.map(t => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+                {buyingTypeChanged && (
+                  <>
+                    <button className="btn btn-sm btn-primary"
+                      disabled={savingBuyingType}
+                      onClick={saveBuyingType}
+                      style={{fontSize:11,padding:'2px 10px',height:26,fontWeight:700}}>
+                      {savingBuyingType ? 'Saving…' : '✓ Update'}
+                    </button>
+                    <button className="btn btn-sm"
+                      disabled={savingBuyingType}
+                      onClick={() => setEditBuyingType(null)}
+                      style={{fontSize:11,padding:'2px 8px',height:26}}>
+                      Cancel
+                    </button>
+                  </>
+                )}
+              </span>
             </div>
           </div>
         </div>
@@ -208,12 +269,10 @@ export default function EnquiryDetailPage() {
               <div className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{customer.customer_no}</div>
             </div>
           )}
-          {enq.buying_type && (
-            <div>
-              <span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>BUYING TYPE</span>
-              <div><span className="badge badge-purple">{enq.buying_type}</span></div>
-            </div>
-          )}
+          <div>
+            <span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>BUYING TYPE</span>
+            <div><span className="badge badge-purple">{enq.buying_type || '—'}</span></div>
+          </div>
           {enq.shipping_type && (
             <div>
               <span style={{fontSize:11,color:'var(--text3)',fontWeight:600}}>SHIPPING TYPE</span>

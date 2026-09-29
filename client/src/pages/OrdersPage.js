@@ -3,7 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, orderTotal, isDelayed, StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
+import { fmt, fmtCur, orderTotal, isDelayed, StatusBadge, DaysBadge, fmtDateTime, HoldBadge, HoldNoteCallout } from '../utils/helpers';
 import { printDoc, generateOrderPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
@@ -149,6 +149,12 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
   const [showProcurement, setShowProcurement] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
+  const isOnHold = !!(order.is_on_hold || order.status === 'hold');
+  const isOrderClosed = !!(order.closed_at || ['closed', 'cancelled', 'failed', 'delivered'].includes((order.status || '').toLowerCase()));
+  const [showHoldModal, setShowHoldModal] = useState(false);
+  const [holdReasonInput, setHoldReasonInput] = useState('');
+  const [showUnholdConfirm, setShowUnholdConfirm] = useState(false);
+
   const [cancelReason, setCancelReason] = useState('');
   const [paymentSaved, setPaymentSaved] = useState(
     order.status !== 'cust_payment_update' && !!order.payment_terms
@@ -172,12 +178,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
   // procurement). Anything that is not a pre-procurement payment stage counts as "past order stage".
   const preOrderStatuses = ['draft','open','payment_approval','waiting_for_payment','cust_payment_update','payment_pending'];
   const isPastOrderStage = !preOrderStatuses.includes(order.status);
-  const customerAdvanceReleased = hasAdvanceTerms &&
+  const customerAdvanceReleased = !!order.advance_released || (hasAdvanceTerms &&
     order.status === 'open' &&
     !!order.pi_no &&
-    order.customer_payment_status === 'pending';
+    ['pending','paid'].includes(order.customer_payment_status));
   const customerAdvanceComplete = order.customer_payment_status === 'paid';
-  const customerAdvanceFinanceLocked = order.status === 'payment_approval' || customerAdvanceReleased || customerAdvanceComplete || isPastOrderStage;
+  const customerAdvancePendingRelease = order.customer_payment_status === 'payment_recorded';
+  const customerAdvanceFinanceLocked = order.status === 'payment_approval' || customerAdvancePendingRelease || customerAdvanceReleased || !!order.advance_released || customerAdvanceComplete || isPastOrderStage;
 
   const mutation = useMutation({
     mutationFn: d => api.put(`/orders/${order.id}`, d).then(r=>r.data),
@@ -189,6 +196,68 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
       onRefresh();
     },
     onError: e => toast.error(e.response?.data?.error || 'Save failed'),
+  });
+
+  const holdMutation = useMutation({
+    mutationFn: reason => api.post(`/orders/${order.id}/hold`, { reason }),
+    onSuccess: () => {
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-supplier']);
+      toast.success('Order placed on hold');
+      setShowHoldModal(false);
+      setHoldReasonInput('');
+      onRefresh();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to place order on hold')
+  });
+
+  const unholdMutation = useMutation({
+    mutationFn: () => api.post(`/orders/${order.id}/unhold`),
+    onSuccess: () => {
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-supplier']);
+      toast.success('Order unheld successfully');
+      setShowUnholdConfirm(false);
+      onRefresh();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to unhold order')
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (reason) => api.post(`/orders/${order.id}/cancel`, { reason }),
+    onSuccess: () => {
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-supplier']);
+      qc.invalidateQueries(['procurement-bin']);
+      toast.success('Order cancelled successfully');
+      setShowCancel(false);
+      setCancelReason('');
+      onClose();
+      onRefresh();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to cancel order')
+  });
+
+  const [itemCancelModal, setItemCancelModal] = useState(null);
+  const [cancelReasonModal, setCancelReasonModal] = useState(null);
+  const [itemCancelReason, setItemCancelReason] = useState('');
+
+  const itemCancelMutation = useMutation({
+    mutationFn: ({ itemId, reason }) => api.post(`/orders/${order.id}/items/${itemId}/cancel`, { reason }),
+    onSuccess: () => {
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-supplier']);
+      qc.invalidateQueries(['procurement-bin']);
+      toast.success('Item cancelled');
+      setItemCancelModal(null);
+      setItemCancelReason('');
+      onRefresh();
+    },
+    onError: e => toast.error(e.response?.data?.error || 'Failed to cancel item')
   });
 
   const sup = id => suppliers.find(s=>s.id===id);
@@ -220,15 +289,20 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
   const liBaseByCur = {};
   const liTaxByCur = {};
   const liTotalByCur = {};
+  const cancelledByCur = {};
   (order.lineItems||[]).forEach(li => {
-    const { unitSource } = getSourceContext(li);
     const qty  = Number(li.qty)||0;
     const up   = Number(li.unit_price)||0;
     const tax  = Number(li.tax_rate)||0;
     const base = qty * up;
     const taxAmt = base * tax / 100;
-    const tot  = base + (base * tax / 100);
+    const tot  = base + taxAmt;
     const c    = li.currency || 'INR';
+    if (li.line_status === 'cancelled') {
+      cancelledByCur[c] = (cancelledByCur[c] || 0) + tot;
+      return;
+    }
+    const { unitSource } = getSourceContext(li);
     const srcTotal = qty * unitSource;
     liSourceByCur.INR = (liSourceByCur.INR || 0) + srcTotal;
     liBaseByCur[c]  = (liBaseByCur[c] ||0) + base;
@@ -289,6 +363,92 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
           </div>
         </div>
         <div className="modal-body">
+
+          {/* Prominent On-Hold Alert Banner */}
+          {isOnHold && (
+            <div style={{
+              background: 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)',
+              border: '1.5px solid var(--amber, #d97706)',
+              borderRadius: 'var(--r, 8px)',
+              padding: '14px 18px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: 14,
+              boxShadow: '0 2px 10px rgba(217, 119, 6, 0.12)'
+            }}>
+              <span style={{ fontSize: 26, lineHeight: 1 }}>⏸</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <strong style={{ color: '#92400e', fontSize: 15, letterSpacing: '.2px' }}>THIS ORDER IS ON HOLD</strong>
+                  <span style={{
+                    fontSize: 10,
+                    background: 'var(--amber, #d97706)',
+                    color: '#fff',
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    fontWeight: 800,
+                    letterSpacing: 0.5
+                  }}>LOCKED</span>
+                </div>
+                <div style={{ marginTop: 5, fontSize: 13, color: '#78350f', fontWeight: 600 }}>
+                  <strong>Why on Hold:</strong> "{order.hold_reason || 'No reason specified'}"
+                </div>
+                <div style={{ marginTop: 4, fontSize: 11, color: '#b45309' }}>
+                  Placed on hold by <strong>{order.hold_by || 'Admin'}</strong> {order.hold_at ? `on ${fmtDateTime(order.hold_at) || order.hold_at}` : ''} • Previous Status: <strong>{order.hold_prev_status || 'Open'}</strong>
+                </div>
+                <div style={{ marginTop: 6, fontSize: 11, color: '#92400e', fontStyle: 'italic' }}>
+                  All operations in Procurement, Delivery Hub, and Finance are locked for this order. Click "Unhold Order" below to resume normal operations.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Order Cancelled banner */}
+          {order.status === 'cancelled' && (
+            <div style={{
+              background: 'var(--red-lt, #fef2f2)',
+              border: '2px solid var(--red, #dc2626)',
+              borderRadius: 'var(--r, 8px)',
+              padding: '12px 16px',
+              marginBottom: 14,
+              display: 'flex',
+              gap: 12,
+              alignItems: 'flex-start'
+            }}>
+              <div style={{ fontSize: 24, lineHeight: 1 }}>🚫</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontWeight: 800, fontSize: 13, color: 'var(--red, #dc2626)' }}>
+                    ORDER CANCELLED
+                  </span>
+                  <span style={{
+                    fontSize: 10,
+                    background: 'var(--red, #dc2626)',
+                    color: '#fff',
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    fontWeight: 800,
+                    letterSpacing: 0.5
+                  }}>CANCELLED</span>
+                </div>
+                <div style={{ marginTop: 5, fontSize: 13, color: '#991b1b', fontWeight: 600 }}>
+                  <strong>Why Cancelled:</strong> "{order.cancel_reason || 'No cancellation reason specified'}"
+                </div>
+                <div style={{ marginTop: 4, fontSize: 11, color: '#b91c1c' }}>
+                  Cancelled by <strong>{order.cancelled_by || 'Admin'}</strong> {order.cancelled_at ? `on ${fmtDateTime(order.cancelled_at) || order.cancelled_at}` : ''}
+                  {order.settlement_status === 'pending' && (
+                    <span style={{ marginLeft: 8, padding: '1px 6px', background: '#fee2e2', borderRadius: 4, fontWeight: 700 }}>
+                      💳 Finance Settlement Pending (₹{(parseFloat(order.unsettled_amount)||0).toFixed(2)})
+                    </span>
+                  )}
+                </div>
+                <div style={{ marginTop: 6, fontSize: 11, color: '#7f1d1d', fontStyle: 'italic' }}>
+                  This entire order has been cancelled and stopped across Procurement, Delivery Hub, and Finance.
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Flow tracker */}
           <div className="flow-track">
@@ -384,31 +544,35 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
               {/* Original full + partial advance panels preserved below as comments — DO NOT DELETE */}
               {(isFullAdvance(savedEffectiveTerms)||isPartialAdvance(savedEffectiveTerms)) && (
                 <div style={{marginTop:8,padding:'12px 16px',borderRadius:'var(--r)',
-                  background:'var(--amber-lt,#fffbeb)',border:'2px solid var(--amber,#d97706)',
+                  background: (customerAdvanceReleased || customerAdvanceComplete) ? 'var(--green-lt,#f0fdf4)' : customerAdvancePendingRelease ? 'var(--purple-lt,#f5f3ff)' : 'var(--amber-lt,#fffbeb)',
+                  border: `2px solid ${(customerAdvanceReleased || customerAdvanceComplete) ? 'var(--green)' : customerAdvancePendingRelease ? 'var(--purple,#7c3aed)' : 'var(--amber,#d97706)'}`,
                   display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
                   <div>
-                    <div style={{fontWeight:700,fontSize:13,color:'var(--amber,#d97706)'}}>
-                      💰 Advance Payment Required
+                    <div style={{fontWeight:700,fontSize:13,color:(customerAdvanceReleased || customerAdvanceComplete) ? 'var(--green)' : customerAdvancePendingRelease ? 'var(--purple,#7c3aed)' : 'var(--amber,#d97706)'}}>
+                      {(customerAdvanceReleased || customerAdvanceComplete)
+                        ? '✅ Advance Payment Released'
+                        : customerAdvancePendingRelease
+                        ? '⏳ Payment Recorded — Awaiting Finance Release'
+                        : '💰 Advance Payment Required'}
                     </div>
                     <div style={{fontSize:12,color:'var(--text2)',marginTop:3}}>
-                      {isFullAdvance(savedEffectiveTerms) ? 'Full advance payment' : 'Partial advance payment'} must
-                      be collected before this order goes to Procurement.
-                      Go to the Finance page to raise a PI and record payment.
+                      {(customerAdvanceReleased || customerAdvanceComplete)
+                        ? `Advance payment has been verified and released by Finance. Order is ready to proceed to Procurement.${customerAdvanceReleased && order.customer_payment_status !== 'paid' ? ' Remaining balance will be collected on delivery.' : ''}`
+                        : customerAdvancePendingRelease
+                        ? 'Customer payment has been recorded in Finance and is awaiting release confirmation before moving to Procurement.'
+                        : `${isFullAdvance(savedEffectiveTerms) ? 'Full advance payment' : 'Partial advance payment'} must be collected before this order goes to Procurement. Go to the Finance page to raise a PI and record payment.`}
                     </div>
-                    {(customerAdvanceReleased || customerAdvanceComplete) && (
-                      <div style={{fontSize:12,color:'var(--green)',fontWeight:700,marginTop:4}}>
-                        ✅ Payment recorded by Finance — order released
-                        {customerAdvanceReleased ? ' (remaining balance pending)' : ''}
-                      </div>
-                    )}
                   </div>
                   <button className="btn btn-sm"
                     disabled={paymentTermsDirty || customerAdvanceFinanceLocked}
-                    style={{background:'var(--amber,#d97706)',color:'#fff',
-                      borderColor:'var(--amber,#d97706)',fontWeight:700,whiteSpace:'nowrap',
-                      opacity:(paymentTermsDirty || customerAdvanceFinanceLocked) ? 0.4 : 1,
+                    style={{
+                      background: (customerAdvanceReleased || customerAdvanceComplete) ? 'var(--green)' : customerAdvancePendingRelease ? 'var(--purple,#7c3aed)' : 'var(--amber,#d97706)',
+                      color:'#fff',
+                      borderColor: (customerAdvanceReleased || customerAdvanceComplete) ? 'var(--green)' : customerAdvancePendingRelease ? 'var(--purple,#7c3aed)' : 'var(--amber,#d97706)',
+                      fontWeight:700,whiteSpace:'nowrap',
+                      opacity:(paymentTermsDirty || customerAdvanceFinanceLocked) ? 0.6 : 1,
                       cursor:(paymentTermsDirty || customerAdvanceFinanceLocked) ? 'not-allowed' : 'pointer'}}
-                    title={paymentTermsDirty ? 'Save payment terms first' : customerAdvanceReleased ? 'Advance released by Finance' : customerAdvanceComplete ? 'Payment already received' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
+                    title={paymentTermsDirty ? 'Save payment terms first' : customerAdvanceReleased ? 'Advance released by Finance' : customerAdvanceComplete ? 'Payment already received' : customerAdvancePendingRelease ? 'Payment recorded in Finance — awaiting release' : order.status === 'payment_approval' ? 'Already sent to Finance' : ''}
                     onClick={async()=>{
                       if (paymentTermsDirty || customerAdvanceFinanceLocked) return;
                       try {
@@ -421,7 +585,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                         });
                       } catch(_) {}
                     }}>
-                    {customerAdvanceReleased ? '✅ Released by Finance' : customerAdvanceComplete ? '✅ Payment Done' : order.status === 'payment_approval' ? '💰 Sent to Finance' : '💰 Send to Finance'}
+                    {(customerAdvanceReleased || customerAdvanceComplete)
+                      ? '✅ Released by Finance'
+                      : customerAdvancePendingRelease
+                      ? '⏳ Awaiting Release'
+                      : order.status === 'payment_approval'
+                      ? '💰 Sent to Finance'
+                      : '💰 Send to Finance'}
                   </button>
                 </div>
               )}
@@ -440,66 +610,101 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                     <th>#</th><th>Component</th><th>IPN</th><th>Manufacturer</th>
                     <th>Qty</th>
                     {canSeeProcPrice&&<th>Source Price</th>}
-                    {canSeeProcPrice&&<th style={{textAlign:'right'}}>Base Value</th>}
+                    {canSeeProcPrice&&<th style={{textAlign:'right'}}>Source Total</th>}
                     <th>Customer Price</th>
+                    <th style={{textAlign:'right'}}>Cust. Base Value</th>
                     <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax %</th>
                     <th style={{textAlign:'right',color:'var(--teal,#0d9488)'}}>Tax Amt</th>
                     <th style={{textAlign:'right'}}>Customer Total</th>
                     <th>Delivery Date</th><th>Status</th>
+                    {canEdit && !isOrderClosed && !isOnHold && <th style={{textAlign:'right'}}>Action</th>}
                   </tr>
                 </thead>
                 <tbody>
-                  {order.lineItems?.map((li,i)=>(
-                    <tr key={li.id}>
-                      {(() => {
-                        const { unitSource } = getSourceContext(li);
-                        const sourceTotal = (Number(li.qty)||0) * unitSource;
-                        return <>
+                  {order.lineItems?.map((li,i)=>{
+                    const isCancelled = li.line_status === 'cancelled';
+                    const { unitSource } = getSourceContext(li);
+                    const sourceTotal = (Number(li.qty)||0) * unitSource;
+                    const base = (Number(li.qty)||0) * (Number(li.unit_price)||0);
+                    const taxRate = Number(li.tax_rate)||0;
+                    const taxAmt = base * (taxRate / 100);
+                    const tot = base + taxAmt;
+                    return (
+                    <tr key={li.id} style={{
+                      background: isCancelled ? 'var(--red-lt, #fef2f2)' : undefined,
+                      opacity: isCancelled ? 0.85 : 1
+                    }}>
                       <td>{i+1}</td>
-                      <td className="bold">{li.component}</td>
-                      <td className="mono">{li.ipn||'—'}</td>
-                      <td>{li.manufacturer||'—'}</td>
-                      <td>{fmt(li.qty)}</td>
+                      <td className="bold" style={{textDecoration: isCancelled ? 'line-through' : 'none', color: isCancelled ? 'var(--text3)' : 'inherit'}}>
+                        {li.component}
+                      </td>
+                      <td className="mono" style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.ipn||'—'}</td>
+                      <td style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.manufacturer||'—'}</td>
+                      <td style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{fmt(li.qty)}</td>
                       {canSeeProcPrice&&<td className="mono">{unitSource ? fmtAmt(unitSource, 'INR') : '—'}</td>}
                       {canSeeProcPrice&&(
                         <td style={{textAlign:'right'}}>
                           {sourceTotal
-                            ? <span style={{fontWeight:600,fontSize:12}}>{fmtAmt(sourceTotal, 'INR')}</span>
+                            ? <span style={{fontWeight:600,fontSize:12,textDecoration: isCancelled ? 'line-through' : 'none'}}>{fmtAmt(sourceTotal, 'INR')}</span>
                             : <span style={{color:'var(--text3)'}}>—</span>}
                         </td>
                       )}
-                      <td className="mono">{fmtCur(li.unit_price,li.currency)}</td>
+                      <td className="mono" style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{fmtCur(li.unit_price,li.currency)}</td>
+                      <td style={{textAlign:'right',fontFamily:'monospace',textDecoration: isCancelled ? 'line-through' : 'none'}}>
+                        {base ? fmtAmt(base, li.currency) : '—'}
+                      </td>
                       <td style={{textAlign:'right',fontSize:12}}>
-                        {Number(li.tax_rate)||0}%
+                        {taxRate}%
                       </td>
                       <td style={{textAlign:'right',fontSize:12,fontFamily:'monospace',color:'var(--teal,#0d9488)'}}>
-                        {Number(li.tax_rate)>0
-                          ? fmtAmt((li.qty||0)*(li.unit_price||0)*((li.tax_rate||0)/100), li.currency)
+                        {taxRate>0
+                          ? <span style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{fmtAmt(taxAmt, li.currency)}</span>
                           : <span style={{color:'var(--text3)'}}>—</span>}
                       </td>
                       <td style={{textAlign:'right'}}>
                         {(() => {
-                          const base = (li.qty||0)*(li.unit_price||0);
-                          const tax  = Number(li.tax_rate)||0;
-                          const tot  = base + (base*tax/100);
                           if (!base) return <span style={{color:'var(--text3)'}}>—</span>;
                           return (
-                            <div style={{padding:'2px 6px',background:tax>0?'var(--green-lt)':'transparent',
+                            <div style={{padding:'2px 6px',background:isCancelled?'#fee2e2':taxRate>0?'var(--green-lt)':'transparent',
                               borderRadius:'var(--r-sm)',fontWeight:700,fontSize:12,
-                              color:tax>0?'var(--green)':'var(--text)'}}>
+                              textDecoration: isCancelled ? 'line-through' : 'none',
+                              color:isCancelled?'var(--red,#dc2626)':taxRate>0?'var(--green)':'var(--text)'}}>
                               {fmtAmt(tot,li.currency)}
                             </div>
                           );
                         })()}
                       </td>
                       <td>{li.delivery_date||'—'}</td>
-                      <td><LineStatusBadge s={li.line_status}/></td>
-                        </>;
-                      })()}
+                      <td>
+                        <div style={{display:'inline-flex',alignItems:'center',gap:4}}>
+                          <LineStatusBadge s={li.line_status}/>
+                          {isCancelled && (
+                            <button type="button" className="btn btn-xs"
+                              style={{padding:'1px 5px',borderRadius:99,fontSize:10,background:'#fee2e2',color:'var(--red,#dc2626)',borderColor:'var(--red,#dc2626)',fontWeight:800,cursor:'pointer'}}
+                              onClick={(e)=>{e.stopPropagation();setCancelReasonModal(li);}}
+                              title="Click to view cancellation reason">
+                              ℹ️
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                      {canEdit && !isOrderClosed && !isOnHold && (
+                        <td style={{textAlign:'right'}}>
+                          {!isCancelled && (
+                            <button className="btn btn-xs"
+                              style={{color:'var(--red)',borderColor:'var(--red-lt,#fef2f2)',background:'var(--red-lt,#fef2f2)',fontWeight:600}}
+                              onClick={()=>setItemCancelModal({ item: li })}
+                              title="Cancel this item">
+                              ✕ Cancel
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
-                  ))}
+                    );
+                  })}
                   <tr style={{background:'var(--surface2)',fontWeight:700}}>
-                    <td colSpan={canSeeProcPrice?6:5} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS</td>
+                    <td colSpan={canSeeProcPrice?6:5} style={{textAlign:'right',fontSize:12,color:'var(--text2)'}}>TOTALS (Active Items)</td>
                     {canSeeProcPrice&&(
                       <td style={{textAlign:'right'}}>
                         {Object.entries(liSourceByCur).map(([c,v])=>(
@@ -507,7 +712,13 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                         ))}
                       </td>
                     )}
-                    <td colSpan={2}/>
+                    <td/>
+                    <td style={{textAlign:'right'}}>
+                      {Object.entries(liBaseByCur).map(([c,v])=>(
+                        <div key={c} style={{fontSize:14,fontWeight:800,color:'var(--text)'}}>{fmtAmt(v,c)}</div>
+                      ))}
+                    </td>
+                    <td/>
                     <td style={{textAlign:'right'}}>
                       {Object.entries(liTaxByCur).map(([c,v])=>(
                         <div key={c} style={{fontSize:13,fontWeight:700,color:'var(--teal,#0d9488)'}}>{fmtAmt(v,c)}</div>
@@ -521,8 +732,21 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                           padding:hasTax?'3px 6px':'0',borderRadius:'var(--r-sm)'}}>{fmtAmt(v,c)}</div>
                       ))}
                     </td>
-                    <td colSpan={2}/>
+                    <td colSpan={canEdit && !isOrderClosed && !isOnHold ? 3 : 2}/>
                   </tr>
+                  {Object.keys(cancelledByCur).length > 0 && (
+                    <tr style={{background:'var(--red-lt,#fef2f2)',fontSize:11,color:'var(--red,#dc2626)'}}>
+                      <td colSpan={canSeeProcPrice?11:8} style={{textAlign:'right',fontWeight:600}}>
+                        🚫 Cancelled Items Excluded:
+                      </td>
+                      <td style={{textAlign:'right',fontWeight:700,fontFamily:'monospace'}}>
+                        {Object.entries(cancelledByCur).map(([c,v])=>(
+                          <span key={c} style={{textDecoration:'line-through',marginLeft:6}}>{fmtAmt(v,c)}</span>
+                        ))}
+                      </td>
+                      <td colSpan={canEdit && !isOrderClosed && !isOnHold ? 3 : 2}/>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
@@ -575,7 +799,8 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
           <div className="card card-sm" style={{marginBottom:14}}>
             <div className="card-title">
               <span>📋 Order Info</span>
-              {canEdit && <button className="btn btn-xs" onClick={()=>setEditSection(editSection==='info'?null:'info')}>{editSection==='info'?'Cancel':'Edit'}</button>}
+              {canEdit && !isOnHold && <button className="btn btn-xs" onClick={()=>setEditSection(editSection==='info'?null:'info')}>{editSection==='info'?'Cancel':'Edit'}</button>}
+              {canEdit && isOnHold && <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>🔒 Locked (On Hold)</span>}
             </div>
             {editSection==='info' ? (
               <div>
@@ -716,8 +941,9 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
               ))}
               {orderFiles.length === 0 && <div style={{fontSize:12,color:'var(--text3)',padding:'6px 0'}}>No files uploaded yet.</div>}
               {/* Upload new file */}
-              <div style={{marginTop:6}}>
-                <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:12,
+              {!isOnHold && (
+                <div style={{marginTop:6}}>
+                  <label style={{display:'inline-flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:12,
                   padding:'6px 12px',borderRadius:'var(--r-sm)',border:'1.5px dashed var(--border)',
                   background:'var(--surface)',color:'var(--text2)',fontWeight:500}}>
                   <span>📤 Upload File</span>
@@ -740,6 +966,7 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
                     }}/>
                 </label>
               </div>
+              )}
             </div>
           </div>
 
@@ -773,74 +1000,53 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
         {/* ── Footer ── */}
         <div style={{borderTop:'1px solid var(--border)',padding:'14px 20px',background:'var(--surface)',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
 
-          {/* Left: Hold + Cancel */}
-          {canEdit && !showHold && !showCancel && (
+          {/* Left: Hold / Unhold + Cancel */}
+          {canEdit && !isOrderClosed && (
             <>
-              <button className="btn"
-                style={{background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',border:'1px solid var(--amber,#d97706)',fontWeight:600}}
-                onClick={()=>setShowHold(true)}>
-                ⏸ Hold
-              </button>
-              <button className="btn btn-danger" style={{fontWeight:600}} onClick={()=>setShowCancel(true)}>
-                🚫 Cancel Order
-              </button>
+              {!isOnHold ? (
+                <button className="btn"
+                  style={{background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',border:'1.5px solid var(--amber,#d97706)',fontWeight:700}}
+                  onClick={()=>setShowHoldModal(true)}>
+                  ⏸ Hold
+                </button>
+              ) : (
+                <button className="btn"
+                  style={{background:'var(--green-lt,#f0fdf4)',color:'var(--green,#16a34a)',border:'1.5px solid var(--green,#16a34a)',fontWeight:700}}
+                  onClick={()=>setShowUnholdConfirm(true)}>
+                  ▶️ Unhold Order
+                </button>
+              )}
+              {!isOnHold && (
+                <button className="btn btn-danger" style={{fontWeight:600}} onClick={()=>setShowCancel(true)}>
+                  🚫 Cancel Order
+                </button>
+              )}
             </>
-          )}
-          {showHold && (
-            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-              <span style={{fontSize:13,fontWeight:600,color:'var(--amber,#d97706)'}}>Hold for:</span>
-              <input type="number" min="1" className="input" style={{width:70}} value={holdDuration.value}
-                onChange={e=>setHoldDuration(d=>({...d,value:e.target.value}))} placeholder="7"/>
-              <select className="input" style={{width:100}} value={holdDuration.unit}
-                onChange={e=>setHoldDuration(d=>({...d,unit:e.target.value}))}>
-                <option>Days</option><option>Weeks</option><option>Months</option>
-              </select>
-              <input className="input" style={{flex:1,minWidth:160}} value={comment}
-                onChange={e=>setComment(e.target.value)} placeholder="Reason for hold…"/>
-              <button className="btn btn-sm"
-                style={{background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:600}}
-                onClick={()=>{
-                  if(!holdDuration.value){toast.error('Specify hold duration');return;}
-                  mutation.mutate({status:'hold',_action:`Order held for ${holdDuration.value} ${holdDuration.unit} — ${comment||'No reason given'}`,_comment:comment});
-                  setShowHold(false);
-                }}>Confirm Hold</button>
-              <button className="btn btn-xs" onClick={()=>setShowHold(false)}>✕</button>
-            </div>
-          )}
-          {showCancel && (
-            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-              <span style={{fontSize:13,fontWeight:600,color:'var(--red)'}}>Reason:</span>
-              <input className="input" style={{flex:1,minWidth:200,borderColor:'var(--red)'}} value={cancelReason}
-                onChange={e=>setCancelReason(e.target.value)} placeholder="State reason for cancellation…"/>
-              <button className="btn btn-sm btn-danger"
-                onClick={()=>{
-                  if(!cancelReason.trim()){toast.error('Cancellation reason is required');return;}
-                  if(!window.confirm('Cancel this order?')) return;
-                  mutation.mutate({status:'failed',_action:'Order Cancelled: '+cancelReason,_comment:cancelReason});
-                  setShowCancel(false); onClose();
-                }}>Confirm Cancel</button>
-              <button className="btn btn-xs" onClick={()=>setShowCancel(false)}>✕</button>
-            </div>
           )}
 
           <div style={{flex:1}}/>
 
           {/* Right: Save + Send to Procurement + Back to Enquiry + Close */}
-          {canEdit && !showHold && !showCancel && (
+          {canEdit && (
             <>
               {/* Save order info changes */}
-              <button className="btn btn-primary" style={{fontWeight:600}}
-                onClick={()=>mutation.mutate({...infoForm,_action:'Order saved',_comment:comment||''})}>
-                💾 Save
-              </button>
+              {!isOnHold ? (
+                <button className="btn btn-primary" style={{fontWeight:600}}
+                  onClick={()=>mutation.mutate({...infoForm,_action:'Order saved',_comment:comment||''})}>
+                  💾 Save
+                </button>
+              ) : (
+                <button className="btn" disabled style={{opacity:0.55,cursor:'not-allowed',fontWeight:600}} title="Order is on hold. Unhold to save changes.">
+                  🔒 Order Locked
+                </button>
+              )}
 
-
-
-              {/* Send to Procurement — gated: hidden until advance paid (if applicable) */}
-              {['open','draft','payment_pending'].includes(order.status) &&
+              {/* Send to Procurement — gated: hidden until advance paid (if applicable) and not on hold */}
+              {!isOnHold &&
+               ['open','draft','payment_pending','payment_approval','waiting_for_payment','cust_payment_update'].includes(order.status) &&
                !paymentTermsDirty &&
                !showProcurement &&
-               (!hasAdvanceTerms || customerAdvanceReleased || customerAdvanceComplete) && (
+               (!hasAdvanceTerms || customerAdvanceReleased || customerAdvanceComplete || order.customer_payment_status === 'paid' || !!order.advance_released) && (
                 <button className="btn"
                   style={{background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,padding:'8px 18px'}}
                   onClick={()=>setShowProcurement(true)}>
@@ -876,6 +1082,222 @@ function OrderDetailModal({ order, onClose, suppliers, customers, shippers, enqu
             onClick={()=>printDoc(generateOrderPDF(order, custObj))}>⬇ Download PDF</button>
         </div>
       </div>
+
+      {/* Hold Modal */}
+      {showHoldModal && (
+        <div className="overlay" style={{ zIndex: 1200 }} onClick={() => setShowHoldModal(false)}>
+          <div className="modal" style={{ maxWidth: 480, width: '92vw' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>⏸</span> Put Order on Hold
+              </h2>
+              <button className="close-x" onClick={() => setShowHoldModal(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 14, lineHeight: 1.5 }}>
+                Enter the reason for placing this order on hold. The hold tag, note, and author will be visible across the entire admin panel (Orders, Procurement, Delivery Hub, Finance) and all operations will be locked.
+              </p>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="label">Hold Reason / Note <span className="req">*</span></label>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={holdReasonInput}
+                  onChange={e => setHoldReasonInput(e.target.value)}
+                  placeholder="Enter why this order is on hold (required)…"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => { setShowHoldModal(false); setHoldReasonInput(''); }}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-primary"
+                style={{ background: 'var(--amber,#d97706)', borderColor: 'var(--amber,#d97706)', fontWeight: 700 }}
+                disabled={holdMutation.isPending || !holdReasonInput.trim()}
+                onClick={() => {
+                  if (!holdReasonInput.trim()) {
+                    toast.error('Please enter a reason for holding the order');
+                    return;
+                  }
+                  holdMutation.mutate(holdReasonInput.trim());
+                }}>
+                {holdMutation.isPending ? 'Holding…' : '⏸ Confirm Hold'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unhold Confirmation Modal */}
+      {showUnholdConfirm && (
+        <div className="overlay" style={{ zIndex: 1200 }} onClick={() => setShowUnholdConfirm(false)}>
+          <div className="modal" style={{ maxWidth: 440, width: '92vw' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span>▶️</span> Unhold Order
+              </h2>
+              <button className="close-x" onClick={() => setShowUnholdConfirm(false)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text2)', lineHeight: 1.6 }}>
+                Are you sure you want to unhold order <strong style={{ color: 'var(--accent)' }}>{order.id}</strong>?
+                <br /><br />
+                It will be restored to its previous status (<strong>{order.hold_prev_status || 'open'}</strong>) and all operations across Procurement, Delivery Hub, and Finance will be unlocked.
+              </p>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setShowUnholdConfirm(false)}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                style={{ background: 'var(--green,#16a34a)', color: '#fff', borderColor: 'var(--green,#16a34a)', fontWeight: 700 }}
+                disabled={unholdMutation.isPending}
+                onClick={() => unholdMutation.mutate()}>
+                {unholdMutation.isPending ? 'Unholding…' : '▶️ Yes, Unhold Order'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel Order Modal */}
+      {showCancel && (
+        <div className="overlay" style={{ zIndex: 1200 }} onClick={() => { setShowCancel(false); setCancelReason(''); }}>
+          <div className="modal" style={{ maxWidth: 480, width: '92vw' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--red, #dc2626)' }}>
+                <span>🚫</span> Cancel Order
+              </h2>
+              <button className="close-x" onClick={() => { setShowCancel(false); setCancelReason(''); }}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: 13, color: 'var(--text2)', marginBottom: 12, lineHeight: 1.5 }}>
+                Enter the reason for cancelling order <strong style={{ color: 'var(--accent)' }}>{order.id}</strong>:
+              </p>
+              <div style={{
+                background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--text2)', lineHeight: 1.5
+              }}>
+                <div style={{fontWeight: 700, color: 'var(--text)', marginBottom: 4}}>Automatic Payment Adjustments on Cancellation:</div>
+                <div>💳 <strong>Credit Line:</strong> Unpaid credit line obligations are released, instantly restoring available limit.</div>
+                <div>💰 <strong>Wallet:</strong> Funds paid from customer prepaid wallet are automatically refunded to wallet balance.</div>
+                <div>🏦 <strong>Bank Transfer / Cash:</strong> Real cash paid will be flagged for Finance settlement (bank refund or order transfer).</div>
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="label">Cancellation Reason <span className="req">*</span></label>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={cancelReason}
+                  onChange={e => setCancelReason(e.target.value)}
+                  placeholder="Enter why this order is being cancelled (required)…"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn" onClick={() => { setShowCancel(false); setCancelReason(''); }}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                style={{ fontWeight: 700 }}
+                disabled={cancelMutation.isPending || !cancelReason.trim()}
+                onClick={() => {
+                  if (!cancelReason.trim()) {
+                    toast.error('Cancellation reason is required');
+                    return;
+                  }
+                  cancelMutation.mutate(cancelReason.trim());
+                }}>
+                {cancelMutation.isPending ? 'Cancelling…' : '🚫 Confirm Cancel Order'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Single Item Cancellation Modal */}
+      {itemCancelModal && (
+        <div className="overlay" style={{ zIndex: 1300 }} onClick={() => setItemCancelModal(null)}>
+          <div className="modal" style={{ maxWidth: 480, width: '92vw' }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--red)' }}>
+                <span>🚫</span> Cancel Line Item
+              </h2>
+              <button className="close-x" onClick={() => setItemCancelModal(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 13, marginBottom: 12 }}>
+                Are you sure you want to cancel item <strong>{itemCancelModal.item?.component}</strong>
+                {itemCancelModal.item?.ipn ? ` (${itemCancelModal.item.ipn})` : ''}?
+              </div>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="label">Cancellation Reason <span className="req">*</span></label>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={itemCancelReason}
+                  onChange={e => setItemCancelReason(e.target.value)}
+                  placeholder="Enter reason for cancelling this item (required)…"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="modal-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="btn" onClick={() => { setItemCancelModal(null); setItemCancelReason(''); }}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={itemCancelMutation.isPending || !itemCancelReason.trim()}
+                onClick={() => itemCancelMutation.mutate({ itemId: itemCancelModal.item.id, reason: itemCancelReason.trim() })}>
+                {itemCancelMutation.isPending ? 'Cancelling…' : 'Confirm Cancel Item'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancellation Reason Info Modal */}
+      {cancelReasonModal && (
+        <div className="overlay" style={{ zIndex: 1300 }} onClick={() => setCancelReasonModal(null)}>
+          <div className="modal modal-sm" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 style={{ color: 'var(--red, #dc2626)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                🚫 Item Cancellation Reason
+              </h2>
+              <button className="close-x" onClick={() => setCancelReasonModal(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div style={{ fontSize: 13, color: 'var(--text)', marginBottom: 8, fontWeight: 700 }}>
+                {cancelReasonModal.component} {cancelReasonModal.ipn ? `(${cancelReasonModal.ipn})` : ''}
+              </div>
+              <div style={{ padding: '10px 12px', background: 'var(--surface2)', borderRadius: 6, border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 10, color: 'var(--text3)', fontWeight: 800, textTransform: 'uppercase', marginBottom: 3 }}>
+                  Reason:
+                </div>
+                <div style={{ fontWeight: 600, color: 'var(--red, #dc2626)', wordBreak: 'break-word', fontSize: 13 }}>
+                  "{cancelReasonModal.cancellation_reason || 'No reason specified'}"
+                </div>
+                {cancelReasonModal.cancelled_by && (
+                  <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8, paddingTop: 6, borderTop: '1px dashed var(--border)' }}>
+                    Cancelled by: <strong>{cancelReasonModal.cancelled_by}</strong>
+                    {cancelReasonModal.cancelled_at && ` on ${fmtDateTime(cancelReasonModal.cancelled_at) || cancelReasonModal.cancelled_at}`}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-sm btn-primary" onClick={() => setCancelReasonModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -958,136 +1380,11 @@ function EditSupplierOrders({ order, shippers, onSave, onCancel }) {
   );
 }
 
-// ── ManageOrderModal — full editable order form ──────────────────────────────
-function ManageOrderModal({ order, onClose, suppliers, customers, onRefresh, viewOnly = false }) {
-  const { user } = useAuth();
-  const qc = useQueryClient();
-  const canEdit = order.created_by === user.id || ['admin','manager'].includes(user.role) || canAccessSection(user, 'procurement-bin');
-  const canSeeProcPrice = (user.perms?.canSeeProcurementPrice) !== false;
-  const custName = id => customers.find(c=>c.id===id)?.name || id;
-
-  const [form, setForm] = useState({
-    customer_ref:   order.customer_ref || '',
-    po_number:      order.po_number || '',
-    enquiry_no:     order.enquiry_no || '',
-    quote_no:       order.quote_no || '',
-    tentative_date: order.tentative_date || '',
-    notes:          order.notes || '',
-  });
-  const setF = (k,v) => setForm(f=>({...f,[k]:v}));
-
-  const [items, setItems] = useState(order.lineItems?.map(li=>({...li}))||[]);
-  const addItem    = () => setItems(p=>[...p,{id:'new_'+Date.now(),component:'',manufacturer:'',ipn:'',qty:0,unit_price:0,procurement_price:0,currency:'INR',order_date:'',delivery_date:'',supplier_id:'',line_status:'confirmed'}]);
-  const removeItem = idx => setItems(p=>p.filter((_,i)=>i!==idx));
-  const upd = (idx,k,v) => setItems(p=>p.map((it,i)=>i===idx?{...it,[k]:v}:it));
-
-  const mutation = useMutation({
-    mutationFn: d => api.put('/orders/'+order.id, d).then(r=>r.data),
-    onSuccess: () => { qc.invalidateQueries(['orders']); toast.success('Order saved'); onRefresh(); onClose(); },
-    onError: e => toast.error(e.response?.data?.error || 'Save failed'),
-  });
-
-  const save = () => {
-    const valid = items.filter(i=>i.component?.trim());
-    if (!valid.length) { toast.error('Add at least one line item'); return; }
-    mutation.mutate({
-      ...form,
-      lineItems: valid.map((i,idx)=>({...i, qty:Number(i.qty)||0, unit_price:Number(i.unit_price)||0, procurement_price:Number(i.procurement_price)||0, sort_order:idx+1 })),
-      _action: 'Order updated via Manage',
-      _comment: '',
-    });
-  };
-
-  // Inline row cols (same layout as NewOrderPage)
-  const cols = [
-    { key:'component',        label:'Component *',    flex:'2 1 120px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontWeight:600}}>{li.component||'—'}</span>:<input className="input" value={li.component||''} onChange={e=>upd(idx,'component',e.target.value)} placeholder="Component"/> },
-    { key:'manufacturer',     label:'Manufacturer',   flex:'1.3 1 95px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.manufacturer||'—'}</span>:<input className="input" value={li.manufacturer||''} onChange={e=>upd(idx,'manufacturer',e.target.value)} placeholder="Mfr"/> },
-    { key:'ipn',              label:'IPN',            flex:'0.8 1 70px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.ipn||'—'}</span>:<input className="input" value={li.ipn||''} onChange={e=>upd(idx,'ipn',e.target.value)} placeholder="IPN"/> },
-    { key:'qty',              label:'Qty',            flex:'0.5 1 50px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.qty||'—'}</span>:<input className="input" type="number" value={li.qty||''} onChange={e=>upd(idx,'qty',e.target.value)}/> },
-    { key:'unit_price',       label:'Cust. Price',    flex:'0.9 1 75px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.unit_price||'—'}</span>:<input className="input" type="number" step="0.01" value={li.unit_price||''} onChange={e=>upd(idx,'unit_price',e.target.value)}/> },
-    ...(canSeeProcPrice ? [{ key:'procurement_price', label:'Proc. Price', flex:'0.9 1 75px', render:(li,idx)=>viewOnly?<span style={{fontSize:12,fontFamily:'monospace'}}>{li.procurement_price||'—'}</span>:<input className="input" type="number" step="0.01" value={li.procurement_price||''} onChange={e=>upd(idx,'procurement_price',e.target.value)}/> }] : []),
-    { key:'currency',         label:'Cur.',           flex:'0.6 1 56px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.currency||'INR'}</span>:<select className="input" value={li.currency||'INR'} onChange={e=>upd(idx,'currency',e.target.value)}>{['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}</select> },
-    { key:'delivery_date',    label:'Del. Date',      flex:'1 1 100px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{li.delivery_date||'—'}</span>:<input className="input" type="date" value={li.delivery_date||''} onChange={e=>upd(idx,'delivery_date',e.target.value)}/> },
-    { key:'supplier_id',      label:'Supplier',       flex:'1.5 1 110px', render:(li,idx)=>viewOnly?<span style={{fontSize:12}}>{suppliers.find(s=>String(s.id)===String(li.supplier_id))?.name||'—'}</span>:<select className="input" value={li.supplier_id||''} onChange={e=>upd(idx,'supplier_id',e.target.value)}><option value="">— Select —</option>{suppliers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select> },
-    { key:'line_status',      label:'Status',         flex:'1 1 88px', render:(li,idx)=>viewOnly?<LineStatusBadge s={li.line_status||'confirmed'}/>:<select className="input" value={li.line_status||'confirmed'} onChange={e=>upd(idx,'line_status',e.target.value)}>{[{v:'confirmed',l:'Confirmed'},{v:'procurement',l:'Procurement'},{v:'payment',l:'Payment'},{v:'shipped',l:'Shipped'},{v:'delivered_hub',l:'Delivered Hub'},{v:'delivered',l:'Delivered Customer'}].map(s=><option key={s.v} value={s.v}>{s.l}</option>)}</select> },
-  ];
-
-  return (
-    <div className="overlay">
-      <div className="modal modal-xl">
-        <div className="modal-header">
-          <div>
-            <h2>{viewOnly ? '👁 View Order' : '✏ Manage Order'} — <span className="mono">{order.id}</span></h2>
-            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-              {custName(order.customer_id)} · <StatusBadge s={order.status}/>
-            </div>
-          </div>
-          <button className="close-x" onClick={onClose}>×</button>
-        </div>
-        <div className="modal-body">
-
-          {/* Order header fields */}
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:13,marginBottom:13}}>
-            <div className="form-group"><label className="label">Customer Ref</label><input className="input" value={form.customer_ref} onChange={e=>setF('customer_ref',e.target.value)} disabled={viewOnly} /></div>
-            <div className="form-group"><label className="label">PO Number</label><input className="input" value={form.po_number} onChange={e=>setF('po_number',e.target.value)} disabled={viewOnly} /></div>
-            <div className="form-group"><label className="label">Tentative Date</label><input className="input" type="date" value={form.tentative_date} onChange={e=>setF('tentative_date',e.target.value)} disabled={viewOnly} /></div>
-            <div className="form-group"><label className="label">Enquiry / Quote No.</label>
-              <div style={{display:'flex',gap:6}}>
-                <input className="input" value={form.enquiry_no} onChange={e=>setF('enquiry_no',e.target.value)} placeholder="ENQ-" style={{flex:1}} disabled={viewOnly}/>
-                <input className="input" value={form.quote_no}   onChange={e=>setF('quote_no',e.target.value)}   placeholder="QT-"  style={{flex:1}} disabled={viewOnly}/>
-              </div>
-            </div>
-          </div>
-          <div className="form-group" style={{marginBottom:16}}>
-            <label className="label">Notes</label>
-            <textarea className="input" rows={2} value={form.notes} onChange={e=>setF('notes',e.target.value)} disabled={viewOnly} />
-          </div>
-
-          {/* Inline line items */}
-          <div style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>📦 Line Items</div>
-          {/* Header */}
-          <div style={{display:'flex',gap:5,alignItems:'center',padding:'0 6px 7px',borderBottom:'1px solid var(--border)',marginBottom:4}}>
-            <div style={{flex:'0 0 22px'}}/>
-            {cols.map(c=><div key={c.key} style={{flex:c.flex,minWidth:0}}><span style={{fontSize:11,fontWeight:600,color:'var(--text2)',whiteSpace:'nowrap'}}>{c.label}</span></div>)}
-            {!viewOnly && <div style={{flex:'0 0 26px'}}/>}
-          </div>
-          {/* Rows */}
-          {items.map((li,idx)=>(
-            <div key={li.id} style={{display:'flex',gap:5,alignItems:'center',padding:'4px 6px',borderRadius:'var(--r-sm)',marginBottom:3,background:idx%2===0?'transparent':'var(--surface2)'}}>
-              <div style={{flex:'0 0 22px',fontSize:11,fontWeight:600,color:'var(--text3)',textAlign:'center'}}>{idx+1}</div>
-              {cols.map(c=><div key={c.key} style={{flex:c.flex,minWidth:0}}>{c.render(li,idx)}</div>)}
-              {!viewOnly && (
-                <div style={{flex:'0 0 26px',display:'flex',justifyContent:'center'}}>
-                  <button className="btn btn-xs btn-danger" style={{padding:'1px 7px',fontSize:15,lineHeight:1}} onClick={()=>removeItem(idx)}>×</button>
-                </div>
-              )}
-            </div>
-          ))}
-          {!viewOnly && <button className="btn btn-sm" onClick={addItem} style={{marginTop:8,marginBottom:4}}>+ Add Line Item</button>}
-
-        </div>
-        <div className="modal-footer">
-          {viewOnly ? (
-            <button className="btn" onClick={onClose}>Close</button>
-          ) : (
-            <>
-              <button className="btn" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary" disabled={mutation.isPending} onClick={save}>
-                {mutation.isPending ? 'Saving…' : '💾 Save Changes'}
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default function OrdersPage() {
   const [search, setSearch]     = useState('');
   const [filter, setFilter]     = useState('all');
   const [selected, setSelected] = useState(null);
-  const [managing, setManaging] = useState(null);
 
   const [seenOrders, setSeenOrders] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem('seen_orders')||'[]')); } catch(_) { return new Set(); }
@@ -1106,6 +1403,7 @@ export default function OrdersPage() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo,   setDateTo]   = useState('');
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { data: orders=[], refetch }  = useQuery({ queryKey:['orders'],    queryFn:()=>api.get('/orders').then(r=>r.data) });
   const { data: suppliers=[] }        = useQuery({ queryKey:['suppliers'], queryFn:()=>api.get('/suppliers').then(r=>r.data) });
   const { data: customers=[] }        = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data).catch(()=>[]) });
@@ -1124,6 +1422,7 @@ export default function OrdersPage() {
   const orderValues = (o) => {
     const byCur = {}; const tByCur = {};
     (o.lineItems||[]).forEach(li=>{
+      if (li.line_status === 'cancelled') return;
       const base = (Number(li.qty)||0)*(Number(li.unit_price)||0);
       const tot  = base + base*(Number(li.tax_rate)||0)/100;
       const c = li.currency||'INR';
@@ -1133,8 +1432,8 @@ export default function OrdersPage() {
     return { base:byCur, total:tByCur };
   };
 
-  const FILTERS = ['all','draft','open','procurement','waiting_for_payment','closed','delivered','hold','failed'];
-  const FILTER_LABEL = { all:'All', draft:'Draft', open:'Open', procurement:'Procurement', waiting_for_payment:'Waiting Payment', closed:'Closed', delivered:'Delivered', hold:'Hold', failed:'Failed' };
+  const FILTERS = ['all','draft','open','procurement','waiting_for_payment','closed','delivered','hold','cancelled'];
+  const FILTER_LABEL = { all:'All', draft:'Draft', open:'Open', procurement:'Procurement', waiting_for_payment:'Waiting Payment', closed:'Closed', delivered:'Delivered', hold:'Hold', cancelled:'Cancelled' };
 
   // ── Order ageing ─────────────────────────────────────────────────────────
   const todayStr   = new Date().toISOString().slice(0,10);
@@ -1307,6 +1606,7 @@ export default function OrdersPage() {
               const multiItem = items.length > 1;
               const firstItem = items[0];
               const isUnseen = ['open','draft'].includes(o.status) && !seenOrders.has(o.id);
+              const canEdit = o.created_by === user.id || ['admin','manager'].includes(user.role) || canAccessSection(user, 'procurement-bin');
 
               return (
                 <React.Fragment key={o.id}>
@@ -1323,7 +1623,8 @@ export default function OrdersPage() {
                     </td>
                     {/* Order No */}
                     <td>
-                      <div className="mono bold" style={{color:'var(--accent)',fontSize:12}}>{o.id}</div>
+                      <div className="mono bold" style={{color:'var(--accent)',fontSize:12,cursor:'pointer'}}
+                        onClick={()=>{setSelected(o);markOrderSeen(o.id);}}>{o.id}</div>
                       {canSeeCustomer && <div style={{fontSize:11,color:'var(--text3)',marginTop:1}}>{custName(o.customer_id)}</div>}
                       {o.po_number && <div style={{fontSize:10,color:'var(--text3)'}}>PO: {o.po_number}</div>}
                       {/* Show revision version if quote_no has -V2 / -V3 suffix */}
@@ -1382,7 +1683,11 @@ export default function OrdersPage() {
                     </td>
                     {/* Status + pickup date */}
                     <td>
-                      <StatusBadge s={o.status}/>
+                      {(o.is_on_hold || o.status === 'hold') ? (
+                        <HoldBadge />
+                      ) : (
+                        <StatusBadge s={o.status}/>
+                      )}
                       {/* Show revision sub-stage only when this order's own quote is being revised.
                           Split enquiries can leave other items in sourcing; that should not mark
                           already-created orders from separate split quotes as re-sourcing. */}
@@ -1432,19 +1737,14 @@ export default function OrdersPage() {
                     <td style={{fontSize:11,color:'var(--text3)'}}>{fmtDateTime(o.created_at)}</td>
                     {/* Actions */}
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                      <div style={{display:'flex',gap:5,justifyContent:'flex-end'}}>
+                      <div style={{display:'flex',gap:5,justifyContent:'flex-end',alignItems:'center'}}>
                         {o.status==='draft' && (
                           <span style={{fontSize:10,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',
                             border:'1px solid var(--amber,#d97706)',borderRadius:999,padding:'2px 7px',fontWeight:700}}>DRAFT</span>
                         )}
-                        <button className="btn btn-xs"
-                          style={{background:'var(--accent-lt)',color:'var(--accent)',border:'1px solid var(--accent)33'}}
-                          onClick={()=>{setManaging(o);markOrderSeen(o.id);}}>
-                          👁 View
-                        </button>
                         <button className="btn btn-xs btn-primary"
                           onClick={()=>{setSelected(o);markOrderSeen(o.id);}}>
-                        ✏ Manage
+                          ✏ Manage
                         </button>
                       </div>
                     </td>
@@ -1485,9 +1785,8 @@ export default function OrdersPage() {
           </tbody>
         </table>
       </div>
-      {selected&&<OrderDetailModal order={selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers} enquiries={enquiries}
+      {selected&&<OrderDetailModal order={orders.find(o=>o.id===selected.id)||selected} onClose={()=>setSelected(null)} suppliers={suppliers} customers={customers} shippers={shippers} enquiries={enquiries}
         onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===selected.id);if(up)setSelected(up);}); }} />}
-      {managing&&<ManageOrderModal order={managing} viewOnly={true} onClose={()=>setManaging(null)} suppliers={suppliers} customers={customers} onRefresh={()=>{refetch().then(r=>{const up=r.data?.find(o=>o.id===managing.id);if(up)setManaging(up);});}} />}
     </div>
   );
 }

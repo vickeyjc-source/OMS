@@ -5,7 +5,8 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { StatusBadge, fmtDate } from '../utils/helpers';
+import { StatusBadge, fmtDate, HoldBadge, HoldNoteCallout } from '../utils/helpers';
+import { CreditCountdownBadge } from './CustomersPage';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const fmtM = (n) => '₹' + (parseFloat(n)||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -600,6 +601,629 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   );
 }
 
+// ── Settle Amount Modal (Cancelled Orders) ────────────────────────────────────
+// ── Settle Amount Modal (Cancelled Orders) ────────────────────────────────────
+function SettleAmountModal({ order, onClose, onSettled }) {
+  const qc = useQueryClient();
+  // 1st option is Direct Refund to Customer, 2nd is Move to Another Order
+  const [settleType, setSettleType] = useState('refund');
+  const [targetOrderId, setTargetOrderId] = useState('');
+  const [transferAmount, setTransferAmount] = useState('');
+  const [refundAmount, setRefundAmount] = useState('');
+  const [refundMethod, setRefundMethod] = useState('Bank Transfer');
+  const [refundRef, setRefundRef] = useState('');
+  const [receiptFile, setReceiptFile] = useState(null);
+  const [uploadingReceipt, setUploadingReceipt] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [refundRemainder, setRefundRemainder] = useState(true);
+  const [remMethod, setRemMethod] = useState('Bank Transfer');
+  const [remRef, setRemRef] = useState('');
+
+  const { data: customerOrders = [], isLoading: loadingOrders } = useQuery({
+    queryKey: ['active-customer-orders', order.customer_id],
+    queryFn: () => api.get('/orders').then(r => (r.data || []).filter(o => 
+      o.customer_id === order.customer_id && 
+      o.id !== order.id && 
+      !['closed', 'cancelled', 'failed', 'deleted'].includes((o.status || '').toLowerCase())
+    )),
+  });
+
+  const { data: orderPayments = [] } = useQuery({
+    queryKey: ['customer-payments-for-settle', order.id],
+    queryFn: () => api.get('/finance/customer-pay/' + order.id).then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
+  });
+
+  const origPmt = orderPayments.find(p => p.status === 'paid' && parseFloat(p.amount) > 0) || orderPayments[0] || {};
+  const totalPaid = parseFloat(order.total_paid) || parseFloat(origPmt?.amount) || 0;
+  const unsettled = order.unsettled_amount !== undefined && order.unsettled_amount !== null && Number(order.unsettled_amount) > 0
+    ? Number(order.unsettled_amount)
+    : totalPaid;
+
+  useEffect(() => {
+    if (unsettled > 0 && !refundAmount) {
+      setRefundAmount(String(unsettled));
+    }
+  }, [unsettled]);
+
+  const getOrderTotal = (o) => {
+    if (!o) return 0;
+    if (o.order_total !== undefined && o.order_total !== null && Number(o.order_total) > 0) {
+      return Number(o.order_total);
+    }
+    if (o.total_amount !== undefined && o.total_amount !== null && Number(o.total_amount) > 0) {
+      return Number(o.total_amount);
+    }
+    const items = o.lineItems || o.items || [];
+    if (items.length > 0) {
+      return items.reduce((s, it) => {
+        const b = (parseFloat(it.qty) || 0) * (parseFloat(it.unit_price) || 0);
+        const gst = b * ((parseFloat(it.tax_rate) || 0) / 100);
+        return s + b + gst;
+      }, 0);
+    }
+    return 0;
+  };
+
+  const targetOrder = customerOrders.find(o => o.id === targetOrderId);
+  const targetTotal = targetOrder ? getOrderTotal(targetOrder) : 0;
+  const targetPaid = targetOrder ? (parseFloat(targetOrder.total_paid) || 0) : 0;
+  const targetRequired = targetOrder ? Math.max(0, targetTotal - targetPaid) : 0;
+
+  useEffect(() => {
+    if (targetOrder) {
+      const suggested = targetRequired > 0 ? Math.min(unsettled, targetRequired) : unsettled;
+      setTransferAmount(String(suggested));
+    }
+  }, [targetOrderId, targetRequired, unsettled]);
+
+  const numTransfer = parseFloat(transferAmount) || 0;
+  const remainder = Math.max(0, unsettled - numTransfer);
+
+  const settleMutation = useMutation({
+    mutationFn: async (payload) => {
+      let receipt_file_url = '';
+      if (receiptFile) {
+        setUploadingReceipt(true);
+        const fd = new FormData();
+        fd.append('file', receiptFile);
+        fd.append('entity_type', 'order');
+        fd.append('entity_id', order.id);
+        const res = await api.post('/files', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        receipt_file_url = res.data?.download_url || '';
+        setUploadingReceipt(false);
+      }
+      return api.post(`/orders/${order.id}/settle`, { ...payload, receipt_file_url });
+    },
+    onSuccess: () => {
+      toast.success('Financial settlement completed successfully');
+      qc.invalidateQueries(['finance-customer']);
+      qc.invalidateQueries(['finance-history']);
+      qc.invalidateQueries(['orders']);
+      onClose();
+      if (onSettled) onSettled();
+    },
+    onError: e => {
+      setUploadingReceipt(false);
+      toast.error(e?.response?.data?.error || 'Settlement failed');
+    }
+  });
+  // Rule: When a FULL order is cancelled, credit obligation is ALREADY automatically released by the system.
+  // Therefore, "Add to Credit Line" NEVER shows for a full order cancellation.
+  // It ONLY shows when the full order is NOT cancelled (e.g. specific item cancelled / partial settlement),
+  // AND credit was used alongside another payment method (Bank or Wallet).
+  const isFullOrderCancelled = (order.status || '').toLowerCase() === 'cancelled';
+
+  const usedCreditWithOther = Boolean(
+    orderPayments.some(p => {
+      const method = (p.payment_method || '').toLowerCase();
+      const notes = (p.notes || '').toLowerCase();
+      const hasCredit = method.includes('credit') || notes.includes('credit:') || notes.includes('ciflux credit') || notes.includes('credit line');
+      const hasOther = method.includes('bank') || method.includes('wallet') || notes.includes('bank transfer') || notes.includes('wallet');
+      return hasCredit && hasOther;
+    }) ||
+    (
+      ((origPmt?.payment_method || '').toLowerCase().includes('credit') || (origPmt?.notes || '').toLowerCase().includes('credit:')) &&
+      ((origPmt?.payment_method || '').toLowerCase().includes('bank') || (origPmt?.notes || '').toLowerCase().includes('bank transfer') || (origPmt?.notes || '').toLowerCase().includes('wallet'))
+    ) ||
+    (
+      orderPayments.some(p => (p.payment_method || '').toLowerCase().includes('credit') || (p.notes || '').toLowerCase().includes('credit:')) &&
+      orderPayments.some(p => (p.payment_method || '').toLowerCase().includes('bank') || (p.notes || '').toLowerCase().includes('bank transfer') || (p.notes || '').toLowerCase().includes('wallet'))
+    )
+  );
+
+  const hasCreditOption = !isFullOrderCancelled && usedCreditWithOther;
+
+  useEffect(() => {
+    if (!hasCreditOption && settleType === 'credit_line_restore') {
+      setSettleType('refund');
+    }
+  }, [hasCreditOption, settleType]);
+
+  const handleConfirm = () => {
+    if (settleType === 'credit_line_restore') {
+      settleMutation.mutate({
+        settlement_type: 'credit_line_restore',
+        amount: unsettled,
+        notes,
+      });
+      return;
+    }
+    if (settleType === 'credit_to_wallet') {
+      settleMutation.mutate({
+        settlement_type: 'credit_to_wallet',
+        amount: unsettled,
+        notes,
+      });
+      return;
+    }
+    if (settleType === 'transfer_to_order') {
+      if (!targetOrderId) {
+        toast.error('Please select an active target order');
+        return;
+      }
+      if (numTransfer <= 0 || numTransfer > (unsettled + 0.01)) {
+        toast.error(`Transfer amount must be between ₹1 and ₹${unsettled.toFixed(2)}`);
+        return;
+      }
+      if (remainder > 0.01 && refundRemainder && !remRef.trim()) {
+        toast.error('Please enter Refund UTR / Reference for the remaining balance');
+        return;
+      }
+      settleMutation.mutate({
+        settlement_type: 'transfer_to_order',
+        amount: numTransfer,
+        target_order_id: targetOrderId,
+        payment_method: origPmt.payment_method || 'Bank Transfer',
+        payment_ref: origPmt.payment_ref || `TRANSFER-${order.id}`,
+        notes,
+        remainder_action: (remainder > 0.01 && refundRemainder) ? 'refund' : 'keep_pending',
+        remainder_payment_ref: remRef.trim(),
+        remainder_payment_method: remMethod,
+      });
+    } else {
+      const numRefund = parseFloat(refundAmount) || 0;
+      if (numRefund <= 0 || numRefund > (unsettled + 0.01)) {
+        toast.error(`Refund amount must be between ₹1 and ₹${unsettled.toFixed(2)}`);
+        return;
+      }
+      if (!refundRef.trim()) {
+        toast.error('Refund reference / UTR is required');
+        return;
+      }
+      settleMutation.mutate({
+        settlement_type: 'refund',
+        amount: numRefund,
+        payment_method: refundMethod,
+        payment_ref: refundRef.trim(),
+        notes,
+      });
+    }
+  };
+
+  return (
+    <div className="overlay" style={{zIndex:1200}} onClick={onClose}>
+      <div className="modal" style={{maxWidth:620,width:'94vw'}} onClick={e=>e.stopPropagation()}>
+        <div className="modal-header">
+          <h2 style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{color: order.status === 'cancelled' ? 'var(--red)' : 'var(--amber,#d97706)'}}>💳</span>{' '}
+            {order.status === 'cancelled' ? 'Settle Cancelled Order Amount' : 'Settle Customer Excess Payment'}
+          </h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'flex', flexDirection:'column', gap:14}}>
+          {/* Summary Box */}
+          <div style={{background:'var(--surface2,#f8fafc)',border:'1px solid var(--border)',borderRadius:'var(--r,8px)',padding:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+              <div>
+                <span className="mono" style={{fontWeight:800,fontSize:14,color:'var(--accent)'}}>{order.id}</span>
+                {order.po_number && <span style={{fontSize:12,color:'var(--text2)',marginLeft:8}}>PO: {order.po_number}</span>}
+              </div>
+              <span style={{
+                fontSize:11,
+                padding:'2px 8px',
+                borderRadius:99,
+                background: order.status === 'cancelled' ? 'var(--red-lt,#fef2f2)' : 'var(--amber-lt,#fef3c7)',
+                color: order.status === 'cancelled' ? 'var(--red)' : 'var(--amber,#d97706)',
+                fontWeight:800
+              }}>
+                {order.status === 'cancelled' ? '🚫 CANCELLED' : '⚠️ EXCESS PAID'}
+              </span>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12}}>
+              <div>Customer: <strong>{order.customer?.name || order.customer_id}</strong></div>
+              <div>Available to Settle: <strong style={{color:'var(--green)',fontSize:13}}>₹{unsettled.toFixed(2)}</strong></div>
+              {origPmt.payment_ref && <div>Original Ref/UTR: <span className="mono">{origPmt.payment_ref}</span></div>}
+              {origPmt.payment_method && <div>Original Method: {origPmt.payment_method}</div>}
+            </div>
+          </div>
+
+          {/* Mode Switcher — Radio Tick Cards (1st: Refund, 2nd: Move/Transfer, 3rd: Add to Wallet) */}
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(170px, 1fr))',gap:10}}>
+            <label style={{
+              display:'flex',
+              alignItems:'center',
+              gap:10,
+              padding:'12px 14px',
+              borderRadius:'var(--r,8px)',
+              border: settleType==='refund' ? '2px solid var(--red,#dc2626)' : '1px solid var(--border)',
+              background: settleType==='refund' ? 'var(--red-lt,#fef2f2)' : 'var(--surface)',
+              cursor:'pointer',
+              transition:'all 0.15s'
+            }}>
+              <input
+                type="radio"
+                name="settle_type"
+                value="refund"
+                checked={settleType==='refund'}
+                onChange={()=>setSettleType('refund')}
+                style={{accentColor:'var(--red,#dc2626)',width:17,height:17,cursor:'pointer'}}
+              />
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13,color:settleType==='refund'?'var(--red,#dc2626)':'var(--text)'}}>
+                  💸 Direct Bank Refund
+                </div>
+                <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
+                  Refund amount to customer account
+                </div>
+              </div>
+              {settleType==='refund' && <span style={{fontSize:14,color:'var(--red,#dc2626)'}}>✓</span>}
+            </label>
+
+            <label style={{
+              display:'flex',
+              alignItems:'center',
+              gap:10,
+              padding:'12px 14px',
+              borderRadius:'var(--r,8px)',
+              border: settleType==='transfer_to_order' ? '2px solid var(--accent)' : '1px solid var(--border)',
+              background: settleType==='transfer_to_order' ? 'var(--blue-lt,#eff6ff)' : 'var(--surface)',
+              cursor:'pointer',
+              transition:'all 0.15s'
+            }}>
+              <input
+                type="radio"
+                name="settle_type"
+                value="transfer_to_order"
+                checked={settleType==='transfer_to_order'}
+                onChange={()=>setSettleType('transfer_to_order')}
+                style={{accentColor:'var(--accent)',width:17,height:17,cursor:'pointer'}}
+              />
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13,color:settleType==='transfer_to_order'?'var(--accent)':'var(--text)'}}>
+                  🔄 Move to Order
+                </div>
+                <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
+                  Transfer credit to active customer order
+                </div>
+              </div>
+              {settleType==='transfer_to_order' && <span style={{fontSize:14,color:'var(--accent)'}}>✓</span>}
+            </label>
+
+            <label style={{
+              display:'flex',
+              alignItems:'center',
+              gap:10,
+              padding:'12px 14px',
+              borderRadius:'var(--r,8px)',
+              border: settleType==='credit_to_wallet' ? '2px solid var(--green,#16a34a)' : '1px solid var(--border)',
+              background: settleType==='credit_to_wallet' ? 'var(--green-lt,#f0fdf4)' : 'var(--surface)',
+              cursor:'pointer',
+              transition:'all 0.15s'
+            }}>
+              <input
+                type="radio"
+                name="settle_type"
+                value="credit_to_wallet"
+                checked={settleType==='credit_to_wallet'}
+                onChange={()=>setSettleType('credit_to_wallet')}
+                style={{accentColor:'var(--green,#16a34a)',width:17,height:17,cursor:'pointer'}}
+              />
+              <div style={{flex:1}}>
+                <div style={{fontWeight:700,fontSize:13,color:settleType==='credit_to_wallet'?'var(--green,#16a34a)':'var(--text)'}}>
+                  💰 Add to Wallet
+                </div>
+                <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
+                  Deposit refund to customer wallet
+                </div>
+              </div>
+              {settleType==='credit_to_wallet' && <span style={{fontSize:14,color:'var(--green,#16a34a)'}}>✓</span>}
+            </label>
+
+            {hasCreditOption && (
+              <label style={{
+                display:'flex',
+                alignItems:'center',
+                gap:10,
+                padding:'12px 14px',
+                borderRadius:'var(--r,8px)',
+                border: settleType==='credit_line_restore' ? '2px solid #6366f1' : '1px solid var(--border)',
+                background: settleType==='credit_line_restore' ? 'rgba(99,102,241,0.08)' : 'var(--surface)',
+                cursor:'pointer',
+                transition:'all 0.15s'
+              }}>
+                <input
+                  type="radio"
+                  name="settle_type"
+                  value="credit_line_restore"
+                  checked={settleType==='credit_line_restore'}
+                  onChange={()=>setSettleType('credit_line_restore')}
+                  style={{accentColor:'#6366f1',width:17,height:17,cursor:'pointer'}}
+                />
+                <div style={{flex:1}}>
+                  <div style={{fontWeight:700,fontSize:13,color:settleType==='credit_line_restore'?'#6366f1':'var(--text)'}}>
+                    💳 Add to Credit Line
+                  </div>
+                  <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
+                    Release credit obligation & restore available limit
+                  </div>
+                </div>
+                {settleType==='credit_line_restore' && <span style={{fontSize:14,color:'#6366f1'}}>✓</span>}
+              </label>
+            )}
+          </div>
+
+          {/* 1. DIRECT REFUND MODE */}
+          {settleType === 'refund' && (
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Refund Amount (₹) <span className="req">*</span></label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="input"
+                  value={refundAmount}
+                  max={unsettled}
+                  onChange={e=>setRefundAmount(e.target.value)}
+                />
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Refund Method <span className="req">*</span></label>
+                  <select className="input" value={refundMethod} onChange={e=>setRefundMethod(e.target.value)}>
+                    <option value="Bank Transfer">Bank Transfer (NEFT/RTGS/IMPS)</option>
+                    <option value="UPI">UPI</option>
+                    <option value="Cheque">Cheque</option>
+                    <option value="Gateway">Payment Gateway</option>
+                  </select>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Refund UTR / Txn Reference <span className="req">*</span></label>
+                  <input
+                    className="input"
+                    placeholder="Enter transaction / UTR reference"
+                    value={refundRef}
+                    onChange={e=>setRefundRef(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="form-group" style={{marginBottom:0}}>
+                <label className="label">Refund Receipt / Proof (Optional)</label>
+                <input
+                  type="file"
+                  className="input"
+                  style={{fontSize:12}}
+                  onChange={e=>setReceiptFile(e.target.files?.[0] || null)}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* 2. MOVE TO ANOTHER ORDER MODE */}
+          {settleType === 'transfer_to_order' && (
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {loadingOrders ? (
+                <div style={{fontSize:12,color:'var(--text3)'}}>Checking active orders…</div>
+              ) : customerOrders.length === 0 ? (
+                /* No active orders found fallback */
+                <div style={{
+                  padding:'14px 16px',
+                  background:'var(--amber-lt,#fffbeb)',
+                  border:'1.5px solid var(--amber,#f59e0b)',
+                  borderRadius:'var(--r,8px)',
+                  display:'flex',
+                  flexDirection:'column',
+                  gap:10
+                }}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,color:'var(--amber,#b45309)',fontWeight:700,fontSize:13}}>
+                    <span>⚠️</span> No active orders found for this customer!
+                  </div>
+                  <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
+                    You don't have any active orders to move this amount to. Please refund directly to the customer instead.
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{background:'var(--red,#dc2626)',color:'#fff',borderColor:'var(--red,#dc2626)',fontWeight:700}}
+                      onClick={()=>setSettleType('refund')}>
+                      💸 Switch to Direct Refund
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                /* Active orders available */
+                <>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Target Active Order <span className="req">*</span></label>
+                    <select className="input" value={targetOrderId} onChange={e=>setTargetOrderId(e.target.value)}>
+                      <option value="">— Select Target Active Order —</option>
+                      {customerOrders.map(to => {
+                        const tot = getOrderTotal(to);
+                        const paid = parseFloat(to.total_paid) || 0;
+                        const req = Math.max(0, tot - paid);
+                        return (
+                          <option key={to.id} value={to.id}>
+                            {to.id} {to.po_number ? `(PO: ${to.po_number})` : ''} — Required: ₹{req.toFixed(2)} (Total: ₹{tot.toFixed(2)})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+
+                  {targetOrder && (
+                    <div style={{background:'var(--blue-lt,#eff6ff)',border:'1px solid var(--accent)',borderRadius:'var(--r-sm)',padding:'10px 14px',display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,fontSize:12}}>
+                      <div>Order Total: <strong style={{display:'block',fontSize:13}}>₹{targetTotal.toFixed(2)}</strong></div>
+                      <div>Already Paid: <strong style={{display:'block',color:'var(--green)',fontSize:13}}>₹{targetPaid.toFixed(2)}</strong></div>
+                      <div>Payment Required: <strong style={{display:'block',color:'var(--red,#dc2626)',fontSize:14,fontWeight:800}}>₹{targetRequired.toFixed(2)}</strong></div>
+                    </div>
+                  )}
+
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Amount to Move (₹) <span className="req">*</span></label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      className="input"
+                      value={transferAmount}
+                      max={unsettled}
+                      onChange={e=>setTransferAmount(e.target.value)}
+                    />
+                    <div style={{fontSize:11,color:'var(--text3)',marginTop:3}}>
+                      Reusing original payment reference: <strong className="mono">{origPmt.payment_ref || `TRANSFER-${order.id}`}</strong> ({origPmt.payment_method || 'Bank Transfer'})
+                    </div>
+                  </div>
+
+                  {/* Remainder Refund Box */}
+                  {remainder > 0.01 && (
+                    <div style={{background:'var(--amber-lt,#fffbeb)',border:'1.5px solid var(--amber,#d97706)',borderRadius:'var(--r,8px)',padding:12}}>
+                      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                        <span style={{fontWeight:700,fontSize:12,color:'var(--amber,#b45309)'}}>
+                          Remaining Balance: ₹{remainder.toFixed(2)}
+                        </span>
+                      </div>
+                      <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,cursor:'pointer'}}>
+                        <input
+                          type="checkbox"
+                          checked={refundRemainder}
+                          onChange={e=>setRefundRemainder(e.target.checked)}
+                          style={{accentColor:'var(--amber,#d97706)',width:16,height:16}}
+                        />
+                        Refund remaining ₹{remainder.toFixed(2)} to customer bank account now
+                      </label>
+                      {refundRemainder && (
+                        <>
+                          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:10}}>
+                            <div>
+                              <label className="label" style={{fontSize:10}}>Refund Method <span className="req">*</span></label>
+                              <select className="input" style={{fontSize:11}} value={remMethod} onChange={e=>setRemMethod(e.target.value)}>
+                                <option value="Bank Transfer">Bank Transfer (NEFT/RTGS/IMPS)</option>
+                                <option value="UPI">UPI</option>
+                                <option value="Cheque">Cheque</option>
+                                <option value="Gateway">Payment Gateway</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="label" style={{fontSize:10}}>Refund UTR / Txn Ref <span className="req">*</span></label>
+                              <input
+                                className="input"
+                                style={{fontSize:11}}
+                                placeholder="Enter refund UTR reference"
+                                value={remRef}
+                                onChange={e=>setRemRef(e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <div style={{marginTop:8}}>
+                            <label className="label" style={{fontSize:10}}>Refund Receipt / Proof (Optional)</label>
+                            <input
+                              type="file"
+                              className="input"
+                              style={{fontSize:11}}
+                              onChange={e=>setReceiptFile(e.target.files?.[0] || null)}
+                            />
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* 3. ADD TO CUSTOMER WALLET MODE */}
+          {settleType === 'credit_to_wallet' && (
+            <div style={{
+              background: 'rgba(22, 163, 74, 0.06)',
+              border: '1px solid rgba(22, 163, 74, 0.25)',
+              borderRadius: 8,
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8
+            }}>
+              <div style={{fontWeight: 700, color: 'var(--green,#16a34a)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>💰</span> CREDIT TO CUSTOMER PREPAID WALLET
+              </div>
+              <div style={{fontSize: 12, color: 'var(--text2)', lineHeight: 1.5}}>
+                The full refundable amount of <strong>₹{unsettled.toFixed(2)}</strong> will be credited directly to the customer's prepaid wallet balance. The customer can instantly use these funds for future orders with 1-click execution.
+              </div>
+            </div>
+          )}
+
+          {/* 4. RESTORE TO CREDIT LINE MODE */}
+          {settleType === 'credit_line_restore' && (
+            <div style={{
+              background: 'rgba(99, 102, 241, 0.06)',
+              border: '1px solid rgba(99, 102, 241, 0.25)',
+              borderRadius: 8,
+              padding: '16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8
+            }}>
+              <div style={{fontWeight: 700, color: '#6366f1', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>💳</span> RESTORE TO CIFLUX CREDIT LINE
+              </div>
+              <div style={{fontSize: 12, color: 'var(--text2)', lineHeight: 1.5}}>
+                The settlement amount of <strong>₹{unsettled.toFixed(2)}</strong> will be applied towards the customer's credit line. Any active credit drawdown balance will be cleared/reduced, immediately restoring their available credit limit.
+              </div>
+            </div>
+          )}
+
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Notes / Remarks</label>
+            <input
+              className="input"
+              placeholder="Optional remarks regarding this settlement…"
+              value={notes}
+              onChange={e=>setNotes(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            style={{
+              background: settleType==='credit_line_restore' ? '#6366f1' : settleType==='refund' ? 'var(--red,#dc2626)' : 'var(--green,#16a34a)',
+              borderColor: settleType==='credit_line_restore' ? '#6366f1' : settleType==='refund' ? 'var(--red,#dc2626)' : 'var(--green,#16a34a)',
+              fontWeight: 700
+            }}
+            disabled={settleMutation.isPending || uploadingReceipt || (settleType==='transfer_to_order' && customerOrders.length===0)}
+            onClick={handleConfirm}>
+            {settleMutation.isPending || uploadingReceipt
+              ? 'Processing…'
+              : (settleType==='credit_line_restore'
+                  ? `💳 Restore ₹${unsettled.toFixed(2)} to Credit Line`
+                  : settleType==='refund'
+                    ? `💸 Confirm Refund (₹${(parseFloat(refundAmount)||0).toFixed(2)})`
+                    : settleType==='credit_to_wallet'
+                      ? `💰 Deposit ₹${unsettled.toFixed(2)} to Wallet`
+                      : (remainder > 0.01 && refundRemainder
+                          ? `🚀 Confirm Move (₹${numTransfer.toFixed(2)}) & Refund (₹${remainder.toFixed(2)})`
+                          : `🚀 Confirm Move (₹${numTransfer.toFixed(2)})`
+                        )
+                )
+            }
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Record Payment Modal ──────────────────────────────────────────────────────
 function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const qc = useQueryClient();
@@ -632,6 +1256,17 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   });
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
+  const { data: customerCredit } = useQuery({
+    queryKey: ['customer-credit-profile', item.customer_id],
+    queryFn: () => api.get(`/customers/${item.customer_id}/credit-profile`).then(r => r.data).catch(() => null),
+    enabled: type === 'customer' && !!item.customer_id,
+  });
+
+  const [useWallet, setUseWallet] = useState(false);
+  const [walletAmount, setWalletAmount] = useState('');
+  const [useCredit, setUseCredit] = useState(false);
+  const [creditAmount, setCreditAmount] = useState('');
+
   // Fetch PI file uploaded by Procurement for this supplier order
   const [piFile, setPiFile] = useState(null);
   useEffect(() => {
@@ -661,6 +1296,19 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const grandTotal = pureBase + chargesTotal;
   const originalNum = parseFloat(defaultAmt) || 0;
 
+  const hasCreditFacility = Boolean(customerCredit?.credit_enabled);
+  const hasWalletBalance = Number(customerCredit?.wallet_balance) > 0;
+  const showAllocationCard = type === 'customer' && (hasCreditFacility || hasWalletBalance);
+
+  const wAmt = (showAllocationCard && hasWalletBalance && useWallet) ? (parseFloat(walletAmount) || 0) : 0;
+  const cAmt = (showAllocationCard && hasCreditFacility && useCredit) ? (parseFloat(creditAmount) || 0) : 0;
+  const bAmt = type === 'customer' ? Math.max(0, grandTotal - wAmt - cAmt) : grandTotal;
+
+  const isWalletValid = !useWallet || (wAmt > 0 && wAmt <= (Number(customerCredit?.wallet_balance) || 0) + 0.01);
+  const isCreditValid = !useCredit || (cAmt > 0 && customerCredit?.credit_enabled && cAmt <= (Number(customerCredit?.available_credit) || 0) + 0.01);
+  const isBankValid = bAmt <= 0.009 || (!!form.payment_method && !!form.payment_ref.trim());
+  const isAllocationValid = type === 'customer' ? ((wAmt + cAmt) <= (grandTotal + 0.01)) : true;
+
   const addCharge = () => {
     const n = chargeInput.name.trim();
     const a = parseFloat(chargeInput.amount);
@@ -680,6 +1328,7 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
       qc.invalidateQueries(['finance-customer']);
       qc.invalidateQueries(['finance-supplier']);
       qc.invalidateQueries(['finance-history']);
+      qc.invalidateQueries(['customer-credit-profile']);
       toast.success('✅ Payment recorded!');
       onSaved();
       onClose();
@@ -690,13 +1339,22 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const label = type === 'customer' ? (item.customer?.name||item.customer_id) : (item._resolvedName || item.supplier?.name || item.supplier_id);
   const refNo = type === 'customer' ? item.id : (item.internal_po_no||item.supplier_order_id||item.id);
 
-  const canSubmit = !mutation.isPending
-    && !!form.payment_method && !!form.payment_ref && grandTotal > 0
-    && (type === 'customer' || (form.zoho_po_number?.trim() && form.supplier_ref?.trim()));
+  const isOnHold = Boolean(item.is_on_hold || item.order_status === 'hold' || item.status === 'hold');
+
+  const canSubmit = !isOnHold && !mutation.isPending && grandTotal > 0
+    && (type === 'customer'
+      ? (isWalletValid && isCreditValid && isBankValid && isAllocationValid)
+      : (!!form.payment_method && !!form.payment_ref && form.zoho_po_number?.trim() && form.supplier_ref?.trim()));
 
   const handleSubmit = () => {
     const payload = {
       ...form,
+      payment_source: (useWallet && useCredit) ? 'split' : useWallet ? 'customer_wallet' : useCredit ? 'ciflux_credit' : 'bank',
+      wallet_amount: wAmt,
+      credit_amount: cAmt,
+      bank_amount: bAmt,
+      payment_method: bAmt > 0.009 ? form.payment_method : (useWallet && useCredit) ? 'Wallet + Credit Line' : useWallet ? 'Customer Wallet' : 'Ciflux Credit Line',
+      payment_ref: bAmt > 0.009 ? form.payment_ref : (useWallet && useCredit) ? `WALLET+CREDIT-${item.id}` : useWallet ? `WALLET-${item.id}` : `CREDIT-${item.id}`,
       amount: grandTotal,
       finance_po_no: '',
       additional_charges: charges,
@@ -714,6 +1372,25 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
+          {isOnHold && (
+            <div style={{
+              background: '#fef3c7',
+              border: '1.5px solid #d97706',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 14,
+              color: '#92400e'
+            }}>
+              <div style={{fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>⏸</span> ORDER IS ON HOLD — PAYMENT RECORDING LOCKED
+              </div>
+              <div style={{fontSize: 12, marginTop: 4}}>
+                <strong>Reason:</strong> {item.hold_reason || 'No note specified'}
+                {item.hold_by && <span> • <strong>By:</strong> {item.hold_by}</span>}
+                {item.hold_at && <span> • <strong>At:</strong> {fmtDate(item.hold_at)}</span>}
+              </div>
+            </div>
+          )}
           <div style={{padding:'10px 14px',borderRadius:'var(--r-sm)',background:'var(--accent-lt)',
             border:'1px solid var(--accent)33',fontSize:12,marginBottom:14}}>
             <div style={{fontWeight:700}}>{label}</div>
@@ -790,25 +1467,52 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
 
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
             <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">{isSupplier ? 'Amount (INR)' : 'Amount'} <span className="req">*</span></label>
-              <input className="input" type="number" step="0.01"
-                value={grandTotal > 0 ? grandTotal : ''}
+              <label className="label">
+                {type === 'customer'
+                  ? (wAmt > 0 || cAmt > 0)
+                    ? 'Direct Payment Amount (Bank / Cash)'
+                    : 'Amount'
+                  : isSupplier
+                    ? 'Amount (INR)'
+                    : 'Amount'} <span className="req">*</span>
+              </label>
+              <input
+                className="input"
+                type="number"
+                step="0.01"
+                value={
+                  type === 'customer' && (wAmt > 0 || cAmt > 0)
+                    ? (bAmt <= 0.009 ? '0.00' : bAmt.toFixed(2))
+                    : (grandTotal > 0 ? grandTotal : '')
+                }
+                readOnly={type === 'customer' && (wAmt > 0 || cAmt > 0)}
                 onChange={e=>{
                   const v = parseFloat(e.target.value) || 0;
                   setPureBase(v - chargesTotal); // keep charges, adjust pureBase
                   set('amount', e.target.value);
                 }}
-                placeholder="0.00"/>
-              {originalNum > 0 && (
-                <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
-                  Original: <strong style={{fontFamily:'monospace'}}>{fmtM(originalNum)}</strong>
-                  {Math.abs(grandTotal - originalNum) > 0.009 && (
+                style={{
+                  background: (type === 'customer' && (wAmt > 0 || cAmt > 0)) ? 'var(--surface2)' : undefined,
+                  fontWeight: 700,
+                  fontFamily: 'monospace',
+                  color: (type === 'customer' && (wAmt > 0 || cAmt > 0) && bAmt <= 0.009) ? 'var(--green,#16a34a)' : undefined
+                }}
+                placeholder="0.00"
+              />
+              <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
+                Original: <strong style={{fontFamily:'monospace'}}>{fmtM(originalNum)}</strong>
+                {type === 'customer' && (wAmt > 0 || cAmt > 0) ? (
+                  <span style={{marginLeft:8,fontWeight:600,color:'var(--green,#16a34a)'}}>
+                    Covered by Credit/Wallet: -{fmtM(wAmt + cAmt)}
+                  </span>
+                ) : (
+                  originalNum > 0 && Math.abs(grandTotal - originalNum) > 0.009 && (
                     <span style={{marginLeft:8,fontWeight:700,color: grandTotal > originalNum ? 'var(--green)' : 'var(--red)'}}>
                       {grandTotal > originalNum ? '▲' : '▼'} {fmtM(Math.abs(grandTotal - originalNum))}
                     </span>
-                  )}
-                </div>
-              )}
+                  )
+                )}
+              </div>
             </div>
             <div className="form-group" style={{marginBottom:0}}>
               <label className="label">Currency</label>
@@ -816,24 +1520,276 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                 {['INR','USD','EUR','SGD','GBP'].map(c=><option key={c}>{c}</option>)}
               </select>
             </div>
-            <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">Payment Method <span className="req">*</span></label>
-              <select className="input" value={form.payment_method} onChange={e=>set('payment_method',e.target.value)}
-                style={{borderColor:!form.payment_method?'var(--amber,#d97706)':undefined}}>
-                <option value="">— Select —</option>
-                {PAYMENT_METHODS.map(m=><option key={m}>{m}</option>)}
-              </select>
-            </div>
-            <div className="form-group" style={{marginBottom:0}}>
-              <label className="label">Payment Date</label>
-              <input className="input" type="date" value={form.payment_date} max={today()} onChange={e=>set('payment_date',e.target.value)}/>
-            </div>
-            <div className="form-group" style={{gridColumn:'1/-1',marginBottom:0}}>
-              <label className="label">UTR / Ref No. <span className="req">*</span></label>
-              <input className="input" value={form.payment_ref} onChange={e=>set('payment_ref',e.target.value)}
-                placeholder="UTR / Cheque No / SWIFT Ref"
-                style={{borderColor:!form.payment_ref?'var(--amber,#d97706)':undefined}}/>
-            </div>
+
+            {/* Split Payment Allocation for Customer (Only shown if facility is enabled OR customer has positive wallet balance) */}
+            {showAllocationCard && (
+              <div style={{
+                gridColumn: '1/-1',
+                padding: '12px 14px',
+                borderRadius: 8,
+                background: 'var(--surface2)',
+                border: '1.5px solid var(--border)',
+              }}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                  <div style={{fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
+                    <span>💳</span> Customer Credit & Wallet Allocation
+                  </div>
+                  <div style={{fontSize:11,color:'var(--text2)'}}>
+                    Order Total: <strong style={{color:'var(--text)',fontSize:12}}>₹{grandTotal.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}</strong>
+                  </div>
+                </div>
+
+                <div style={{display:'flex',flexDirection:'column',gap:10}}>
+                  {/* Option 1: Customer Wallet (Only if customer has wallet balance) */}
+                  {hasWalletBalance && (
+                    <div style={{
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: useWallet ? '1.5px solid #16a34a' : '1px solid var(--border)',
+                      background: useWallet ? 'rgba(22,163,74,0.06)' : 'var(--surface)',
+                      transition: 'all 0.15s ease'
+                    }}>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+                        <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',margin:0,flex:1}}>
+                          <input
+                            type="checkbox"
+                            checked={useWallet}
+                            onChange={e => {
+                              const checked = e.target.checked;
+                              setUseWallet(checked);
+                              if (checked) {
+                                const maxUsable = Math.min(Number(customerCredit?.wallet_balance) || 0, Math.max(0, grandTotal - cAmt));
+                                setWalletAmount(maxUsable > 0 ? String(maxUsable.toFixed(2)) : '');
+                              } else {
+                                setWalletAmount('');
+                              }
+                            }}
+                            style={{accentColor:'#16a34a',width:16,height:16}}
+                          />
+                          <div>
+                            <span style={{fontWeight:700,fontSize:12,color: useWallet ? '#16a34a' : 'inherit'}}>
+                              💰 Deduct from Customer Wallet
+                            </span>
+                            <span style={{marginLeft:8,fontSize:11,color:'var(--text3)'}}>
+                              Available: <strong>₹{(Number(customerCredit?.wallet_balance)||0).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong>
+                            </span>
+                          </div>
+                        </label>
+                        {useWallet && (
+                          <button
+                            type="button"
+                            className="btn btn-xs"
+                            onClick={() => {
+                              const maxUsable = Math.min(Number(customerCredit?.wallet_balance) || 0, Math.max(0, grandTotal - cAmt));
+                              setWalletAmount(String(maxUsable.toFixed(2)));
+                            }}
+                            style={{fontSize:11,padding:'2px 8px'}}
+                          >
+                            Use Max
+                          </button>
+                        )}
+                      </div>
+
+                      {useWallet && (
+                        <div style={{marginTop:8,display:'flex',alignItems:'center',gap:8}}>
+                          <span style={{fontSize:12,fontWeight:600,color:'var(--text2)',minWidth:120}}>Amount from Wallet:</span>
+                          <div style={{position:'relative',flex:1}}>
+                            <span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',fontSize:12,color:'var(--text3)'}}>₹</span>
+                            <input
+                              className="input"
+                              type="number"
+                              step="0.01"
+                              style={{paddingLeft:24,height:32,fontSize:13,fontWeight:600}}
+                              value={walletAmount}
+                              onChange={e => setWalletAmount(e.target.value)}
+                              placeholder="0.00"
+                            />
+                          </div>
+                          {wAmt > (Number(customerCredit?.wallet_balance) || 0) && (
+                            <span style={{color:'var(--red)',fontSize:11,fontWeight:700}}>Exceeds balance!</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Option 2: Ciflux Credit Line (Only if credit facility is enabled) */}
+                  {hasCreditFacility && (
+                    <div style={{
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: useCredit ? '1.5px solid #6366f1' : '1px solid var(--border)',
+                      background: useCredit ? 'rgba(99,102,241,0.06)' : 'var(--surface)',
+                      transition: 'all 0.15s ease'
+                    }}>
+                      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+                        <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',margin:0,flex:1}}>
+                          <input
+                            type="checkbox"
+                            checked={useCredit}
+                            onChange={e => {
+                              const checked = e.target.checked;
+                              setUseCredit(checked);
+                              if (checked) {
+                                const remaining = Math.max(0, grandTotal - wAmt);
+                                const maxUsable = Math.min(Number(customerCredit?.available_credit) || 0, remaining);
+                                setCreditAmount(maxUsable > 0 ? String(maxUsable.toFixed(2)) : '');
+                              } else {
+                                setCreditAmount('');
+                              }
+                            }}
+                            style={{accentColor:'#6366f1',width:16,height:16}}
+                          />
+                          <div>
+                            <span style={{fontWeight:700,fontSize:12,color: useCredit ? '#6366f1' : 'inherit'}}>
+                              💳 Draw from Ciflux Credit Line
+                            </span>
+                            <span style={{marginLeft:8,fontSize:11,color:'var(--text3)'}}>
+                              Available: <strong>₹{(customerCredit.available_credit||0).toLocaleString('en-IN', {minimumFractionDigits:2})}</strong> (Repayment: {customerCredit.credit_days||30}d)
+                            </span>
+                          </div>
+                        </label>
+                        {useCredit && (
+                          <button
+                            type="button"
+                            className="btn btn-xs"
+                            onClick={() => {
+                              const remaining = Math.max(0, grandTotal - wAmt);
+                              const maxUsable = Math.min(Number(customerCredit?.available_credit) || 0, remaining);
+                              setCreditAmount(String(maxUsable.toFixed(2)));
+                            }}
+                            style={{fontSize:11,padding:'2px 8px'}}
+                          >
+                            Fill Remaining
+                          </button>
+                        )}
+                      </div>
+
+                      {useCredit && (
+                        <div style={{marginTop:8,display:'flex',alignItems:'center',gap:8}}>
+                          <span style={{fontSize:12,fontWeight:600,color:'var(--text2)',minWidth:120}}>Amount from Credit:</span>
+                          <div style={{position:'relative',flex:1}}>
+                            <span style={{position:'absolute',left:10,top:'50%',transform:'translateY(-50%)',fontSize:12,color:'var(--text3)'}}>₹</span>
+                            <input
+                              className="input"
+                              type="number"
+                              step="0.01"
+                              style={{paddingLeft:24,height:32,fontSize:13,fontWeight:600}}
+                              value={creditAmount}
+                              onChange={e => setCreditAmount(e.target.value)}
+                              placeholder="0.00"
+                            />
+                          </div>
+                          {cAmt > (Number(customerCredit?.available_credit) || 0) && (
+                            <span style={{color:'var(--red)',fontSize:11,fontWeight:700}}>Exceeds limit!</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Summary Bar */}
+                  {(wAmt > 0 || cAmt > 0) && (
+                    <div style={{
+                      display:'flex',
+                      flexWrap:'wrap',
+                      justifyContent:'space-between',
+                      alignItems:'center',
+                      padding:'8px 12px',
+                      borderRadius:6,
+                      background: bAmt <= 0.009 ? 'rgba(22,163,74,0.12)' : 'rgba(217,119,6,0.1)',
+                      border: bAmt <= 0.009 ? '1px solid #16a34a' : '1px solid rgba(217,119,6,0.3)',
+                      fontSize:12
+                    }}>
+                      <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+                        {wAmt > 0 && <span style={{color:'#16a34a',fontWeight:600}}>Wallet: ₹{wAmt.toFixed(2)}</span>}
+                        {cAmt > 0 && <span style={{color:'#6366f1',fontWeight:600}}>Credit: ₹{cAmt.toFixed(2)}</span>}
+                        <span style={{fontWeight:700,color: bAmt <= 0.009 ? '#16a34a' : 'var(--text)'}}>
+                          {bAmt <= 0.009 ? '✅ 100% Covered by Wallet / Credit' : `🏦 Bank Remainder: ₹${bAmt.toFixed(2)}`}
+                        </span>
+                      </div>
+                      {wAmt + cAmt > grandTotal + 0.01 && (
+                        <span style={{color:'var(--red)',fontWeight:700}}>
+                          ⚠️ Total allocation exceeds payable amount by ₹{(wAmt + cAmt - grandTotal).toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Bank details or 100% covered message */}
+            {type === 'customer' ? (
+              (wAmt > 0 || cAmt > 0) && bAmt <= 0.009 ? (
+                <div style={{
+                  gridColumn: '1/-1',
+                  background: 'rgba(22,163,74,0.08)',
+                  border: '1.5px solid rgba(22,163,74,0.3)',
+                  borderRadius: 8,
+                  padding: '14px 16px',
+                  fontSize: 12,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 12
+                }}>
+                  <span style={{fontSize: 24}}>🎉</span>
+                  <div>
+                    <div style={{fontWeight: 800, color: 'var(--green,#16a34a)', fontSize: 14}}>
+                      100% Covered by {useWallet && useCredit ? 'Customer Wallet & Ciflux Credit' : useWallet ? 'Customer Wallet' : 'Ciflux Credit Line'}
+                    </div>
+                    <div style={{color: 'var(--text2)', marginTop: 2, fontSize: 12}}>
+                      Full order amount (₹{grandTotal.toFixed(2)}) is settled automatically. No bank transfer, payment method, or UTR reference required.
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Payment Method <span className="req">*</span></label>
+                    <select className="input" value={form.payment_method} onChange={e=>set('payment_method',e.target.value)}
+                      style={{borderColor:!form.payment_method?'var(--amber,#d97706)':undefined}}>
+                      <option value="">— Select —</option>
+                      {PAYMENT_METHODS.map(m=><option key={m}>{m}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">
+                      {wAmt > 0 || cAmt > 0 ? `UTR / Ref No. (for ₹${bAmt.toFixed(2)})` : 'UTR / Ref No.'} <span className="req">*</span>
+                    </label>
+                    <input className="input" value={form.payment_ref} onChange={e=>set('payment_ref',e.target.value)}
+                      placeholder={wAmt > 0 || cAmt > 0 ? `Enter UTR for ₹${bAmt.toFixed(2)} bank transfer` : 'Enter UTR / transaction reference'}
+                      style={{borderColor:!form.payment_ref?'var(--amber,#d97706)':undefined}}/>
+                  </div>
+                  <div className="form-group" style={{marginBottom:0}}>
+                    <label className="label">Payment Date</label>
+                    <input className="input" type="date" value={form.payment_date} max={today()} onChange={e=>set('payment_date',e.target.value)}/>
+                  </div>
+                </>
+              )
+            ) : (
+              <>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Payment Method <span className="req">*</span></label>
+                  <select className="input" value={form.payment_method} onChange={e=>set('payment_method',e.target.value)}
+                    style={{borderColor:!form.payment_method?'var(--amber,#d97706)':undefined}}>
+                    <option value="">— Select —</option>
+                    {PAYMENT_METHODS.map(m=><option key={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">UTR / Ref No. <span className="req">*</span></label>
+                  <input className="input" value={form.payment_ref} onChange={e=>set('payment_ref',e.target.value)}
+                    placeholder="UTR / Cheque No / SWIFT Ref"
+                    style={{borderColor:!form.payment_ref?'var(--amber,#d97706)':undefined}}/>
+                </div>
+                <div className="form-group" style={{marginBottom:0}}>
+                  <label className="label">Payment Date</label>
+                  <input className="input" type="date" value={form.payment_date} max={today()} onChange={e=>set('payment_date',e.target.value)}/>
+                </div>
+              </>
+            )}
+
             <div className="form-group" style={{gridColumn:'1/-1',marginBottom:0}}>
               <label className="label">Notes</label>
               <input className="input" value={form.notes} onChange={e=>set('notes',e.target.value)}
@@ -940,9 +1896,14 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={!canSubmit}
+            disabled={!canSubmit || isOnHold}
+            title={isOnHold ? 'Order is on hold' : ''}
             onClick={handleSubmit}>
-            {mutation.isPending ? 'Saving…' : '✅ Record Payment'}
+            {mutation.isPending
+              ? 'Saving…'
+              : (type === 'customer' && (wAmt > 0 || cAmt > 0) && bAmt <= 0.009)
+                ? '✅ Settle Payment (100% via Credit/Wallet)'
+                : '✅ Record Payment'}
           </button>
         </div>
       </div>
@@ -1183,22 +2144,30 @@ function PORequestsTab({ requests, onRefresh }) {
             <th style={{textAlign:'right'}}>Actions</th>
           </tr></thead>
           <tbody>
-            {pending.map(r => (
+            {pending.map(r => {
+              const isHold = Boolean(r.is_on_hold || r.order_status === 'hold');
+              return (
               <tr key={r.id}>
-                <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.order_id}</span></td>
+                <td>
+                  <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{r.order_id}</span>
+                </td>
                 <td style={{fontWeight:500}}>{r.supplier_name||r.supplier_id}</td>
                 <td style={{fontSize:11,color:'var(--text3)'}}>{r.order_ref||'—'}</td>
                 <td style={{fontSize:11}}>{r.requested_by||'—'}</td>
                 <td style={{fontSize:11}}>{fmtDate(r.requested_at)}</td>
                 <td style={{textAlign:'right'}}>
-                  <button className="btn btn-xs btn-primary"
-                    style={{fontSize:11}}
-                    onClick={()=>setFulfillModal(r)}>
-                    ✏ Fill in Details
-                  </button>
+                  {isHold ? (
+                    <HoldBadge />
+                  ) : (
+                    <button className="btn btn-xs btn-primary"
+                      style={{fontSize:11}}
+                      onClick={()=>setFulfillModal(r)}>
+                      ✏ Fill in Details
+                    </button>
+                  )}
                 </td>
               </tr>
-            ))}
+            );})}
           </tbody>
         </table>
       )}
@@ -1277,7 +2246,8 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
     onError: e => toast.error(e.response?.data?.error || 'Failed'),
   });
 
-  const canSubmit = !mutation.isPending && form.supplier_ref.trim() && form.zoho_po_number.trim();
+  const isOnHold = Boolean(request.is_on_hold || request.order_status === 'hold');
+  const canSubmit = !isOnHold && !mutation.isPending && form.supplier_ref.trim() && form.zoho_po_number.trim();
 
   return (
     <div className="overlay">
@@ -1287,6 +2257,25 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
+          {isOnHold && (
+            <div style={{
+              background: '#fef3c7',
+              border: '1.5px solid #d97706',
+              borderRadius: 8,
+              padding: '10px 14px',
+              marginBottom: 14,
+              color: '#92400e'
+            }}>
+              <div style={{fontWeight: 700, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>⏸</span> ORDER IS ON HOLD — PO DETAILS CANNOT BE SUBMITTED
+              </div>
+              <div style={{fontSize: 11, marginTop: 3}}>
+                <strong>Reason:</strong> {request.hold_reason || 'No note specified'}
+                {request.hold_by && <span> • <strong>By:</strong> {request.hold_by}</span>}
+                {request.hold_at && <span> • <strong>At:</strong> {fmtDate(request.hold_at)}</span>}
+              </div>
+            </div>
+          )}
           <div style={{padding:'10px 14px',borderRadius:6,background:'var(--accent-lt)',
             fontSize:12,marginBottom:16,fontWeight:600}}>
             <div>{request.order_id} · {request.supplier_name||request.supplier_id}</div>
@@ -1330,7 +2319,8 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={!canSubmit}
+            disabled={!canSubmit || isOnHold}
+            title={isOnHold ? 'Order is on hold' : ''}
             onClick={()=>mutation.mutate(form)}>
             {mutation.isPending ? 'Saving…' : '✅ Save & Send to Procurement'}
           </button>
@@ -1462,6 +2452,24 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
             <div style={{padding:24,textAlign:'center',color:'var(--text3)'}}>Loading…</div>
           ) : (
             <div style={{display:'grid',gap:14}}>
+              {Boolean(order?.is_on_hold || order?.status === 'hold') && (
+                <div style={{
+                  background: '#fef3c7',
+                  border: '1.5px solid #d97706',
+                  borderRadius: 8,
+                  padding: '12px 16px',
+                  color: '#92400e'
+                }}>
+                  <div style={{fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                    <span>⏸</span> ORDER IS ON HOLD — FINANCE DETAILS READ-ONLY
+                  </div>
+                  <div style={{fontSize: 12, marginTop: 4}}>
+                    <strong>Reason:</strong> {order.hold_reason || 'No note specified'}
+                    {order.hold_by && <span> • <strong>By:</strong> {order.hold_by}</span>}
+                    {order.hold_at && <span> • <strong>At:</strong> {fmtDate(order.hold_at)}</span>}
+                  </div>
+                </div>
+              )}
               {mode === 'customer' ? (
                 <>
                   <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
@@ -1572,6 +2580,122 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
   );
 }
 
+function SupplierRecoverModal({ item, onClose, onSaved }) {
+  const [amount, setAmount] = useState(String(item.unsettled_amount || ''));
+  const [method, setMethod] = useState('Bank Transfer');
+  const [ref, setRef] = useState('');
+  const [notes, setNotes] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const numAmt = parseFloat(amount);
+    if (!numAmt || numAmt <= 0) {
+      toast.error('Please enter a valid recovery amount');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.post(`/finance/supplier-recover/${item.supplier_order_id || item.id}`, {
+        amount: numAmt,
+        payment_method: method,
+        payment_ref: ref || `REC-${item.internal_po_no || item.id}`,
+        notes,
+      });
+      toast.success(`Supplier recovery recorded — ₹${numAmt.toFixed(2)}`);
+      onSaved();
+    } catch(err) {
+      toast.error(err.response?.data?.error || 'Failed to record supplier recovery');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal modal-md">
+        <div className="modal-header">
+          <div>
+            <h3 style={{marginBottom:4}}>💸 Record Supplier Recovery</h3>
+            <div style={{fontSize:12,color:'var(--text3)'}}>
+              Overpaid amount recovery for Order {item.order_id} (PO: {item.internal_po_no || item.id})
+            </div>
+          </div>
+          <button className="btn-close" onClick={onClose}>✕</button>
+        </div>
+        <form onSubmit={handleSubmit} style={{padding:'16px 20px',display:'grid',gap:14}}>
+          <div style={{padding:'10px 14px',borderRadius:'var(--r-sm)',background:'#fffbeb',border:'1px solid #fde68a'}}>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'var(--amber,#d97706)',fontWeight:700}}>
+              <span>Supplier:</span>
+              <span>{item.supplier?.name || item.supplier_id}</span>
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'var(--amber,#d97706)',fontWeight:700,marginTop:4}}>
+              <span>Overpayment to Recover:</span>
+              <span style={{fontSize:14,fontFamily:'monospace'}}>₹{item.unsettled_amount}</span>
+            </div>
+          </div>
+
+          <div>
+            <label style={{fontSize:12,fontWeight:600,display:'block',marginBottom:4}}>Recovery Amount (₹)*</label>
+            <input
+              type="number"
+              step="0.01"
+              required
+              className="input"
+              value={amount}
+              onChange={e => setAmount(e.target.value)}
+              placeholder="Enter recovery amount"
+            />
+          </div>
+
+          <div>
+            <label style={{fontSize:12,fontWeight:600,display:'block',marginBottom:4}}>Recovery / Payment Method*</label>
+            <select className="input" value={method} onChange={e => setMethod(e.target.value)}>
+              <option value="Bank Transfer">Bank Transfer (Refund)</option>
+              <option value="Credit Note">Credit Note / Deduction</option>
+              <option value="UPI">UPI</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={{fontSize:12,fontWeight:600,display:'block',marginBottom:4}}>Reference / UTR / Credit Note No.*</label>
+            <input
+              type="text"
+              required
+              className="input"
+              value={ref}
+              onChange={e => setRef(e.target.value)}
+              placeholder="e.g. UTR12345678 or CN-001"
+            />
+          </div>
+
+          <div>
+            <label style={{fontSize:12,fontWeight:600,display:'block',marginBottom:4}}>Notes</label>
+            <textarea
+              className="input"
+              rows={2}
+              value={notes}
+              onChange={e => setNotes(e.target.value)}
+              placeholder="Reason / details of recovery"
+            />
+          </div>
+
+          <div style={{display:'flex',justifyContent:'flex-end',gap:10,marginTop:10}}>
+            <button type="button" className="btn btn-secondary" onClick={onClose} disabled={submitting}>
+              Cancel
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={submitting} style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
+              {submitting ? 'Recording…' : 'Confirm Recovery'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function CombinedPaymentHistory({ payments, onSelect }) {
   if (!payments.length) {
     return <div style={{color:'var(--text3)',fontSize:12,padding:16}}>No payments recorded yet.</div>;
@@ -1581,19 +2705,30 @@ function CombinedPaymentHistory({ payments, onSelect }) {
       {payments.slice(0,100).map(({ type, item: payment }) => {
         const isCustomer = type === 'customer';
         const currency = isCustomer ? (payment.currency || 'INR') : (payment.confirmed_currency || payment.currency || 'INR');
-        const amount = isCustomer
+        const rawAmount = isCustomer
           ? (parseFloat(payment.amount) || 0)
           : (payment.payment_kind === 'net'
             ? (parseFloat(payment.amount) || 0)
             : (parseFloat(payment.actual_amount) || parseFloat(payment.paid_amount) || parseFloat(payment.amount) || 0));
         const reference = payment.payment_ref || '—';
         const date = payment.payment_date || payment.paid_at || payment.recorded_at;
+        const notes = (payment.notes || '').trim();
+        const pmtType = payment.payment_type || '';
+        const isNegative = rawAmount < 0;
+        const isRefund = isCustomer && (isNegative || pmtType === 'refund' || notes.toLowerCase().includes('refund'));
+        const isTransferOut = isCustomer && (pmtType === 'transfer_out' || notes.toLowerCase().includes('transferred to'));
+        const isTransferIn = isCustomer && (reference.includes('(From ') || notes.toLowerCase().includes('from cancelled') || notes.toLowerCase().includes('credit from'));
+        const isSupplierRecovery = !isCustomer && (isNegative || notes.toLowerCase().includes('recovery') || notes.toLowerCase().includes('refund'));
+        const isCreditDrawdown = isCustomer && (payment.payment_method === 'Ciflux Credit Line' || reference.includes('CREDIT') || notes.toLowerCase().includes('ciflux credit'));
+        const isWalletPayment = isCustomer && (payment.payment_method === 'Customer Wallet' || reference.includes('WALLET-DEDUCT') || notes.toLowerCase().includes('customer wallet'));
+        const isWalletCredit = isCustomer && (notes.toLowerCase().includes('wallet balance') || notes.toLowerCase().includes('prepaid wallet'));
+
         return (
           <div key={`${type}-${payment.id}`} style={{padding:'10px 14px',borderRadius:'var(--r-sm)',
             border:'1px solid var(--border)',background:'var(--surface2)',fontSize:12,cursor:'pointer'}}
             onClick={()=>onSelect({type, item:payment})}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
-              <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                 <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,
                   background:isCustomer?'var(--accent-lt,#eff6ff)':'var(--teal-lt,#f0fdfa)',
                   color:isCustomer?'var(--accent)':'var(--teal,#0d9488)',fontWeight:700}}>
@@ -1602,8 +2737,49 @@ function CombinedPaymentHistory({ payments, onSelect }) {
                 <span className="mono" style={{fontWeight:700,color:isCustomer?'var(--accent)':'var(--teal,#0d9488)'}}>
                   {payment.order_id || payment.linked_order_id || (isCustomer ? '—' : (payment.internal_po_no || payment.supplier_order_id))}
                 </span>
+                {isRefund && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red,#dc2626)',fontWeight:800,border:'1px solid var(--red)'}}>
+                    ↩ CUSTOMER REFUND
+                  </span>
+                )}
+                {isTransferOut && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                    🔄 TRANSFERRED OUT
+                  </span>
+                )}
+                {isTransferIn && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'var(--purple-lt,#f5f3ff)',color:'var(--purple,#7c3aed)',fontWeight:800,border:'1px solid var(--purple,#7c3aed)'}}>
+                    🔄 TRANSFERRED IN
+                  </span>
+                )}
+                {isCreditDrawdown && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'rgba(99,102,241,0.1)',color:'#6366f1',fontWeight:800,border:'1px solid #6366f1'}}>
+                    💳 CIFLUX CREDIT
+                  </span>
+                )}
+                {isWalletPayment && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'rgba(22,163,74,0.1)',color:'#16a34a',fontWeight:800,border:'1px solid #16a34a'}}>
+                    💰 WALLET PAID
+                  </span>
+                )}
+                {isWalletCredit && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'rgba(22,163,74,0.1)',color:'#16a34a',fontWeight:800,border:'1px solid #16a34a'}}>
+                    💰 WALLET DEPOSIT
+                  </span>
+                )}
+                {isSupplierRecovery && (
+                  <span style={{fontSize:10,padding:'2px 7px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                    ↩ SUPPLIER RECOVERY
+                  </span>
+                )}
               </div>
-              <span style={{fontWeight:800,color:'var(--green)',fontSize:14}}>{fmtM(amount, currency)}</span>
+              <span style={{
+                fontWeight:800,
+                color:(isRefund || isTransferOut || isNegative) ? 'var(--red,#dc2626)' : isSupplierRecovery ? 'var(--amber,#d97706)' : 'var(--green)',
+                fontSize:14
+              }}>
+                {isNegative ? `-${fmtM(Math.abs(rawAmount), currency)}` : (isRefund || isTransferOut) ? `-${fmtM(rawAmount, currency)}` : fmtM(rawAmount, currency)}
+              </span>
             </div>
             <div style={{color:'var(--text2)'}}>
               {isCustomer ? (payment.customer_name || payment.customer_id || 'Customer') : (payment.supplier_name || payment.supplier_id || 'Supplier')}
@@ -1612,6 +2788,11 @@ function CombinedPaymentHistory({ payments, onSelect }) {
             {(payment.po_number || payment.internal_po_no || payment.supplier_ref) && (
               <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
                 {isCustomer ? `Customer PO: ${payment.po_number || '—'}` : `Supplier PO: ${payment.internal_po_no || payment.supplier_ref || '—'}`}
+              </div>
+            )}
+            {notes && (
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:3,fontStyle:'italic'}}>
+                Note: {notes}
               </div>
             )}
           </div>
@@ -1641,6 +2822,8 @@ export default function FinancePage() {
   const [supplierNetReleaseConfirm, setSupplierNetReleaseConfirm] = useState(null); // supplier net order item
   const [returnConfirm, setReturnConfirm] = useState(null); // { type, item }
   const [returningId, setReturningId] = useState(null);
+  const [settleModal, setSettleModal] = useState(null);
+  const [supplierRecoverModal, setSupplierRecoverModal] = useState(null);
   const [search, setSearch]   = useState('');
   const [historyDetail, setHistoryDetail] = useState(null);
   const [historyFilter, setHistoryFilter] = useState({ query:'', method:'all', from:'', to:'' });
@@ -1650,9 +2833,12 @@ export default function FinancePage() {
     onSuccess: () => {
       qc.invalidateQueries(['finance-customer']);
       qc.invalidateQueries(['finance-history']);
-      toast.success('✅ Payment released — order moved to procurement');
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['order-detail']);
+      qc.invalidateQueries(['summary']);
+      qc.invalidateQueries(['procurement-bin']);
+      toast.success('✅ Customer payment released — order ready for Procurement');
       setReleaseConfirm(null);
-      setTab('history');
     },
     onError: e => toast.error(e.response?.data?.error || 'Release failed'),
   });
@@ -1782,19 +2968,27 @@ export default function FinancePage() {
 
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
-  const custAdvance = custQueue.filter(o =>
-    (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
-    (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
-    o.customer_payment_status !== 'paid' &&
-    (o.customer_payment_status === 'payment_recorded' || o.status === 'payment_approval' || (Number(o.balance_due) || 0) > 0.009)
-  );
+  const custAdvance = custQueue.filter(o => {
+    if (o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) {
+      return isAdvanceTerms(o.payment_terms) || !isNetTerms(o.payment_terms);
+    }
+    return (
+      (o.status === 'payment_approval' || o.customer_payment_status === 'payment_recorded' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
+      (o.status === 'payment_approval' || isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) &&
+      o.customer_payment_status !== 'paid' &&
+      (o.customer_payment_status === 'payment_recorded' || o.status === 'payment_approval' || (Number(o.balance_due) || 0) > 0.009)
+    );
+  });
   const custNet     = custQueue.filter(o => {
+    if ((o.settlement_status === 'pending' || (o.status === 'cancelled' && o.settlement_status === 'pending')) && isNetTerms(o.payment_terms)) {
+      return true;
+    }
     if (o.status === 'payment_approval') return false;
     if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) return false;
     if (!isNetTerms(o.payment_terms)) return false;
     if (o.customer_payment_status === 'paid') return false;
     const bal = o.balance_due !== undefined ? Number(o.balance_due) : Math.max(0, (Number(o.order_total || o.total_amount || 0)) - Number(o.total_paid || 0));
-    return bal > 0.009;
+    return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const custOther   = custQueue.filter(o => {
     if (o.status === 'payment_approval') return false;
@@ -1802,9 +2996,10 @@ export default function FinancePage() {
     if (!o.payment_terms) return false;
     if (o.customer_payment_status === 'paid') return false;
     const bal = o.balance_due !== undefined ? Number(o.balance_due) : Math.max(0, (Number(o.order_total || o.total_amount || 0)) - Number(o.total_paid || 0));
-    return bal > 0.009;
+    return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const supAdvance  = (supQueue.advance || []).filter(r => {
+    if (r.is_recovery_pending || r.settlement_status === 'pending') return true;
     if (r.status === 'paid') return false;
     const releasePending = r.release_pending === 1 || r.release_pending === true;
     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
@@ -1815,6 +3010,7 @@ export default function FinancePage() {
     return true;
   });
   const supNet      = (supQueue.net || []).filter(r => {
+    if (r.is_recovery_pending || r.settlement_status === 'pending') return true;
     if (r.status === 'paid') return false;
     const total = parseFloat(r.confirmed_price || r.total_amount || 0);
     const paid = parseFloat(r.net_total_paid || 0);
@@ -1975,10 +3171,28 @@ export default function FinancePage() {
                 <th>PI Status</th><th>Order Status</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
-                {filterCust(custAdvance).map(o=>(
+                {filterCust(custAdvance).map(o=>{
+                  const isHold = Boolean(o.is_on_hold || o.status === 'hold');
+                  return (
                   <tr key={o.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: o.id, mode:'customer' })}>
-                    <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
-                    <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
+                    <td>
+                      <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span>
+                    </td>
+                    <td style={{fontWeight:500}}>
+                      <div>{o.customer?.name||o.customer_id}</div>
+                      <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:2}}>
+                        {Boolean(o.customer_credit_enabled) && (
+                          <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'rgba(99,102,241,0.1)',color:'#6366f1',fontWeight:600}}>
+                            💳 Limit: ₹{((Number(o.customer_credit_limit)||1000000)/100000).toFixed(0)}L
+                          </span>
+                        )}
+                        {Number(o.customer_wallet_balance) > 0 && (
+                          <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'rgba(22,163,74,0.1)',color:'#16a34a',fontWeight:600}}>
+                            💰 Wallet: ₹{Number(o.customer_wallet_balance).toLocaleString('en-IN')}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td style={{fontSize:11}}>
                       <div className="mono" style={{fontWeight:700}}>{o.po_number||'—'}</div>
                       <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>Customer PO</div>
@@ -1991,47 +3205,79 @@ export default function FinancePage() {
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
                       color:o.customer_payment_status==='paid'?'var(--green)':o.balance_due>0?'var(--red)':'var(--text3)'}}>
                       {o.customer_payment_status==='paid' ? '✅ Paid' : fmtM(o.balance_due)}
+                      {o.credit_badge && (
+                        <div style={{marginTop:3}}>
+                          <CreditCountdownBadge badge={o.credit_badge} daysRemaining={o.credit_days_remaining} />
+                        </div>
+                      )}
                     </td>
                     <td>
                       {o.pi_no
                         ? <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt)',color:'var(--green)',fontWeight:600}}>✅ {o.pi_no}</span>
                         : <span style={{fontSize:11,color:'var(--text3)'}}>Not generated</span>}
                     </td>
-                    <td><StatusBadge s={o.status}/></td>
+                    <td>
+                      {o.status === 'cancelled' ? (
+                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red)',fontWeight:800,border:'1px solid var(--red)'}}>
+                          🚫 CANCELLED
+                        </span>
+                      ) : o.settlement_status === 'pending' ? (
+                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                          ⚠️ EXCESS PAID
+                        </span>
+                      ) : (
+                        isHold ? <HoldBadge /> : <StatusBadge s={o.status}/>
+                      )}
+                    </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
-                        {o.total_paid <= 0 && o.customer_payment_status !== 'payment_recorded' && (
+                        {o.status === 'cancelled' || o.settlement_status === 'pending' ? (
                           <button className="btn btn-xs"
-                            onClick={()=>setReturnConfirm({type:'customer',item:o})}
-                            disabled={returningId===o.id}
-                            style={{fontSize:11,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
-                            {returningId===o.id ? 'Sending…' : '↩ Send to Order'}
+                            style={{fontSize:11,background:'var(--red,#dc2626)',color:'#fff',borderColor:'var(--red,#dc2626)',fontWeight:700}}
+                            onClick={()=>setSettleModal(o)}>
+                            💳 Settle Amount {o.unsettled_amount > 0 ? `(${fmtM(o.unsettled_amount)})` : ''}
                           </button>
-                        )}
-                        <button className="btn btn-xs" onClick={()=>handleGeneratePI(o)}
-                          style={{fontSize:11}}>📄 {o.pi_no?'Re-print PI':'Generate PI'}</button>
-                        {o.customer_payment_status === 'payment_recorded' ? (
-                          <>
-                            <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
-                              style={{fontSize:11}}>👁 View</button>
-                            <button className="btn btn-xs"
-                              style={{fontSize:11,background:'var(--green)',color:'#fff',
-                                borderColor:'var(--green)',fontWeight:600}}
-                              onClick={()=>setReleaseConfirm(o)}>
-                              🚀 Release
-                            </button>
-                          </>
                         ) : (
-                          <button className="btn btn-xs btn-primary"
-                            onClick={()=>setPayModal({item:o,type:'customer'})}
-                            disabled={!o.pi_no || o.balance_due <= 0}
-                            title={!o.pi_no ? 'Generate PI first before recording payment' : o.balance_due <= 0 ? 'Order is fully paid — use History to view payments' : ''}
-                            style={{fontSize:11,opacity:(o.pi_no && o.balance_due > 0)?1:0.45,cursor:(o.pi_no && o.balance_due > 0)?'pointer':'not-allowed'}}>💳 Record Payment</button>
+                          <>
+                            {o.total_paid <= 0 && o.customer_payment_status !== 'payment_recorded' && (
+                              <button className="btn btn-xs"
+                                onClick={()=>setReturnConfirm({type:'customer',item:o})}
+                                disabled={returningId===o.id || isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                style={{fontSize:11,color:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
+                                {returningId===o.id ? 'Sending…' : '↩ Send to Order'}
+                              </button>
+                            )}
+                            <button className="btn btn-xs" onClick={()=>handleGeneratePI(o)}
+                              disabled={isHold}
+                              title={isHold ? 'Order is on hold' : ''}
+                              style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>📄 {o.pi_no?'Re-print PI':'Generate PI'}</button>
+                            {o.customer_payment_status === 'payment_recorded' ? (
+                              <>
+                                <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
+                                  style={{fontSize:11}}>👁 View</button>
+                                <button className="btn btn-xs"
+                                  disabled={isHold}
+                                  title={isHold ? 'Order is on hold' : ''}
+                                  style={{fontSize:11,background:'var(--green)',color:'#fff',
+                                    borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
+                                  onClick={()=>setReleaseConfirm(o)}>
+                                  🚀 Release
+                                </button>
+                              </>
+                            ) : (
+                              <button className="btn btn-xs btn-primary"
+                                onClick={()=>setPayModal({item:o,type:'customer'})}
+                                disabled={!o.pi_no || o.balance_due <= 0 || isHold}
+                                title={isHold ? 'Order is on hold' : !o.pi_no ? 'Generate PI first before recording payment' : o.balance_due <= 0 ? 'Order is fully paid — use History to view payments' : ''}
+                                style={{fontSize:11,opacity:(o.pi_no && o.balance_due > 0 && !isHold)?1:0.45,cursor:(o.pi_no && o.balance_due > 0 && !isHold)?'pointer':'not-allowed'}}>💳 Record Payment</button>
+                            )}
+                          </>
                         )}
                       </div>
                     </td>
                   </tr>
-                ))}
+                );})}
               </tbody>
             </table>
           )}
@@ -2060,10 +3306,27 @@ export default function FinancePage() {
               <tbody>
                 {filterCust([...custNet,...custOther]).map(o=>{
                   const daysLeft = o.computed_due_date ? daysDiff(o.computed_due_date) : null;
+                  const isHold = Boolean(o.is_on_hold || o.status === 'hold');
                   return (
                     <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: o.id, mode:'customer' })}>
-                      <td><span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span></td>
-                      <td style={{fontWeight:500}}>{o.customer?.name||o.customer_id}</td>
+                      <td>
+                        <span className="mono" style={{fontWeight:700,color:'var(--accent)'}}>{o.id}</span>
+                      </td>
+                      <td style={{fontWeight:500}}>
+                        <div>{o.customer?.name||o.customer_id}</div>
+                        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginTop:2}}>
+                          {Boolean(o.customer_credit_enabled) && (
+                            <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'rgba(99,102,241,0.1)',color:'#6366f1',fontWeight:600}}>
+                              💳 Limit: ₹{((Number(o.customer_credit_limit)||1000000)/100000).toFixed(0)}L
+                            </span>
+                          )}
+                          {Number(o.customer_wallet_balance) > 0 && (
+                            <span style={{fontSize:10,padding:'1px 5px',borderRadius:4,background:'rgba(22,163,74,0.1)',color:'#16a34a',fontWeight:600}}>
+                              💰 Wallet: ₹{Number(o.customer_wallet_balance).toLocaleString('en-IN')}
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td style={{fontSize:11}}>
                         <div className="mono" style={{fontWeight:700}}>{o.po_number||'—'}</div>
                         <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>Customer PO</div>
@@ -2073,6 +3336,11 @@ export default function FinancePage() {
                       <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,
                         color:o.balance_due<=0?'var(--green)':'var(--text)'}}>
                         {o.balance_due<=0?'✅ Settled':fmtM(o.balance_due)}
+                        {o.credit_badge && (
+                          <div style={{marginTop:3}}>
+                            <CreditCountdownBadge badge={o.credit_badge} daysRemaining={o.credit_days_remaining} />
+                          </div>
+                        )}
                       </td>
                       <td>
                         {o.computed_due_date ? (
@@ -2082,19 +3350,47 @@ export default function FinancePage() {
                           </div>
                         ) : '—'}
                       </td>
-                      <td><StatusBadge s={o.customer_payment_status||'pending'}/></td>
+                      <td>
+                        {o.status === 'cancelled' ? (
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red)',fontWeight:800,border:'1px solid var(--red)'}}>
+                            🚫 CANCELLED
+                          </span>
+                        ) : o.settlement_status === 'pending' ? (
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                            ⚠️ EXCESS PAID
+                          </span>
+                        ) : (
+                          isHold ? <HoldBadge /> : <StatusBadge s={o.customer_payment_status||'pending'}/>
+                        )}
+                      </td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                        {o.customer_payment_status === 'payment_recorded' ? (
+                        {o.status === 'cancelled' || o.settlement_status === 'pending' ? (
                           <button className="btn btn-xs"
-                            style={{fontSize:11,background:'var(--green)',color:'#fff',
-                              borderColor:'var(--green)',fontWeight:600}}
-                            onClick={()=>setReleaseConfirm(o)}>
-                            🚀 Release
+                            style={{fontSize:11,background:'var(--red,#dc2626)',color:'#fff',borderColor:'var(--red,#dc2626)',fontWeight:700}}
+                            onClick={()=>setSettleModal(o)}>
+                            💳 Settle Amount {o.unsettled_amount > 0 ? `(${fmtM(o.unsettled_amount)})` : ''}
                           </button>
-                        ) : o.balance_due > 0 && (
-                          <button className="btn btn-xs btn-primary"
-                            onClick={()=>setPayModal({item:o,type:'customer'})}
-                            style={{fontSize:11}}>💳 Record Payment</button>
+                        ) : (
+                          o.customer_payment_status === 'payment_recorded' ? (
+                            <>
+                              <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
+                                style={{fontSize:11,marginRight:4}}>👁 View</button>
+                              <button className="btn btn-xs"
+                                disabled={isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                style={{fontSize:11,background:'var(--green)',color:'#fff',
+                                  borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
+                                onClick={()=>setReleaseConfirm(o)}>
+                                🚀 Release
+                              </button>
+                            </>
+                          ) : o.balance_due > 0 && (
+                            <button className="btn btn-xs btn-primary"
+                              disabled={isHold}
+                              title={isHold ? 'Order is on hold' : ''}
+                              onClick={()=>setPayModal({item:o,type:'customer'})}
+                              style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>💳 Record Payment</button>
+                          )
                         )}
                       </td>
                     </tr>
@@ -2125,11 +3421,12 @@ export default function FinancePage() {
                 <th style={{textAlign:'right'}}>Amount Due</th>
                 <th style={{textAlign:'right'}}>Paid</th>
                 <th style={{textAlign:'right'}}>Balance Due</th>
-                <th>Bank Details</th><th style={{textAlign:'right'}}>Actions</th>
+                <th>Bank Details</th><th>Status</th><th style={{textAlign:'right'}}>Actions</th>
               </tr></thead>
               <tbody>
                 {filterSup(supAdvance).map(r=>(
                   (() => {
+                    const isHold = Boolean(r.is_on_hold || r.order_status === 'hold' || r.status === 'hold');
                     const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                     const hasBank = isSupplierBankReady(fullEntity);
                     const paid = parseFloat(r.paid_amount)||0;
@@ -2139,18 +3436,13 @@ export default function FinancePage() {
                     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
                       ? parseFloat(r.full_balance_due)||0
                       : Math.max(0, (parseFloat(r.amount)||0) - paid);
-                    // Mirror customer-advance flow:
-                    //  • payment recorded but NOT yet released (still blocked) → show Release
-                    //  • already released but balance remains → show Record Payment for the rest
-                    //  • (fully paid rows leave the queue entirely)
-                    // A just-recorded payment awaits release (release_pending=1) → show Release.
-                    // After release it's cleared → show Record Payment for any remaining balance.
-                    // Uses a Finance-only flag, NOT payment_blocked (which gates Procurement).
                     const releasePending = r.release_pending === 1 || r.release_pending === true;
                     const canReleaseSupplier = paid > 0 && releasePending;
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
-                    <td><span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span></td>
+                    <td>
+                      <span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span>
+                    </td>
                     <td style={{fontWeight:500}}>
                       {displayName}
                       {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
@@ -2167,9 +3459,9 @@ export default function FinancePage() {
                         </a> : null;
                       })()}
                     </td>
-                    <td><span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--red-lt,#fef2f2)',color:'var(--red)',fontWeight:700}}>
-                      {r.payment_terms||'Advance'}
-                    </span></td>
+                    <td>
+                      <TermsBadge terms={r.payment_terms||'Advance'} />
+                    </td>
                     <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,color:'var(--red)',fontSize:13}}>
                       {fmtM(dueNow, r.currency)}
                     </td>
@@ -2186,40 +3478,62 @@ export default function FinancePage() {
                       {fullEntity?.bank_swift && <div style={{color:'var(--text3)'}}>{fullEntity.bank_swift}</div>}
                       {!hasBank && <span style={{color:'var(--text3)'}}>No bank details</span>}
                     </td>
+                    <td>
+                      {r.is_recovery_pending || r.settlement_status === 'pending' ? (
+                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                          ⚠️ OVERPAID
+                        </span>
+                      ) : isHold ? <HoldBadge /> : <StatusBadge s={r.order_status || r.status || 'pending'} />}
+                    </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
-                        {paid <= 0 && !r.payment_ref && (
+                        {r.is_recovery_pending || r.settlement_status === 'pending' ? (
                           <button className="btn btn-xs"
-                            onClick={()=>setReturnConfirm({type:'supplier',item:r})}
-                            disabled={returningId===r.id}
-                            style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
-                            {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
-                          </button>
-                        )}
-                        {!hasBank && (
-                          <button className="btn btn-xs"
-                            onClick={()=>{
-                              if (entityType==='customer') setCustomerBankModal(fullEntity || { id: r.supplier_id });
-                              else setBankModal({ supplier: fullEntity || { id: r.supplier_id, name: displayName, type: 'domestic' } });
-                            }}
-                            style={{fontSize:11}}>
-                            🏦 Add Bank Details
-                          </button>
-                        )}
-                        {canReleaseSupplier ? (
-                          <button className="btn btn-xs"
-                            onClick={()=>setSupplierReleaseConfirm({...r, _resolvedName: displayName})}
-                            style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700}}>
-                            🚀 Release
+                            style={{fontSize:11,background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
+                            onClick={()=>setSupplierRecoverModal(r)}>
+                            💸 Recover Amount ({fmtM(r.unsettled_amount)})
                           </button>
                         ) : (
-                          <button className="btn btn-xs btn-primary"
-                            onClick={()=>setPayModal({item:{...r, _resolvedName: displayName},type:'supplier-advance'})}
-                            disabled={!hasBank || dueNow <= 0}
-                            style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)',opacity:(hasBank && dueNow > 0)?1:0.55,cursor:(hasBank && dueNow > 0)?'pointer':'not-allowed'}}
-                            title={!hasBank ? 'Add bank details first' : dueNow <= 0 ? 'Release this PO to Procurement' : ''}>
-                            💸 Record Payment
-                          </button>
+                          <>
+                            {paid <= 0 && !r.payment_ref && (
+                              <button className="btn btn-xs"
+                                onClick={()=>setReturnConfirm({type:'supplier',item:r})}
+                                disabled={returningId===r.id || isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
+                                {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
+                              </button>
+                            )}
+                            {!hasBank && (
+                              <button className="btn btn-xs"
+                                disabled={isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                onClick={()=>{
+                                  if (entityType==='customer') setCustomerBankModal(fullEntity || { id: r.supplier_id });
+                                  else setBankModal({ supplier: fullEntity || { id: r.supplier_id, name: displayName, type: 'domestic' } });
+                                }}
+                                style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
+                                🏦 Add Bank Details
+                              </button>
+                            )}
+                            {canReleaseSupplier ? (
+                              <button className="btn btn-xs"
+                                disabled={isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                onClick={()=>setSupplierReleaseConfirm({...r, _resolvedName: displayName})}
+                                style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
+                                🚀 Release
+                              </button>
+                            ) : (
+                              <button className="btn btn-xs btn-primary"
+                                onClick={()=>setPayModal({item:{...r, _resolvedName: displayName},type:'supplier-advance'})}
+                                disabled={!hasBank || dueNow <= 0 || isHold}
+                                style={{fontSize:11,background:'var(--green)',borderColor:'var(--green)',opacity:(hasBank && dueNow > 0 && !isHold)?1:0.55,cursor:(hasBank && dueNow > 0 && !isHold)?'pointer':'not-allowed'}}
+                                title={isHold ? 'Order is on hold' : !hasBank ? 'Add bank details first' : dueNow <= 0 ? 'Release this PO to Procurement' : ''}>
+                                💸 Record Payment
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </td>
@@ -2255,6 +3569,7 @@ export default function FinancePage() {
               </tr></thead>
               <tbody>
                 {filterSup(supNet).map(r=>{
+                  const isHold = Boolean(r.is_on_hold || r.order_status === 'hold' || r.status === 'hold');
                   const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
                   const daysLeft = r.payment_due_date ? daysDiff(r.payment_due_date) : null;
                   const isPaid = r.status === 'paid';
@@ -2264,7 +3579,9 @@ export default function FinancePage() {
                   const balance = Math.max(0, total - paid);
                   return (
                     <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.id })}>
-                      <td><span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span></td>
+                      <td>
+                        <span className="mono" style={{fontWeight:800,color:'var(--accent)'}}>{r.order_id}</span>
+                      </td>
                       <td style={{fontWeight:500}}>
                         {displayName}
                         {entityType==='customer'&&<span style={{marginLeft:4,fontSize:10,padding:'1px 5px',borderRadius:99,background:'var(--teal-lt,#f0fdfa)',color:'var(--teal,#0d9488)',fontWeight:700}}>Customer</span>}
@@ -2289,28 +3606,32 @@ export default function FinancePage() {
                           </div>
                         ) : '—'}
                       </td>
-                      <td><StatusBadge s={r.status||'pending'}/></td>
+                      <td>{isHold ? <HoldBadge /> : <StatusBadge s={r.status||'pending'}/>}</td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                         <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         {paid <= 0 && r.status === 'draft' && (
                           <button className="btn btn-xs"
                             onClick={()=>setReturnConfirm({type:'supplier-net',item:r})}
-                            disabled={returningId===r.id}
-                            style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700}}>
+                            disabled={returningId===r.id || isHold}
+                            title={isHold ? 'Order is on hold' : ''}
+                            style={{fontSize:11,background:'var(--accent)',color:'#fff',borderColor:'var(--accent)',fontWeight:700,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
                             {returningId===r.id ? 'Sending…' : '↩ Send to Procurement'}
                           </button>
                         )}
                         {r.status === 'net_payment_recorded' ? (
                           <button className="btn btn-xs"
                             onClick={()=>setSupplierNetReleaseConfirm({...r, _resolvedName: displayName})}
-                            disabled={supplierNetReleaseMutation.isPending}
-                            style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700}}>
+                            disabled={supplierNetReleaseMutation.isPending || isHold}
+                            title={isHold ? 'Order is on hold' : ''}
+                            style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
                             🚀 Release
                           </button>
                         ) : balance > 0 ? (
                           <button className="btn btn-xs btn-primary"
+                            disabled={isHold}
+                            title={isHold ? 'Order is on hold' : ''}
                             onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
-                            style={{fontSize:11}}>
+                            style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
                             {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
                           </button>
                         ) : null}
@@ -2391,6 +3712,31 @@ export default function FinancePage() {
           onSaved={()=>{ qc.invalidateQueries(['finance-customer']); qc.invalidateQueries(['finance-supplier']); }}
         />
       )}
+      {settleModal && (
+        <SettleAmountModal
+          order={settleModal}
+          onClose={()=>setSettleModal(null)}
+          onSettled={()=>{
+            qc.invalidateQueries(['finance-customer']);
+            qc.invalidateQueries(['finance-history']);
+            qc.invalidateQueries(['orders']);
+            setSettleModal(null);
+          }}
+        />
+      )}
+      {supplierRecoverModal && (
+        <SupplierRecoverModal
+          item={supplierRecoverModal}
+          onClose={()=>setSupplierRecoverModal(null)}
+          onSaved={()=>{
+            qc.invalidateQueries(['finance-supplier']);
+            qc.invalidateQueries(['finance-history']);
+            qc.invalidateQueries(['orders']);
+            qc.invalidateQueries(['procurement-bin']);
+            setSupplierRecoverModal(null);
+          }}
+        />
+      )}
       {viewPayModal && (
         <ViewPaymentModal
           item={viewPayModal.item}
@@ -2453,7 +3799,9 @@ export default function FinancePage() {
                 Amount Paid: <strong style={{color:'var(--green)'}}>{fmtM(releaseConfirm.total_paid)}</strong>
               </div>
               <div style={{fontSize:12,color:'var(--text3)',marginTop:10}}>
-                This will mark the payment as fully released and move the order to procurement.
+                {isAdvanceTerms(releaseConfirm.payment_terms) || isPartialAdvance(releaseConfirm.payment_terms)
+                  ? 'This will mark the payment as released and move the order to Procurement.'
+                  : 'This will mark the payment as released and complete the payment in History.'}
               </div>
             </div>
             <div className="modal-footer">

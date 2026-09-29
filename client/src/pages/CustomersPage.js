@@ -1,5 +1,4 @@
-// client/src/pages/CustomersPage.js  v3
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
@@ -340,6 +339,7 @@ export function CustomerModal({ customer, onClose, onSaved }) {
     bank_country:'India', bank_currency:'INR',
     contact_persons:[], remarks:'',
     allow_partial_shipment: 0, shipment_notes: '',
+    credit_enabled: 0, credit_limit: 1000000, credit_days: 30,
   };
 
   const [form, setForm] = useState(() => {
@@ -351,7 +351,15 @@ export function CustomerModal({ customer, onClose, onSaved }) {
       if (typeof p === 'string') p = JSON.parse(p);
       sa = Array.isArray(p) ? p : [];
     } catch(_){}
-    return {...blank,...customer, contact_persons:cp, shipping_addresses:sa};
+    return {
+      ...blank,
+      ...customer,
+      credit_enabled: customer.credit_enabled !== undefined && customer.credit_enabled !== null ? (customer.credit_enabled ? 1 : 0) : 0,
+      credit_limit: customer.credit_limit !== undefined && customer.credit_limit !== null ? parseFloat(customer.credit_limit) : 1000000,
+      credit_days: customer.credit_days !== undefined && customer.credit_days !== null ? parseInt(customer.credit_days) : 30,
+      contact_persons:cp,
+      shipping_addresses:sa
+    };
   });
 
   // Safety: always keep shipping_addresses as array in form
@@ -487,8 +495,14 @@ export function CustomerModal({ customer, onClose, onSaved }) {
     { key:'bank',     label:'Bank Details',     done: !!form.bank_account_no, optional:true },
     { key:'remarks',  label:'Remarks',          done: !!form.remarks, optional:true },
   ];
-  const stepReachable = { basics:true, details:basicsDone, address:basicsDone&&detailsDone,
-    contacts:basicsDone&&detailsDone&&addressDone, bank:basicsDone&&detailsDone&&addressDone, remarks:basicsDone&&detailsDone&&addressDone };
+  const stepReachable = {
+    basics:true,
+    details:basicsDone,
+    address:basicsDone&&detailsDone,
+    contacts:basicsDone&&detailsDone&&addressDone,
+    bank:basicsDone&&detailsDone&&addressDone,
+    remarks:basicsDone&&detailsDone&&addressDone,
+  };
   const canReach = (key) => !isNew || stepReachable[key];
   const stepIdx = STEPS.findIndex(s=>s.key===tab);
   const isLastStep = stepIdx === STEPS.length-1;
@@ -883,6 +897,8 @@ export function CustomerModal({ customer, onClose, onSaved }) {
             </div>
           )}
 
+
+
           </div>{/* end tab scroll wrapper */}
         </div>
         <div className="modal-footer">
@@ -910,13 +926,1098 @@ export function CustomerModal({ customer, onClose, onSaved }) {
   );
 }
 
+// ── Credit Countdown Badge ──────────────────────────────────────────────────
+export function CreditCountdownBadge({ badge, daysRemaining }) {
+  if (!badge) return null;
+  if (badge === 'overdue') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#fef2f2',color:'#b91c1c',border:'1px solid #f87171'
+      }}>
+        ⚠️ OVERDUE by {Math.abs(daysRemaining)}d
+      </span>
+    );
+  }
+  if (badge === 'due_today') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#fff1f2',color:'#e11d48',border:'1px solid #fb7185'
+      }}>
+        🚨 DUE TODAY
+      </span>
+    );
+  }
+  if (badge === '1_day') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#fff7ed',color:'#c2410c',border:'1px solid #fb923c'
+      }}>
+        ⏳ Due Tomorrow (1d)
+      </span>
+    );
+  }
+  if (badge === '2_days') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#fffbeb',color:'#b45309',border:'1px solid #fcd34d'
+      }}>
+        ⏳ Due in 2 days
+      </span>
+    );
+  }
+  if (badge === '3_days') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#fefce8',color:'#a16207',border:'1px solid #fde047'
+      }}>
+        ⏳ Due in 3 days
+      </span>
+    );
+  }
+  if (badge === 'paid') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:700,background:'#f0fdf4',color:'#15803d',border:'1px solid #86efac'
+      }}>
+        ✅ Paid On-Time
+      </span>
+    );
+  }
+  return (
+    <span style={{
+      display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+      fontSize:11,fontWeight:600,background:'#f8fafc',color:'#475569',border:'1px solid #cbd5e1'
+    }}>
+      📅 Due in {daysRemaining}d
+    </span>
+  );
+}
+
+// ── Repay Credit Modal ────────────────────────────────────────────────────────
+function RepayCreditModal({ customer, drawdown, onClose, onSuccess }) {
+  const qc = useQueryClient();
+  const [amount, setAmount] = useState(drawdown ? String(drawdown.balance_due) : '');
+  const [method, setMethod] = useState('Bank Transfer');
+  const [ref, setRef] = useState('');
+  const [notes, setNotes] = useState('');
+  const [receiptFile, setReceiptFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      let receipt_file_url = '';
+      if (receiptFile) {
+        setUploading(true);
+        const fd = new FormData();
+        fd.append('file', receiptFile);
+        fd.append('entity_type', 'customer_credit');
+        fd.append('entity_id', customer.id);
+        const res = await api.post('/files', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+        receipt_file_url = res.data?.download_url || '';
+        setUploading(false);
+      }
+      return api.post(`/customers/${customer.id}/credit-repay`, {
+        amount: parseFloat(amount),
+        payment_method: method,
+        payment_ref: ref.trim(),
+        receipt_file_url,
+        drawdown_id: drawdown?.id || null,
+        notes: notes.trim(),
+      });
+    },
+    onSuccess: () => {
+      toast.success('Repayment recorded & credit limit restored');
+      qc.invalidateQueries(['customer-credit-profile', customer.id]);
+      qc.invalidateQueries(['customers']);
+      qc.invalidateQueries(['finance-customer']);
+      onSuccess && onSuccess();
+      onClose();
+    },
+    onError: (e) => {
+      setUploading(false);
+      toast.error(e?.response?.data?.error || 'Repayment failed');
+    }
+  });
+
+  return (
+    <div className="overlay" style={{zIndex: 1100}}>
+      <div className="modal" style={{maxWidth: 480, width: '92vw'}}>
+        <div className="modal-header">
+          <h2>💵 Record Credit Repayment</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{padding:'10px 14px',borderRadius:8,background:'var(--accent-lt)',border:'1px solid var(--accent)33',fontSize:12}}>
+            <strong>Customer:</strong> {customer.name}<br/>
+            {drawdown && <span><strong>Target Order:</strong> {drawdown.order_id} · Due: ₹{Number(drawdown.balance_due).toLocaleString('en-IN')}</span>}
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Repayment Amount (₹) <span className="req">*</span></label>
+            <input type="number" step="0.01" className="input" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Payment Method <span className="req">*</span></label>
+            <select className="input" value={method} onChange={e=>setMethod(e.target.value)}>
+              <option value="Bank Transfer">Bank Transfer (NEFT/RTGS/IMPS)</option>
+              <option value="UPI">UPI</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Cash Deposit">Cash Deposit</option>
+            </select>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Bank UTR / Transaction Reference <span className="req">*</span></label>
+            <input className="input" value={ref} onChange={e=>setRef(e.target.value)} placeholder="e.g. UTR12345678" />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Proof Receipt (Optional)</label>
+            <input type="file" className="input" onChange={e=>setReceiptFile(e.target.files?.[0]||null)} />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Notes / Remarks</label>
+            <input className="input" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="e.g. Received via HDFC corporate account" />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            disabled={!parseFloat(amount) || !ref.trim() || mutation.isPending || uploading}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending || uploading ? 'Recording…' : '✅ Confirm Repayment'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Wallet Deposit Modal ──────────────────────────────────────────────────────
+function WalletDepositModal({ customer, onClose, onSuccess }) {
+  const qc = useQueryClient();
+  const [amount, setAmount] = useState('');
+  const [method, setMethod] = useState('Bank Transfer');
+  const [ref, setRef] = useState('');
+  const [notes, setNotes] = useState('');
+
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/customers/${customer.id}/wallet-deposit`, {
+      amount: parseFloat(amount),
+      payment_method: method,
+      payment_ref: ref.trim(),
+      notes: notes.trim(),
+    }),
+    onSuccess: () => {
+      toast.success('Funds deposited to customer wallet');
+      qc.invalidateQueries(['customer-credit-profile', customer.id]);
+      qc.invalidateQueries(['customers']);
+      onSuccess && onSuccess();
+      onClose();
+    },
+    onError: e => toast.error(e?.response?.data?.error || 'Deposit failed')
+  });
+
+  return (
+    <div className="overlay" style={{zIndex: 1100}}>
+      <div className="modal" style={{maxWidth: 460, width: '92vw'}}>
+        <div className="modal-header">
+          <h2>➕ Deposit Funds to Customer Wallet</h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{padding:'10px 14px',borderRadius:8,background:'rgba(22,163,74,0.1)',border:'1px solid rgba(22,163,74,0.25)',fontSize:12}}>
+            <strong>Customer:</strong> {customer.name}<br/>
+            <span>Prepaid advance funds deposited here can be used by the customer for future orders.</span>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Deposit Amount (₹) <span className="req">*</span></label>
+            <input type="number" step="0.01" className="input" value={amount} onChange={e=>setAmount(e.target.value)} placeholder="0.00" />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Payment Method <span className="req">*</span></label>
+            <select className="input" value={method} onChange={e=>setMethod(e.target.value)}>
+              <option value="Bank Transfer">Bank Transfer (NEFT/RTGS/IMPS)</option>
+              <option value="UPI">UPI</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Advance Settlement">Advance Settlement</option>
+            </select>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Bank UTR / Ref <span className="req">*</span></label>
+            <input className="input" value={ref} onChange={e=>setRef(e.target.value)} placeholder="e.g. UTR98765432" />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Notes / Remarks</label>
+            <input className="input" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="e.g. Advance deposit for upcoming bulk purchase" />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            style={{background:'var(--green)',borderColor:'var(--green)'}}
+            disabled={!parseFloat(amount) || !ref.trim() || mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending ? 'Depositing…' : '💰 Deposit to Wallet'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Wallet Send to Customer (Payout) Modal ──────────────────────────────────────
+function WalletWithdrawModal({ customer, currentBalance, onClose, onSuccess }) {
+  const qc = useQueryClient();
+  const [amount, setAmount] = useState('');
+  const [method, setMethod] = useState('Bank Transfer');
+  const [ref, setRef] = useState('');
+  const [notes, setNotes] = useState('');
+
+  const maxBalance = parseFloat(currentBalance) || 0;
+
+  const mutation = useMutation({
+    mutationFn: () => api.post(`/customers/${customer.id}/wallet-withdraw`, {
+      amount: parseFloat(amount),
+      payment_method: method,
+      payment_ref: ref.trim(),
+      notes: notes.trim(),
+    }),
+    onSuccess: () => {
+      toast.success('Funds sent / refunded to customer');
+      qc.invalidateQueries(['customer-credit-profile', customer.id]);
+      qc.invalidateQueries(['customers']);
+      onSuccess && onSuccess();
+      onClose();
+    },
+    onError: e => toast.error(e?.response?.data?.error || 'Send failed')
+  });
+
+  const parsedAmount = parseFloat(amount) || 0;
+  const isOver = parsedAmount > (maxBalance + 0.009);
+
+  return (
+    <div className="overlay" style={{zIndex: 1100}}>
+      <div className="modal" style={{maxWidth: 460, width: '92vw'}}>
+        <div className="modal-header">
+          <h2 style={{display:'flex',alignItems:'center',gap:8}}>
+            <span>📤</span> Send to Customer (from Wallet)
+          </h2>
+          <button className="close-x" onClick={onClose}>×</button>
+        </div>
+        <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+          <div style={{padding:'10px 14px',borderRadius:8,background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.25)',fontSize:12}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <strong>Customer: {customer.name}</strong>
+              <span style={{fontSize:11,color:'var(--text2)'}}>Available: <strong style={{color:'var(--green)'}}>₹{maxBalance.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}</strong></span>
+            </div>
+            <div style={{marginTop:4,fontSize:11,color:'var(--text3)'}}>
+              Payout or refund stored wallet balance directly back to customer bank account.
+            </div>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <label className="label">Amount to Send (₹) <span className="req">*</span></label>
+              {maxBalance > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setAmount(String(maxBalance))}
+                  style={{border:'none',background:'transparent',color:'var(--accent)',fontSize:11,fontWeight:700,cursor:'pointer',padding:0}}
+                >
+                  Send Full (₹{maxBalance.toFixed(2)})
+                </button>
+              )}
+            </div>
+            <input
+              type="number"
+              step="0.01"
+              max={maxBalance}
+              className="input"
+              value={amount}
+              onChange={e=>setAmount(e.target.value)}
+              placeholder="0.00"
+              style={{borderColor: isOver ? 'var(--red)' : undefined}}
+            />
+            {isOver && (
+              <div style={{color:'var(--red)',fontSize:11,marginTop:3,fontWeight:600}}>
+                Amount cannot exceed available wallet balance (₹{maxBalance.toFixed(2)})
+              </div>
+            )}
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Payment Mode <span className="req">*</span></label>
+            <select className="input" value={method} onChange={e=>setMethod(e.target.value)}>
+              <option value="Bank Transfer">Bank Transfer (NEFT/RTGS/IMPS)</option>
+              <option value="UPI">UPI</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Cash">Cash</option>
+            </select>
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Bank UTR / Ref <span className="req">*</span></label>
+            <input className="input" value={ref} onChange={e=>setRef(e.target.value)} placeholder="e.g. UTR12345678" />
+          </div>
+          <div className="form-group" style={{marginBottom:0}}>
+            <label className="label">Notes / Remarks</label>
+            <input className="input" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="e.g. Refund of wallet funds to customer bank" />
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            style={{background:'var(--accent)',borderColor:'var(--accent)',fontWeight:700}}
+            disabled={parsedAmount <= 0 || isOver || !ref.trim() || mutation.isPending}
+            onClick={() => mutation.mutate()}
+          >
+            {mutation.isPending ? 'Processing…' : '📤 Send to Customer'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Customer Credit & Wallet In-Page Workspace View ────────────────────────────
+export function CustomerCreditView({ customer, onClose }) {
+  const [tab, setTab] = useState('drawdowns'); // 'drawdowns' | 'wallet' | 'ledger' | 'cleared'
+  const [showRepayModal, setShowRepayModal] = useState(false);
+  const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
+  const [selectedDrawdown, setSelectedDrawdown] = useState(null);
+
+  const qc = useQueryClient();
+  const { data: profile, isLoading, refetch } = useQuery({
+    queryKey: ['customer-credit-profile', customer.id],
+    queryFn: () => api.get(`/customers/${customer.id}/credit-profile`).then(r => r.data)
+  });
+
+  // Direct inline editing state with conditional Save button (only shows when edited)
+  const [editLimit, setEditLimit] = useState('');
+  const [editDays, setEditDays] = useState('');
+  const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved'
+
+  useEffect(() => {
+    if (profile) {
+      setEditLimit(String(profile.credit_limit ?? 1000000));
+      setEditDays(String(profile.credit_days ?? 30));
+    }
+  }, [profile]);
+
+  const isLimitChanged = profile && parseFloat(editLimit) !== parseFloat(profile.credit_limit);
+  const isDaysChanged = profile && parseInt(editDays) !== parseInt(profile.credit_days);
+  const isDirty = Boolean(isLimitChanged || isDaysChanged);
+
+  const settingsMutation = useMutation({
+    mutationFn: (newValues) => api.put(`/customers/${customer.id}/credit-settings`, newValues),
+    onSuccess: () => {
+      setSaveStatus('saved');
+      toast.success('Credit facility settings updated');
+      setTimeout(() => setSaveStatus(null), 3000);
+      qc.invalidateQueries(['customer-credit-profile', customer.id]);
+      qc.invalidateQueries(['customers']);
+    },
+    onError: e => {
+      setSaveStatus(null);
+      toast.error(e?.response?.data?.error || 'Failed to update settings');
+    }
+  });
+
+  const triggerSave = (overrideValues = {}) => {
+    setSaveStatus('saving');
+    const newLimit = overrideValues.credit_limit !== undefined
+      ? overrideValues.credit_limit
+      : (parseFloat(editLimit) || profile.credit_limit || 1000000);
+    const newDays = overrideValues.credit_days !== undefined
+      ? overrideValues.credit_days
+      : (parseInt(editDays) || profile.credit_days || 30);
+    const newEnabled = overrideValues.credit_enabled !== undefined
+      ? overrideValues.credit_enabled
+      : (profile.credit_enabled ? 1 : 0);
+
+    settingsMutation.mutate({
+      credit_enabled: newEnabled,
+      credit_limit: newLimit,
+      credit_days: newDays
+    });
+  };
+
+  const handleToggleCredit = () => {
+    const nextVal = profile.credit_enabled ? 0 : 1;
+    triggerSave({ credit_enabled: nextVal });
+  };
+
+  if (isLoading || !profile) {
+    return (
+      <div style={{padding: 48, textAlign: 'center', color: 'var(--text2)'}}>
+        <div style={{fontSize: 36, marginBottom: 10}}>💳</div>
+        <div style={{fontSize: 15, fontWeight: 600}}>Loading customer credit & wallet workspace…</div>
+      </div>
+    );
+  }
+
+  const score = profile.credit_score || 100;
+  const starCount = Math.round((score / 100) * 5);
+  const stars = '★'.repeat(starCount) + '☆'.repeat(5 - starCount);
+  const scoreBadgeColor = score >= 90 ? '#16a34a' : score >= 75 ? '#eab308' : score >= 50 ? '#f97316' : '#dc2626';
+  const scoreLabel = score >= 90 ? 'Excellent (Low Risk)' : score >= 75 ? 'Good Standing' : score >= 50 ? 'Average' : 'High Risk / Review';
+
+  const allDrawdowns = profile.drawdowns || [];
+  const activeDrawdowns = allDrawdowns.filter(d => !d.is_cleared && Number(d.balance_due) > 0.01 && d.status !== 'cancelled');
+  const clearedDrawdowns = allDrawdowns.filter(d => d.is_cleared || Number(d.balance_due) <= 0.01 || d.status === 'cancelled');
+  const allLedger = profile.ledger || [];
+  const walletTxns = allLedger.filter(tx =>
+    tx.transaction_type === 'wallet_deposit' ||
+    tx.transaction_type === 'wallet_usage' ||
+    tx.transaction_type === 'wallet_payment' ||
+    tx.transaction_type === 'order_cancellation_refund' ||
+    tx.transaction_type === 'wallet_payout'
+  );
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:16}}>
+      {/* ── Top Header Navigation Bar (Sidebar stays visible, replaces right plane) ── */}
+      <div style={{
+        display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,
+        paddingBottom: 14, borderBottom: '1px solid var(--border)'
+      }}>
+        <div style={{display:'flex',alignItems:'center',gap:12}}>
+          <button
+            className="btn btn-sm"
+            onClick={onClose}
+            style={{
+              display:'flex',alignItems:'center',gap:6,fontWeight:700,
+              background:'var(--surface)',borderColor:'var(--border)',padding:'7px 14px',
+              boxShadow:'0 1px 2px rgba(0,0,0,0.05)'
+            }}
+          >
+            <span>←</span> Back to Customers
+          </button>
+          <div style={{height: 22, width: 1, background: 'var(--border)'}} />
+          <div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <h2 style={{margin:0,fontSize:18,fontWeight:800,display:'flex',alignItems:'center',gap:8}}>
+                💳 Customer Credit & Wallet Hub
+              </h2>
+              <span className="mono" style={{fontWeight:700,color:'var(--accent)',fontSize:13}}>
+                {customer.customer_no || customer.id}
+              </span>
+              <span style={{fontWeight:700,fontSize:14,color:'var(--text)'}}>
+                {customer.name}
+              </span>
+            </div>
+            <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
+              {customer.mobile && <span>📞 {customer.mobile} · </span>}
+              {customer.email && <span>✉️ {customer.email} · </span>}
+              <span>Currency: <strong>{customer.currency || 'INR'}</strong></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Direct Inline Facility Controls (Toggle & Direct Click/Enter Edit, No popup modal!) ── */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        padding: '14px 20px',
+        borderRadius: 12,
+        background: 'var(--surface)',
+        border: '1px solid var(--border)',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.03)',
+        flexWrap: 'wrap',
+        gap: 16
+      }}>
+        {/* Left: Custom Animated Toggle Switch */}
+        <div style={{display:'flex',alignItems:'center',gap:14}}>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={Boolean(profile.credit_enabled)}
+            onClick={handleToggleCredit}
+            disabled={settingsMutation.isPending}
+            style={{
+              width: 50,
+              height: 28,
+              borderRadius: 14,
+              background: profile.credit_enabled ? 'var(--green, #16a34a)' : 'var(--border-md, #cbd5e1)',
+              cursor: 'pointer',
+              position: 'relative',
+              border: 'none',
+              outline: 'none',
+              padding: 0,
+              transition: 'background 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+              flexShrink: 0
+            }}
+            title={profile.credit_enabled ? 'Click to Disable Credit Facility' : 'Click to Enable Credit Facility'}
+          >
+            <span style={{
+              position: 'absolute',
+              top: 3,
+              left: profile.credit_enabled ? 25 : 3,
+              width: 22,
+              height: 22,
+              borderRadius: '50%',
+              background: '#ffffff',
+              transition: 'left 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+            }} />
+          </button>
+
+          <div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <span style={{fontWeight:800,fontSize:14}}>Ciflux Credit Facility</span>
+              {profile.credit_enabled ? (
+                <span className="badge badge-green" style={{fontWeight:700,fontSize:11}}>Active & Enabled</span>
+              ) : (
+                <span className="badge badge-gray" style={{fontWeight:700,fontSize:11}}>Disabled</span>
+              )}
+            </div>
+            <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
+              {profile.credit_enabled
+                ? 'Customer can fund order payments from approved credit line'
+                : 'Credit payments are currently turned off for this customer'}
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Direct Inline Inputs (Edit & Click Save) */}
+        <div style={{display:'flex',alignItems:'center',gap:14,flexWrap:'wrap'}}>
+          {/* Approved Credit Limit */}
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:12,fontWeight:700,color:'var(--text2)'}}>Approved Limit:</span>
+            <div style={{position:'relative',width:150}}>
+              <span style={{position:'absolute',left:8,top:'50%',transform:'translateY(-50%)',fontSize:12,color:'var(--text3)',fontWeight:700}}>₹</span>
+              <input
+                className="input"
+                type="number"
+                step="1000"
+                value={editLimit}
+                onChange={e => setEditLimit(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') triggerSave(); }}
+                style={{paddingLeft:22,height:34,fontSize:13,fontWeight:700,fontFamily:'monospace'}}
+                placeholder="1000000"
+                title="Edit credit limit"
+              />
+            </div>
+          </div>
+
+          {/* Repayment Cycle */}
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <span style={{fontSize:12,fontWeight:700,color:'var(--text2)'}}>Repayment Cycle:</span>
+            <div style={{position:'relative',width:120}}>
+              <input
+                className="input"
+                type="number"
+                step="1"
+                value={editDays}
+                onChange={e => setEditDays(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') triggerSave(); }}
+                style={{paddingRight:44,height:34,fontSize:13,fontWeight:700,fontFamily:'monospace'}}
+                placeholder="30"
+                title="Edit repayment days"
+              />
+              <span style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',fontSize:11,color:'var(--text3)',fontWeight:600}}>Days</span>
+            </div>
+          </div>
+
+          {/* Save Button — Only shown when inputs are edited/changed! */}
+          {isDirty && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => triggerSave()}
+              disabled={settingsMutation.isPending}
+              style={{
+                height: 34,
+                padding: '0 14px',
+                fontWeight: 700,
+                fontSize: 12,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6
+              }}
+            >
+              <span>💾</span> {settingsMutation.isPending ? 'Saving…' : 'Save Changes'}
+            </button>
+          )}
+
+          {/* Save Status Feedback Indicator */}
+          {saveStatus === 'saved' && (
+            <span style={{fontSize:12,fontWeight:700,color:'var(--green)',display:'flex',alignItems:'center',gap:4}}>
+              ✓ Saved
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ── Executive Reliability & Metric Cards ── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(280px, 340px) 1fr',
+        gap: 16,
+        alignItems: 'stretch'
+      }}>
+        {/* Left Reliability Scorecard */}
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(99,102,241,0.07), rgba(168,85,247,0.07))',
+          border: '1.5px solid rgba(99,102,241,0.25)',
+          borderRadius: 12,
+          padding: '16px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          gap: 12
+        }}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <span style={{fontSize:12,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'0.04em'}}>
+              Reliability Rating
+            </span>
+            <span style={{fontSize:11,fontWeight:700,color:scoreBadgeColor,background:'var(--surface)',padding:'2px 8px',borderRadius:6,border:`1px solid ${scoreBadgeColor}44`}}>
+              {scoreLabel}
+            </span>
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',gap:16}}>
+            <div style={{
+              width: 60, height: 60, borderRadius: '50%',
+              background: 'var(--surface)', border: `4px solid ${scoreBadgeColor}`,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              fontWeight: 900, fontSize: 19, color: scoreBadgeColor, flexShrink: 0
+            }}>
+              {score}
+              <span style={{fontSize:8,fontWeight:700,color:'var(--text3)',marginTop:-2}}>SCORE</span>
+            </div>
+            <div>
+              <div style={{color: '#f59e0b', fontSize: 18, letterSpacing: 2}}>{stars}</div>
+              <div style={{fontSize:11,color:'var(--text2)',marginTop:4,lineHeight:1.4}}>
+                Calculated from payment track record & timely settlement.
+              </div>
+            </div>
+          </div>
+
+          <div style={{
+            display:'flex',justifyContent:'space-between',paddingTop:10,borderTop:'1px solid rgba(99,102,241,0.15)',
+            fontSize:12,color:'var(--text2)'
+          }}>
+            <span>✅ <strong>{profile.on_time_count || 0}</strong> On-Time</span>
+            <span>⚠️ <strong style={{color: profile.overdue_count > 0 ? 'var(--red)' : 'inherit'}}>{profile.overdue_count || 0}</strong> Overdue</span>
+            <span>Cycle: <strong>{profile.credit_days || 30}d</strong></span>
+          </div>
+        </div>
+
+        {/* Right: 3 Metric Cards */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(180px, 1fr))',gap:12}}>
+          <div style={{
+            padding: '16px 18px', borderRadius: 12, background: 'var(--surface)',
+            border: activeDrawdowns.length > 0 ? '1.5px solid var(--red)' : '1px solid var(--border)',
+            display:'flex', flexDirection:'column', justifyContent:'space-between'
+          }}>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:700,textTransform:'uppercase',letterSpacing:'0.03em'}}>
+              Outstanding Dues
+            </div>
+            <div style={{
+              fontSize:24,fontWeight:900,fontFamily:'monospace',margin:'8px 0',
+              color: activeDrawdowns.length > 0 ? 'var(--red,#dc2626)' : 'var(--text3)'
+            }}>
+              ₹{(Number(profile.total_outstanding_due || 0)).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+            </div>
+            <div style={{fontSize:11,color:'var(--text3)'}}>
+              {activeDrawdowns.length} active order {activeDrawdowns.length === 1 ? 'drawdown' : 'drawdowns'}
+            </div>
+          </div>
+
+          <div style={{
+            padding: '16px 18px', borderRadius: 12, background: 'var(--surface)',
+            border: '1px solid var(--border)', display:'flex', flexDirection:'column', justifyContent:'space-between'
+          }}>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:700,textTransform:'uppercase',letterSpacing:'0.03em'}}>
+              Available Credit Limit
+            </div>
+            <div style={{fontSize:24,fontWeight:900,color:'var(--green,#16a34a)',fontFamily:'monospace',margin:'8px 0'}}>
+              ₹{(Number(profile.available_credit) || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+            </div>
+            <div style={{fontSize:11,color:'var(--text3)'}}>
+              Ready for order funding
+            </div>
+          </div>
+
+          <div style={{
+            padding: '16px 18px', borderRadius: 12, background: 'var(--surface)',
+            border: '1.5px solid rgba(13,148,136,0.35)', display:'flex', flexDirection:'column', justifyContent:'space-between'
+          }}>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:700,textTransform:'uppercase',letterSpacing:'0.03em'}}>
+              Customer Prepaid Wallet
+            </div>
+            <div style={{fontSize:24,fontWeight:900,color:'#0d9488',fontFamily:'monospace',margin:'8px 0'}}>
+              ₹{(Number(profile.wallet_balance) || 0).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:4,flexWrap:'wrap',gap:6}}>
+              <span style={{fontSize:11,color:'var(--text3)'}}>Stored refunds / advance</span>
+              <div style={{display:'flex',alignItems:'center',gap:6}}>
+                <button
+                  className="btn btn-xs btn-primary"
+                  onClick={() => setShowDepositModal(true)}
+                  style={{fontSize:11,padding:'4px 9px',background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+                >
+                  ➕ Add Wallet Funds
+                </button>
+                <button
+                  className="btn btn-xs"
+                  onClick={() => setShowWithdrawModal(true)}
+                  disabled={Number(profile.wallet_balance || 0) <= 0.01}
+                  style={{
+                    fontSize:11,padding:'4px 9px',fontWeight:700,
+                    background:'var(--surface)',borderColor:'var(--border)',color:'var(--text)'
+                  }}
+                  title={Number(profile.wallet_balance || 0) <= 0.01 ? 'No wallet balance available to send' : 'Send wallet funds back to customer bank account'}
+                >
+                  📤 Send to Customer
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Navigation Tabs Bar ── */}
+      <div style={{
+        display:'flex',gap:12,borderBottom:'2px solid var(--border)',paddingBottom:8,
+        alignItems:'center',flexWrap:'wrap',marginTop:6
+      }}>
+        <button
+          className={`btn btn-sm ${tab==='drawdowns' ? 'btn-primary' : ''}`}
+          onClick={() => setTab('drawdowns')}
+          style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:6}}
+        >
+          <span>📋</span> Active Credit Orders ({activeDrawdowns.length})
+        </button>
+        <button
+          className={`btn btn-sm ${tab==='wallet' ? 'btn-primary' : ''}`}
+          onClick={() => setTab('wallet')}
+          style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:6}}
+        >
+          <span>💰</span> Wallet Transactions & Refunds ({walletTxns.length})
+        </button>
+        <button
+          className={`btn btn-sm ${tab==='cleared' ? 'btn-primary' : ''}`}
+          onClick={() => setTab('cleared')}
+          style={{fontSize:13,fontWeight:700,display:'flex',alignItems:'center',gap:6}}
+        >
+          <span>✅</span> Settled Orders ({clearedDrawdowns.length})
+        </button>
+      </div>
+
+      {/* ── TAB 1: Active Credit Orders (Clean Single-Line Tabular Format) ── */}
+      {tab === 'drawdowns' && (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          {activeDrawdowns.length === 0 ? (
+            <div style={{
+              padding: 48, textAlign: 'center', background: 'var(--surface)',
+              borderRadius: 12, border: '1px solid var(--border)'
+            }}>
+              <div style={{fontSize: 36, marginBottom: 8}}>🎉</div>
+              <div style={{fontSize: 16, fontWeight: 700, color: 'var(--text)'}}>No Outstanding Credit Dues</div>
+              <div style={{fontSize: 13, color: 'var(--text3)', marginTop: 4, maxWidth: 500, margin: '6px auto 0'}}>
+                All previous credit drawdowns have been fully repaid! Available credit limit is 100% free for new customer orders.
+              </div>
+            </div>
+          ) : (
+            <div className="table-wrap" style={{borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)'}}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Order Reference</th>
+                    <th>Repayment Due</th>
+                    <th style={{textAlign:'right'}}>Credit Drawn</th>
+                    <th style={{textAlign:'right'}}>Repaid</th>
+                    <th style={{textAlign:'right'}}>Outstanding Due</th>
+                    <th style={{textAlign:'right'}}>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeDrawdowns.map(d => {
+                    const origAmount = Number(d.amount) || 0;
+                    const balanceDue = Number(d.balance_due) || 0;
+                    const repaidAmount = d.repaid_amount !== undefined
+                      ? Number(d.repaid_amount)
+                      : Math.max(0, origAmount - balanceDue);
+                    const isOverdue = d.days_remaining < 0;
+
+                    return (
+                      <tr key={d.id} style={{verticalAlign: 'middle'}}>
+                        <td>
+                          <div style={{display:'flex',alignItems:'center',gap:8}}>
+                            <span className="mono" style={{fontWeight:800,fontSize:14,color:'var(--accent)'}}>
+                              {d.order_id}
+                            </span>
+                            {d.po_number && (
+                              <span style={{fontSize:11,background:'var(--surface2)',padding:'2px 7px',borderRadius:5,border:'1px solid var(--border)',fontWeight:600}}>
+                                PO: <strong className="mono">{d.po_number}</strong>
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <div style={{display:'flex',alignItems:'center',gap:8}}>
+                            <span style={{fontSize:12,fontWeight:600,color:'var(--text2)'}}>
+                              {d.due_date || '—'}
+                            </span>
+                            <CreditCountdownBadge badge={d.countdown_badge} daysRemaining={d.days_remaining} />
+                          </div>
+                        </td>
+                        <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,fontSize:13}}>
+                          ₹{origAmount.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                        </td>
+                        <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,fontSize:13,color:'var(--green)'}}>
+                          ₹{repaidAmount.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                        </td>
+                        <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:900,fontSize:14,color:'var(--red)'}}>
+                          ₹{balanceDue.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                        </td>
+                        <td style={{textAlign:'right'}}>
+                          <button
+                            className="btn btn-xs btn-primary"
+                            onClick={() => { setSelectedDrawdown(d); setShowRepayModal(true); }}
+                            style={{
+                              display:'inline-flex',alignItems:'center',gap:6,fontWeight:700,fontSize:11,padding:'5px 12px',
+                              background: isOverdue ? 'var(--red)' : undefined,
+                              borderColor: isOverdue ? 'var(--red)' : undefined
+                            }}
+                          >
+                            <span>💳</span> Repay (₹{balanceDue.toLocaleString('en-IN', {minimumFractionDigits: balanceDue % 1 !== 0 ? 2 : 0})})
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── TAB 2: Wallet Transactions & Cancellation Refunds ── */}
+      {tab === 'wallet' && (
+        <div style={{display:'flex',flexDirection:'column',gap:14}}>
+          <div style={{
+            padding: '14px 18px', borderRadius: 10,
+            background: 'rgba(22,163,74,0.08)', border: '1.5px solid rgba(22,163,74,0.25)',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap'
+          }}>
+            <div>
+              <div style={{fontWeight: 700, color: 'var(--green,#16a34a)', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>💰</span> PREPAID CUSTOMER WALLET
+              </div>
+              <div style={{fontSize: 12, color: 'var(--text2)', marginTop: 4, maxWidth: 850}}>
+                Customer Wallet stores funds from cancelled orders, settlements, and manual deposits. When placing orders, the customer can pay from this balance with instant zero-UTR settlement.
+              </div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:11,color:'var(--text3)'}}>Current Balance</div>
+              <div style={{fontSize:22,fontWeight:900,color:'var(--green)'}}>
+                ₹{Number(profile.wallet_balance || 0).toLocaleString('en-IN')}
+              </div>
+            </div>
+          </div>
+
+          {walletTxns.length === 0 ? (
+            <div style={{padding: 40, textAlign: 'center', background: 'var(--surface)', borderRadius: 10, border: '1px solid var(--border)'}}>
+              <div style={{fontSize: 32, marginBottom: 8}}>💰</div>
+              <div style={{fontSize: 15, fontWeight: 700, color: 'var(--text)'}}>No Wallet Activity Yet</div>
+              <div style={{fontSize: 12, color: 'var(--text3)', marginTop: 4}}>
+                When orders are cancelled and credited to wallet, or manual deposits are recorded, they will show here.
+              </div>
+            </div>
+          ) : (
+            <div className="table-wrap" style={{borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)'}}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Date & Time</th>
+                    <th>Transaction Source</th>
+                    <th>Order Reference</th>
+                    <th style={{textAlign:'right'}}>Amount</th>
+                    <th style={{textAlign:'right'}}>Wallet Balance After</th>
+                    <th>Method / Ref</th>
+                    <th>Recorded By</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {walletTxns.map(tx => {
+                    const isDeposit = tx.transaction_type === 'wallet_deposit';
+                    const isRefund = tx.transaction_type === 'order_cancellation_refund';
+                    const isUsage = tx.transaction_type === 'wallet_usage' || tx.transaction_type === 'wallet_payment';
+                    const isPayout = tx.transaction_type === 'wallet_payout';
+
+                    return (
+                      <tr key={tx.id}>
+                        <td style={{fontSize:12,color:'var(--text3)',whiteSpace:'nowrap'}}>
+                          {tx.created_at ? fmtDateTime(tx.created_at) : '—'}
+                        </td>
+                        <td>
+                          {isRefund && (
+                            <span className="badge badge-green" style={{fontWeight:700}}>
+                              🚫 Order Cancellation Refund
+                            </span>
+                          )}
+                          {isDeposit && (
+                            <span className="badge badge-blue" style={{fontWeight:700}}>
+                              ➕ Manual Wallet Deposit
+                            </span>
+                          )}
+                          {isUsage && (
+                            <span className="badge badge-amber" style={{fontWeight:700}}>
+                              🛒 Order Checkout Deduction
+                            </span>
+                          )}
+                          {isPayout && (
+                            <span className="badge badge-purple" style={{fontWeight:700}}>
+                              📤 Sent to Customer
+                            </span>
+                          )}
+                        </td>
+                        <td className="mono" style={{fontWeight:700,color:'var(--accent)'}}>
+                          {tx.order_id || '—'}
+                        </td>
+                        <td style={{
+                          textAlign:'right',fontFamily:'monospace',fontWeight:800,fontSize:13,
+                          color: (isUsage || isPayout) ? 'var(--red)' : 'var(--green)'
+                        }}>
+                          {(isUsage || isPayout) ? '-' : '+'}₹{Number(tx.amount).toLocaleString('en-IN', {minimumFractionDigits:2})}
+                        </td>
+                        <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,fontSize:13,color:'var(--text)'}}>
+                          {tx.wallet_balance_snapshot !== null && tx.wallet_balance_snapshot !== undefined
+                            ? `₹${Number(tx.wallet_balance_snapshot).toLocaleString('en-IN', {minimumFractionDigits:2})}`
+                            : '—'}
+                        </td>
+                        <td style={{fontSize:12}}>
+                          <div>{tx.payment_method || '—'}</div>
+                          <div className="mono" style={{color:'var(--text3)',fontSize:11}}>{tx.payment_ref || ''}</div>
+                        </td>
+                        <td style={{fontSize:12,color:'var(--text2)'}}>{tx.recorded_by || 'Admin'}</td>
+                        <td style={{fontSize:12,color:'var(--text2)',maxWidth:240}}>{tx.notes || '—'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── TAB 3: Settled Orders ── */}
+      {tab === 'cleared' && (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          {clearedDrawdowns.length === 0 ? (
+            <div style={{padding: 40, textAlign: 'center', background: 'var(--surface)', borderRadius: 10, border: '1px solid var(--border)'}}>
+              No cleared orders yet.
+            </div>
+          ) : (
+            <div className="table-wrap" style={{borderRadius: 10, border: '1px solid var(--border)', background: 'var(--surface)'}}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Order Reference</th>
+                    <th>Repayment Due</th>
+                    <th style={{textAlign:'right'}}>Credit Drawn</th>
+                    <th style={{textAlign:'right'}}>Fully Repaid</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {clearedDrawdowns.map(d => (
+                    <tr key={d.id} style={{verticalAlign: 'middle'}}>
+                      <td>
+                        <div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <span className="mono" style={{fontWeight:800,fontSize:14,color:'var(--accent)'}}>{d.order_id}</span>
+                          {d.po_number && (
+                            <span style={{fontSize:11,background:'var(--surface2)',padding:'2px 7px',borderRadius:5,border:'1px solid var(--border)',fontWeight:600}}>
+                              PO: <strong className="mono">{d.po_number}</strong>
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td style={{fontSize:12,color:'var(--text2)',fontWeight:600}}>{d.due_date || '—'}</td>
+                      <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:700,fontSize:13}}>
+                        ₹{Number(d.amount).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}
+                      </td>
+                      <td style={{textAlign:'right',fontFamily:'monospace',fontWeight:800,fontSize:13,color:'var(--green)'}}>
+                        ₹{Number(d.amount).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}
+                      </td>
+                      <td>
+                        {d.status === 'cancelled' ? (
+                          <span className="badge badge-gray" style={{fontWeight:700}}>🚫 Cancelled with Order</span>
+                        ) : (
+                          <span className="badge badge-green" style={{fontWeight:700}}>✅ Fully Settled</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {showRepayModal && (
+        <RepayCreditModal
+          customer={customer}
+          drawdown={selectedDrawdown}
+          onClose={() => { setShowRepayModal(false); setSelectedDrawdown(null); }}
+          onSuccess={() => refetch()}
+        />
+      )}
+
+      {showDepositModal && (
+        <WalletDepositModal
+          customer={customer}
+          onClose={() => setShowDepositModal(false)}
+          onSuccess={() => refetch()}
+        />
+      )}
+
+      {showWithdrawModal && (
+        <WalletWithdrawModal
+          customer={customer}
+          currentBalance={profile.wallet_balance}
+          onClose={() => setShowWithdrawModal(false)}
+          onSuccess={() => refetch()}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────────────────────────────
 export default function CustomersPage() {
   const [search,    setSearch]    = useState('');
   const [modal,     setModal]     = useState(null);
   const [showBulk,  setShowBulk]  = useState(false);
+  const [creditCustomer, setCreditCustomer] = useState(null);
   const qc = useQueryClient();
   const { data: customers=[] } = useQuery({ queryKey:['customers'], queryFn:()=>api.get('/customers').then(r=>r.data) });
+
+  // If a customer is selected for Credit & Wallet, switch the right plane into CustomerCreditView!
+  if (creditCustomer) {
+    return (
+      <CustomerCreditView
+        customer={creditCustomer}
+        onClose={() => setCreditCustomer(null)}
+      />
+    );
+  }
 
   const filtered = customers.filter(c =>
     !search ||
@@ -960,7 +2061,11 @@ export default function CustomersPage() {
                 </td>
                 <td>
                   <div className="bold">{c.name}</div>
-                  {(c.first_name||c.last_name)&&<div style={{fontSize:11,color:'var(--text3)'}}>{[c.salutation,c.first_name,c.last_name].filter(Boolean).join(' ')}</div>}
+                  {(c.first_name||c.last_name)&&(
+                    <div style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
+                      {[c.salutation,c.first_name,c.last_name].filter(Boolean).join(' ')}
+                    </div>
+                  )}
                 </td>
                 <td>
                   {c.customer_scope==='international'
@@ -976,6 +2081,20 @@ export default function CustomersPage() {
                 <td>{c.status==='active'?<span className="badge badge-green">Active</span>:<span className="badge badge-gray">Inactive</span>}</td>
                 <td style={{color:'var(--text3)',whiteSpace:'nowrap'}}>{fmtDateTime(c.created||c.created_at)}</td>
                 <td style={{textAlign:'right',whiteSpace:'nowrap'}}>
+                  <button
+                    className="btn btn-xs"
+                    style={{
+                      marginRight: 6,
+                      borderColor: c.credit_enabled ? 'var(--accent)' : 'var(--border)',
+                      color: c.credit_enabled ? 'var(--accent)' : 'var(--text2)',
+                      background: c.credit_enabled ? 'var(--accent-lt)' : 'transparent',
+                      fontWeight: 600
+                    }}
+                    onClick={() => setCreditCustomer(c)}
+                    title="View Customer Credit Facility, Wallet & Credit Scoring"
+                  >
+                    💳 Credit & Wallet
+                  </button>
                   <button className="btn btn-xs btn-primary" onClick={()=>setModal(c)}>✏ Manage</button>
                 </td>
               </tr>
@@ -989,3 +2108,4 @@ export default function CustomersPage() {
     </div>
   );
 }
+

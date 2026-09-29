@@ -10,7 +10,8 @@ export const fmtCur = (n, c='INR') => c==='USD'?`$${fmt(n)}`:c==='EUR'?`€${fmt
 export const today = () => new Date().toISOString().slice(0,10);
 // Server stores timestamps as UTC in "YYYY-MM-DD HH:MM[:SS]" form (no Z).
 // Parse those as UTC, then always render in IST (Asia/Kolkata).
-const parseUtc = (s) => {
+export const parseUtc = (s) => {
+  if (!s) return null;
   if (s instanceof Date) return s;
   const str = String(s);
   // Bare "YYYY-MM-DD HH:MM..." (no timezone) → treat as UTC by appending Z.
@@ -18,6 +19,11 @@ const parseUtc = (s) => {
     return new Date(str.replace(' ', 'T') + 'Z');
   }
   return new Date(str);
+};
+
+export const toDateStrIST = (dateObj) => {
+  if (!dateObj || isNaN(dateObj.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(dateObj);
 };
 export const fmtDateTime = (s) => {
   if (!s) return '—';
@@ -49,7 +55,6 @@ export const ORDER_STATUSES = [
   {v:'closed',     l:'Closed'},
   {v:'delivered',  l:'Delivered'},
   {v:'hold',       l:'Hold'},
-  {v:'failed',     l:'Failed'},
 ];
 
 // Line item statuses
@@ -78,7 +83,7 @@ export const STATUS_BADGE = {
   closed:                ['badge-green',  'Closed'],
   delivered:             ['badge-green',  'Delivered'],
   failed:                ['badge-red',    'Failed'],
-  hold:                  ['badge-amber',  'Hold'],
+  hold:                  ['badge-amber',  '⏸ On Hold'],
   cancelled:             ['badge-red',    'Cancelled'],
   // Order — procurement / payment flow
   procurement:           ['badge-blue',   'Procurement'],
@@ -127,6 +132,9 @@ export const STATUS_BADGE = {
 };
 
 export const StatusBadge = ({ s }) => {
+  if (s === 'hold') {
+    return <HoldBadge />;
+  }
   const [cls, lbl] = STATUS_BADGE[s] || ['badge-gray', s||'Unknown'];
   return <span className={`badge ${cls}`}>{lbl}</span>;
 };
@@ -171,3 +179,41 @@ export const DaysBadge = ({ updatedAt }) => {
 export const DeptBadge = ({ dept }) => (
   <span className={`badge ${DEPT_COLOR[dept]||'badge-gray'}`}>{DEPT_LABEL[dept]||dept}</span>
 );
+
+export const HoldBadge = () => (
+  <span style={{
+    display:'inline-flex',alignItems:'center',gap:4,
+    padding:'2px 8px',borderRadius:999,fontSize:10,fontWeight:800,
+    background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',
+    border:'1.5px solid var(--amber,#d97706)',letterSpacing:.4,
+    boxShadow:'0 1px 3px rgba(217,119,6,0.15)'
+  }}>
+    <span>⏸</span> ON HOLD
+  </span>
+);
+
+export const HoldNoteCallout = ({ reason, holdBy, holdAt, compact = false }) => {
+  if (!reason && !holdBy) return null;
+  return (
+    <div style={{
+      marginTop: compact ? 3 : 5,
+      padding: compact ? '2px 8px' : '4px 10px',
+      borderRadius: 'var(--r, 6px)',
+      background: 'var(--amber-lt, #fffbeb)',
+      border: '1px solid var(--amber, #d97706)55',
+      fontSize: compact ? 11 : 12,
+      color: '#92400e',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 6,
+      flexWrap: 'wrap'
+    }}>
+      <span>⏸ <strong>Hold Note:</strong> "{reason || 'No note'}"</span>
+      {(holdBy || holdAt) && (
+        <span style={{ fontSize: 10, color: '#b45309', opacity: 0.9 }}>
+          • by {holdBy || 'User'} {holdAt ? `(${holdAt})` : ''}
+        </span>
+      )}
+    </div>
+  );
+};

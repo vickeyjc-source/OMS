@@ -175,6 +175,17 @@ async function assembleOrder(order) {
   const shipItemRows = shipIds.length ? await allAsync('SELECT * FROM shipment_items WHERE shipment_id IN ('+shipIds.map(()=>'?').join(',')+')', shipIds) : [];
   o.shipments  = shipRows.map(s=>({...s, items: shipItemRows.filter(i=>i.shipment_id===s.id)}));
   o.grnRecords = await allAsync('SELECT * FROM grn_records WHERE order_id=? ORDER BY recorded_at', [o.id]);
+  o.is_on_hold = o.is_on_hold ? 1 : (o.status === 'hold' ? 1 : 0);
+  o.hold_reason = o.hold_reason || '';
+  o.hold_by = o.hold_by || '';
+  o.hold_at = o.hold_at || '';
+  o.hold_prev_status = o.hold_prev_status || '';
+  o.cancelled_at = o.cancelled_at || '';
+  o.cancelled_by = o.cancelled_by || '';
+  o.cancel_reason = o.cancel_reason || '';
+  o.settlement_status = o.settlement_status || (o.status === 'cancelled' && (parseFloat(o.total_paid) > 0) ? 'pending' : 'none');
+  o.unsettled_amount = o.unsettled_amount !== undefined && o.unsettled_amount !== null ? parseFloat(o.unsettled_amount) : 0;
+  o.advance_released = o.advance_released ? 1 : 0;
   return o;
 }
 
@@ -387,7 +398,17 @@ async function createSchema() {
       po_generated_at TEXT DEFAULT '',
       status TEXT DEFAULT 'open', created_by TEXT,
       created_at TEXT NOT NULL, closed_at TEXT, notes TEXT,
-      delivery_address TEXT DEFAULT ''
+      delivery_address TEXT DEFAULT '',
+      is_on_hold INTEGER DEFAULT 0,
+      hold_reason TEXT DEFAULT '',
+      hold_by TEXT DEFAULT '',
+      hold_at TEXT DEFAULT '',
+      hold_prev_status TEXT DEFAULT '',
+      cancelled_at TEXT DEFAULT '',
+      cancelled_by TEXT DEFAULT '',
+      cancel_reason TEXT DEFAULT '',
+      settlement_status TEXT DEFAULT 'none',
+      unsettled_amount NUMERIC DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS order_items (
       id TEXT PRIMARY KEY, order_id TEXT NOT NULL, component TEXT NOT NULL,
@@ -395,7 +416,10 @@ async function createSchema() {
       unit_price NUMERIC DEFAULT 0, procurement_price NUMERIC DEFAULT 0,
       currency TEXT DEFAULT 'INR', order_date TEXT, delivery_date TEXT,
       supplier_id TEXT, line_status TEXT DEFAULT 'negotiating',
-      sort_order INTEGER DEFAULT 0
+      sort_order INTEGER DEFAULT 0,
+      cancelled_at TEXT DEFAULT '',
+      cancelled_by TEXT DEFAULT '',
+      cancellation_reason TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS supplier_orders (
       id TEXT PRIMARY KEY, order_id TEXT NOT NULL, supplier_id TEXT NOT NULL,
@@ -1042,8 +1066,10 @@ async function initDb() {
     amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT, payment_method TEXT,
     zoho_po_number TEXT, supplier_ref TEXT, notes TEXT, paid_by TEXT, paid_at TEXT,
     total_paid_snapshot NUMERIC, remaining_snapshot NUMERIC, grand_total NUMERIC,
-    additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT
+    additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC, amount_change_note TEXT,
+    receipt_file_url TEXT DEFAULT ''
   )`); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_advance_payment_logs ADD COLUMN receipt_file_url TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
@@ -1052,6 +1078,80 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN customer_payment_status TEXT DEFAULT 'pending'"); } catch(_) {}
   try { await pool.query("ALTER TABLE orders ADD COLUMN payment_due_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN is_on_hold INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN hold_reason TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN hold_by TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN hold_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN hold_prev_status TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN cancelled_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN cancelled_by TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN cancel_reason TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN settlement_status TEXT DEFAULT 'none'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN unsettled_amount NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN settlement_status TEXT DEFAULT 'none'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN unsettled_amount NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE orders ADD COLUMN advance_released INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_items ADD COLUMN cancelled_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_items ADD COLUMN cancelled_by TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_items ADD COLUMN cancellation_reason TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query(`CREATE TABLE IF NOT EXISTS order_settlements (
+    id TEXT PRIMARY KEY,
+    from_order_id TEXT NOT NULL,
+    to_order_id TEXT DEFAULT '',
+    customer_id TEXT NOT NULL,
+    settlement_type TEXT NOT NULL,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'INR',
+    payment_method TEXT DEFAULT '',
+    payment_ref TEXT DEFAULT '',
+    receipt_file_url TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    settled_by TEXT NOT NULL,
+    settled_at TEXT NOT NULL
+  )`); } catch(_) {}
+
+  // ── Customer Credit Line & Wallet System ───────────────────────────────────
+  try { await pool.query("ALTER TABLE customers ADD COLUMN credit_enabled INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN credit_limit NUMERIC DEFAULT 1000000"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN credit_days INTEGER DEFAULT 30"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN wallet_balance NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN credit_score NUMERIC DEFAULT 100"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN on_time_count INTEGER DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE customers ADD COLUMN overdue_count INTEGER DEFAULT 0"); } catch(_) {}
+
+  try { await pool.query(`CREATE TABLE IF NOT EXISTS customer_credit_drawdowns (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    amount NUMERIC NOT NULL,
+    balance_due NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'INR',
+    drawn_at TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    cleared_at TEXT DEFAULT '',
+    notes TEXT DEFAULT ''
+  )`); } catch(_) {}
+
+  try { await pool.query(`CREATE TABLE IF NOT EXISTS customer_credit_ledger (
+    id TEXT PRIMARY KEY,
+    customer_id TEXT NOT NULL,
+    order_id TEXT DEFAULT '',
+    drawdown_id TEXT DEFAULT '',
+    transaction_type TEXT NOT NULL,
+    amount NUMERIC NOT NULL,
+    currency TEXT DEFAULT 'INR',
+    payment_method TEXT DEFAULT '',
+    payment_ref TEXT DEFAULT '',
+    receipt_file_url TEXT DEFAULT '',
+    credit_limit_snapshot NUMERIC DEFAULT 0,
+    credit_available_snapshot NUMERIC DEFAULT 0,
+    wallet_balance_snapshot NUMERIC DEFAULT 0,
+    notes TEXT DEFAULT '',
+    recorded_by TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  )`); } catch(_) {}
+
   // ── Finance: supplier_orders Phase 2 fields ──────────────────────────────────
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_no TEXT DEFAULT ''"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN supplier_invoice_date TEXT DEFAULT ''"); } catch(_) {}

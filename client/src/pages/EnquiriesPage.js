@@ -1,9 +1,9 @@
 // client/src/pages/EnquiriesPage.js
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import api from '../utils/api';
-import { StatusBadge, DaysBadge, fmtDateTime } from '../utils/helpers';
+import { StatusBadge, DaysBadge, fmtDateTime, parseUtc, toDateStrIST } from '../utils/helpers';
 import { printDoc, generateEnquiryPDF } from '../utils/pdfUtils';
 import MergeEnquiryModal, { MERGEABLE_ENQ_STATUSES } from '../components/MergeEnquiryModal';
 
@@ -207,6 +207,7 @@ export default function EnquiriesPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
+  const [newSubTab, setNewSubTab] = useState('today'); // 'today' | 'yesterday' | 'all'
   const [mergeSelection, setMergeSelection] = useState([]); // 2+ enquiry ids, all same customer
   const [showMerge, setShowMerge] = useState(false);
   const { data: enqs=[] }       = useQuery({ queryKey:['enquiries'], queryFn:()=>api.get('/enquiries').then(r=>r.data) });
@@ -214,10 +215,36 @@ export default function EnquiriesPage() {
   const { data: users=[] }      = useQuery({ queryKey:['users'],     queryFn:()=>api.get('/users').then(r=>r.data) });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
+
+  const todayIST = useMemo(() => toDateStrIST(new Date()), []);
+  const yesterdayIST = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return toDateStrIST(d);
+  }, []);
+
+  const todayCount = useMemo(() => {
+    return enqs.filter(e => toDateStrIST(parseUtc(e.created_at)) === todayIST).length;
+  }, [enqs, todayIST]);
+  const yesterdayCount = useMemo(() => {
+    return enqs.filter(e => toDateStrIST(parseUtc(e.created_at)) === yesterdayIST).length;
+  }, [enqs, yesterdayIST]);
+
   const FILTERS = ['all','draft','new','modify_requested','sourcing','quoted','ordered','closed'];
   const FILTER_LABELS = { modify_requested: 'Sent to Enquiry' };
   const filtered = enqs.filter(e => {
-    if (filter!=='all' && e.status!==filter) return false;
+    // Under 'New' tab: show enquiries created Today or Yesterday
+    if (filter === 'new') {
+      const enqDateStr = toDateStrIST(parseUtc(e.created_at));
+      if (newSubTab === 'today') {
+        if (enqDateStr !== todayIST) return false;
+      } else if (newSubTab === 'yesterday') {
+        if (enqDateStr !== yesterdayIST) return false;
+      }
+    } else if (filter !== 'all' && e.status !== filter) {
+      return false;
+    }
+
     if (!search) return true;
     const q = search.trim().toLowerCase();
     if (!q) return true;
@@ -263,14 +290,102 @@ export default function EnquiriesPage() {
           <button className="btn btn-primary" onClick={()=>navigate('/enquiries/new')}>+ New Enquiry</button>
         </div>
       </div>
+
       <div className="filter-row">
-        {FILTERS.map(f=><span key={f} className={`fchip ${filter===f?'active':''}`} onClick={()=>setFilter(f)}>{f==='all'?'All':(FILTER_LABELS[f]||f.charAt(0).toUpperCase()+f.slice(1))}</span>)}
+        {FILTERS.map(f => (
+          <span
+            key={f}
+            className={`fchip ${filter===f?'active':''}`}
+            onClick={() => {
+              setFilter(f);
+              if (f === 'new') setNewSubTab('today');
+            }}
+          >
+            {f==='all' ? 'All' : (FILTER_LABELS[f]||f.charAt(0).toUpperCase()+f.slice(1))}
+            {f === 'new' && (todayCount + yesterdayCount) > 0 && (
+              <span style={{marginLeft:4,fontWeight:700,opacity:0.85}}>({todayCount + yesterdayCount})</span>
+            )}
+          </span>
+        ))}
       </div>
+
+      {/* Under 'New' tab: show Today and Yesterday 2 tabs */}
+      {filter === 'new' && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          marginTop: 10,
+          marginBottom: 14,
+          padding: '4px',
+          background: 'var(--surface2)',
+          borderRadius: 8,
+          border: '1px solid var(--border)',
+          width: 'fit-content'
+        }}>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{
+              borderRadius: 6,
+              padding: '4px 14px',
+              fontSize: 12,
+              fontWeight: 600,
+              border: '1px solid',
+              background: newSubTab === 'today' ? 'var(--accent)' : 'transparent',
+              color: newSubTab === 'today' ? '#fff' : 'var(--text2)',
+              borderColor: newSubTab === 'today' ? 'var(--accent)' : 'transparent',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+            onClick={() => setNewSubTab('today')}
+          >
+            📅 Today ({todayCount})
+          </button>
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{
+              borderRadius: 6,
+              padding: '4px 14px',
+              fontSize: 12,
+              fontWeight: 600,
+              border: '1px solid',
+              background: newSubTab === 'yesterday' ? 'var(--accent)' : 'transparent',
+              color: newSubTab === 'yesterday' ? '#fff' : 'var(--text2)',
+              borderColor: newSubTab === 'yesterday' ? 'var(--accent)' : 'transparent',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+            onClick={() => setNewSubTab('yesterday')}
+          >
+            📅 Yesterday ({yesterdayCount})
+          </button>
+        </div>
+      )}
+
       <div className="table-wrap">
         <table>
           <thead><tr><th style={{width:30}}></th><th>Enquiry ID</th><th>Customer</th><th>Items</th><th>Buying Type</th><th>Priority</th><th>Status</th><th style={{textAlign:'center'}}>Days in Stage</th><th>Assigned To</th><th>Created</th></tr></thead>
           <tbody>
-            {filtered.length===0 && <tr><td colSpan={10}><div className="empty-state"><div className="empty-icon">📋</div><div>No enquiries found</div></div></td></tr>}
+            {filtered.length===0 && (
+              <tr>
+                <td colSpan={10}>
+                  <div className="empty-state">
+                    <div className="empty-icon">📋</div>
+                    <div>
+                      {search
+                        ? 'No enquiries match your search'
+                        : filter === 'new' && newSubTab === 'today'
+                        ? 'No new enquiries created today'
+                        : filter === 'new' && newSubTab === 'yesterday'
+                        ? 'No new enquiries created yesterday'
+                        : 'No enquiries found'}
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            )}
             {filtered.map(e=>{
               const showCheckbox = canShowCheckbox(e);
               const checked      = mergeSelection.includes(e.id);

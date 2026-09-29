@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, StatusBadge, DaysBadge } from '../utils/helpers';
+import { fmt, fmtCur, StatusBadge, DaysBadge, HoldBadge, HoldNoteCallout } from '../utils/helpers';
 import { printDoc, generateDeliverySlipPDF, generatePackingListPDF } from '../utils/pdfUtils';
 import { ISO3_COUNTRIES } from '../utils/isoCountryCodes';
 import { useAuth } from '../context/AuthContext';
@@ -15,6 +15,7 @@ function fmtM(n,c='INR'){const s={INR:'₹',USD:'$',EUR:'€',SGD:'S$',GBP:'£'}
 // ── GRN Modal — confirm quantities, flag shortages ───────────────────────────
 function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
   const qc = useQueryClient();
+  const isOnHold = !!(order.is_on_hold || order.status === 'hold');
   const supName = id => suppliers.find(s=>s.id===id)?.name||id;
   const today = new Date().toISOString().slice(0,10);
   const cooNameByCode = useMemo(
@@ -169,6 +170,27 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
+          {isOnHold && (
+            <div style={{
+              background: 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)',
+              border: '1.5px solid var(--amber, #d97706)',
+              borderRadius: 'var(--r, 8px)',
+              padding: '12px 16px',
+              marginBottom: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              color: '#92400e'
+            }}>
+              <span style={{ fontSize: 24 }}>⏸</span>
+              <div>
+                <strong style={{ fontSize: 13 }}>ORDER IS ON HOLD — GRN RECORDING IS LOCKED</strong>
+                <div style={{ fontSize: 12, color: '#78350f', marginTop: 2 }}>
+                  <strong>Why on Hold:</strong> "{order.hold_reason || 'No note specified'}" • Held by <strong>{order.hold_by || 'Admin'}</strong>
+                </div>
+              </div>
+            </div>
+          )}
           {/* PO summary */}
           {poSummary.length>0 && (
             <div style={{marginBottom:14,display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -450,13 +472,15 @@ function GRNModal({ order, suppliers, onClose, onSaved, filterPoId }) {
           {/* P2: Separate partial save and full submit buttons */}
           <button className="btn"
             style={{background:'#FAEEDA',color:'#633806',borderColor:'#EF9F27',fontWeight:600}}
-            disabled={saving || allFull || (!anyFilled && !canSaveCreditOnlyPartial)}
+            disabled={saving || isOnHold || allFull || (!anyFilled && !canSaveCreditOnlyPartial)}
+            title={isOnHold ? 'Order is on hold. GRN locked.' : undefined}
             onClick={()=>handleGRN(true)}>
             {saving?'Saving…':'⚠ Save Partial GRN'}
           </button>
           <button className="btn btn-primary"
             style={{background:allFull?'#1D9E75':undefined,borderColor:allFull?'#1D9E75':undefined,fontWeight:700}}
-            disabled={saving || !allFull}
+            disabled={saving || isOnHold || !allFull}
+            title={isOnHold ? 'Order is on hold. GRN locked.' : undefined}
             onClick={()=>handleGRN(false)}>
             {saving?'Submitting…':'✅ Submit Full GRN'}
           </button>
@@ -998,6 +1022,19 @@ export default function DeliveryHubPage() {
   // Delivery Hub = orders where ALL POs are received (line items at delivered_hub or ready_to_ship)
   // OR orders with status='delivery_hub'
   const hubOrders = orders.filter(o => {
+    if (!o || ['closed', 'cancelled', 'failed', 'deleted'].includes(o.status)) return false;
+    const isHoldInHub = (o.is_on_hold || o.status === 'hold') &&
+      ['delivery_hub','transit_hub','partial_hub','partial_dispatched','transit_customer','procurement','open'].includes(o.hold_prev_status);
+    if (isHoldInHub) {
+      if (['delivery_hub','transit_hub','partial_hub','partial_dispatched','transit_customer'].includes(o.hold_prev_status)) return true;
+      const items = o.lineItems||[];
+      const soList = o.supplierOrders||[];
+      if (soList.length > 0) {
+        const allReceived = soList.every(so=>so.status==='received');
+        const hasHubItems = items.some(li=>['delivered_hub','ready_to_ship','grn_partial'].includes(li.line_status));
+        if (allReceived || hasHubItems) return true;
+      }
+    }
     if (o.status === 'delivery_hub') return true;
     if (o.status === 'transit_hub')        return true;  // AWB entered — in transit to hub
     if (o.status === 'partial_hub')        return true;  // partial GRN done
@@ -1253,12 +1290,16 @@ export default function DeliveryHubPage() {
                         below instead, so confirming one never silently also completes others. */}
                     {hasCustomerShipmentInFlight && allOpenShipments.length === 1 && (
                       <button className="btn btn-xs"
-                        style={canMarkCustomerReceived
+                        style={canMarkCustomerReceived && !order.is_on_hold && order.status !== 'hold'
                           ? {background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700}
                           : {background:'var(--surface2)',color:'var(--text3)',borderColor:'var(--border)',fontWeight:700,cursor:'not-allowed'}}
-                        disabled={!canMarkCustomerReceived}
-                        title={blockReason}
+                        disabled={!canMarkCustomerReceived || order.is_on_hold || order.status === 'hold'}
+                        title={(order.is_on_hold || order.status === 'hold') ? 'Order is on hold' : blockReason}
                         onClick={()=>{
+                          if (order.is_on_hold || order.status === 'hold') {
+                            toast.error('Order is on hold. Unhold order from All Orders first.');
+                            return;
+                          }
                           if (!canMarkCustomerReceived) {
                             toast.error(blockReason || 'Wait until all supplier GRN and shipment lines are completed');
                             return;
@@ -1271,6 +1312,29 @@ export default function DeliveryHubPage() {
                   </div>
                 </div>
               </div>
+
+              {(order.is_on_hold || order.status === 'hold') && (
+                <div style={{
+                  marginBottom: 12,
+                  padding: '8px 14px',
+                  borderRadius: 'var(--r, 6px)',
+                  background: 'var(--amber-lt, #fffbeb)',
+                  border: '1.5px solid var(--amber, #d97706)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  fontSize: 12,
+                  color: '#92400e'
+                }}>
+                  <span style={{ fontSize: 18 }}>⏸</span>
+                  <div style={{ flex: 1 }}>
+                    <strong>ORDER IS ON HOLD — ALL DELIVERY HUB OPERATIONS LOCKED</strong>
+                    <div style={{ marginTop: 2, fontSize: 11, color: '#78350f' }}>
+                      <strong>Why on Hold:</strong> "{order.hold_reason || 'No note'}" • Held by <strong>{order.hold_by || 'Admin'}</strong> {order.hold_at ? `(${order.hold_at})` : ''}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit, minmax(110px, 1fr))',gap:14,fontSize:12,marginBottom:10,alignItems:'flex-start'}}>
                 <div><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>CUSTOMER</div><div style={{fontWeight:600}}>{custName(order.customer_id)}</div></div>

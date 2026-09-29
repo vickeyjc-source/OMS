@@ -4,7 +4,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
-import { fmt, fmtCur, StatusBadge, isDelayed, DaysBadge } from '../utils/helpers';
+import { fmt, fmtCur, StatusBadge, isDelayed, DaysBadge, HoldBadge, HoldNoteCallout } from '../utils/helpers';
 import { printDoc, generateSupplierPOPDF } from '../utils/pdfUtils';
 import { useAuth } from '../context/AuthContext';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
@@ -541,7 +541,36 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
 
   const items = order.lineItems||[];
 
+  const [cancelItemDialog, setCancelItemDialog] = useState(null);
+  const [cancelItemReason, setCancelItemReason] = useState('');
+  const [cancellingItem, setCancellingItem] = useState(false);
+
+  const handleCancelItem = async () => {
+    if (!cancelItemReason.trim()) {
+      toast.error('Cancellation reason is required');
+      return;
+    }
+    setCancellingItem(true);
+    try {
+      await api.post(`/orders/${order.id}/items/${cancelItemDialog.item.id}/cancel`, {
+        reason: cancelItemReason.trim(),
+      });
+      toast.success('Line item cancelled');
+      setCancelItemDialog(null);
+      setCancelItemReason('');
+      qc.invalidateQueries(['orders']);
+      qc.invalidateQueries(['finance-supplier']);
+      qc.invalidateQueries(['finance-customer']);
+      onSaved();
+    } catch(err) {
+      toast.error(err?.response?.data?.error || 'Failed to cancel line item');
+    } finally {
+      setCancellingItem(false);
+    }
+  };
+
   return (
+    <>
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal modal-xl" style={{width:'98vw',maxWidth:1920,height:'94vh',maxHeight:'94vh'}}>
         <div className="modal-header">
@@ -569,11 +598,11 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                     {supName(supId)}: {ids.length} item{ids.length!==1?'s':''}
                   </div>
                 ))}
-                {(order.lineItems||[]).filter(li=>!alloc[li.id]?.supplier_id).length > 0 && (
+                {(order.lineItems||[]).filter(li=>li.line_status !== 'cancelled' && !alloc[li.id]?.supplier_id).length > 0 && (
                   <div style={{padding:'4px 10px',borderRadius:'var(--r-sm)',
                     background:'var(--amber-lt,#fffbeb)',border:'1px solid var(--amber,#d97706)33',
                     fontWeight:600,color:'var(--amber,#d97706)'}}>
-                    ⚠ {(order.lineItems||[]).filter(li=>!alloc[li.id]?.supplier_id).length} unassigned
+                    ⚠ {(order.lineItems||[]).filter(li=>li.line_status !== 'cancelled' && !alloc[li.id]?.supplier_id).length} unassigned
                   </div>
                 )}
               </div>
@@ -597,10 +626,12 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                   <th>Assign Supplier <span style={{color:'var(--red)'}}>*</span></th>
                   <th>Supplier PI / Send PO</th>
                   <th>Payment Terms</th>
+                  {!readOnly && <th style={{textAlign:'right'}}>Action</th>}
                 </tr>
               </thead>
               <tbody>
                 {items.map((li,i)=>{
+                  const isCancelled = li.line_status === 'cancelled';
                   const a = alloc[li.id]||{};
                   const srcSupplier = a._sourced_supplier_id;
                   const stockHits = getInventoryHitsForLineItem(li, inventoryMap);
@@ -608,10 +639,13 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                   const cost = parseFloat(a.confirmed_price)||0;
                   const margin = custTotal - cost;
                   return (
-                    <tr key={li.id} style={{background:a.supplier_id?'transparent':'var(--amber-lt,#fffbeb)'}}>
+                    <tr key={li.id} style={{
+                      background: isCancelled ? 'var(--red-lt,#fef2f2)' : a.supplier_id ? 'transparent' : 'var(--amber-lt,#fffbeb)',
+                      opacity: isCancelled ? 0.85 : 1
+                    }}>
                       <td style={{color:'var(--text3)',fontSize:11}}>{i+1}</td>
                       <td>
-                        <div style={{fontWeight:600}}>{li.component}</div>
+                        <div style={{fontWeight:600,textDecoration:isCancelled?'line-through':'none',color:isCancelled?'var(--text3)':'inherit'}}>{li.component}</div>
                         <div style={{fontSize:11,color:'var(--text3)'}}>{li.manufacturer||''}</div>
                       </td>
                       <td style={{textAlign:'right',fontWeight:600}}>{li.qty}</td>
@@ -664,6 +698,29 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                           {a._sourced_price ? fmtM(a._sourced_price,a._sourced_currency||'INR') : '—'}
                         </span>}
                       </td>
+                      {/* Supplier select, PI, and Payment terms */}
+                      {isCancelled ? (
+                        <td colSpan={3} style={{
+                          textAlign:'center',
+                          padding:'10px',
+                          background:'#fee2e2',
+                          color:'var(--red,#dc2626)',
+                          fontWeight:700,
+                          fontSize:11,
+                          borderLeft:'2px dashed var(--red,#dc2626)'
+                        }}>
+                          <div style={{display:'inline-flex',alignItems:'center',gap:6}}>
+                            <span>🚫 Line Item Cancelled from Order</span>
+                            <span style={{fontSize:10,fontWeight:500,color:'var(--text2)'}}>— Excluded from PO Allocation</span>
+                            {li.cancellation_reason && (
+                              <span style={{fontSize:10,color:'var(--red)',fontStyle:'italic'}}>
+                                ("{li.cancellation_reason}")
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      ) : (
+                        <>
                       {/* Supplier select */}
                       <td style={{minWidth:160}}>
                         {(()=>{
@@ -829,6 +886,24 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
                           </label>;
                         })()}
                       </td>
+                        </>
+                      )}
+                      {!readOnly && (
+                        <td style={{textAlign:'right',whiteSpace:'nowrap'}}>
+                          {li.line_status === 'cancelled' ? (
+                            <span style={{fontSize:11,color:'var(--red)',fontWeight:700,padding:'2px 7px',background:'var(--red-lt,#fef2f2)',borderRadius:99}}>Cancelled</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-xs"
+                              style={{color:'var(--red)',borderColor:'var(--red-lt,#fef2f2)',background:'var(--red-lt,#fef2f2)',fontWeight:600}}
+                              onClick={()=>setCancelItemDialog({ orderId: order.id, item: li })}
+                              title="Cancel this item">
+                              ✕ Cancel
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -886,6 +961,52 @@ function AllocationModal({ order, suppliers, inventoryItems, customers=[], enqui
         </div>
       </div>
     </div>
+
+    {/* Cancel Line Item Confirmation Modal */}
+    {cancelItemDialog && (
+      <div className="overlay" style={{zIndex:1300}} onClick={()=>setCancelItemDialog(null)}>
+        <div className="modal" style={{maxWidth:480,width:'92vw'}} onClick={e=>e.stopPropagation()}>
+          <div className="modal-header">
+            <h2 style={{display:'flex',alignItems:'center',gap:8,color:'var(--red)'}}>
+              <span>🚫</span> Cancel Line Item
+            </h2>
+            <button className="close-x" onClick={()=>setCancelItemDialog(null)}>×</button>
+          </div>
+          <div className="modal-body">
+            <div style={{fontSize:13,marginBottom:12}}>
+              Are you sure you want to cancel item <strong>{cancelItemDialog.item?.component}</strong>
+              {cancelItemDialog.item?.ipn ? ` (${cancelItemDialog.item.ipn})` : ''}?
+            </div>
+            <div style={{fontSize:11,color:'var(--amber,#d97706)',marginBottom:10,background:'var(--amber-lt,#fffbeb)',padding:8,borderRadius:'var(--r-sm)'}}>
+              ⚠ This will remove this item from the supplier purchase order and automatically recalculate supplier advance amounts in Finance.
+            </div>
+            <div className="form-group" style={{marginBottom:0}}>
+              <label className="label">Cancellation Reason <span className="req">*</span></label>
+              <textarea
+                className="input"
+                rows={3}
+                value={cancelItemReason}
+                onChange={e=>setCancelItemReason(e.target.value)}
+                placeholder="Enter cancellation reason for audit (required)…"
+                autoFocus
+              />
+            </div>
+          </div>
+          <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+            <button className="btn" onClick={()=>{setCancelItemDialog(null);setCancelItemReason('');}}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-danger"
+              disabled={cancellingItem || !cancelItemReason.trim()}
+              onClick={handleCancelItem}>
+              {cancellingItem ? 'Cancelling…' : 'Confirm Cancel Item'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
@@ -1144,7 +1265,7 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
   return (
     <>
     <div className="overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
-      <div className="modal modal-lg">
+      <div className="modal modal-xl" style={{width:'96vw',maxWidth:1400,height:'92vh',maxHeight:'92vh',display:'flex',flexDirection:'column'}}>
         <div className="modal-header">
           <div><h2>🛒 {po.internal_po_no||po.id}</h2>
             <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',marginTop:4}}>
@@ -1578,8 +1699,17 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
 
 
 // ── Order Procurement Detail Modal ────────────────────────────────────────────
-function OrderProcurementModal({ order, suppliers, inventoryItems, customers, shippers, enquiry, poMode, onClose, onSaved, readOnly=false }) {
+function OrderProcurementModal({ order: initialOrder, suppliers, inventoryItems, customers, shippers, enquiry, poMode, onClose, onSaved, readOnly=false }) {
   const qc = useQueryClient();
+  const { data: liveOrder } = useQuery({
+    queryKey: ['order', initialOrder?.id],
+    queryFn: () => api.get('/orders/' + initialOrder.id).then(r => r.data).catch(() => initialOrder),
+    initialData: initialOrder,
+    refetchInterval: 4000,
+  });
+  const order = liveOrder || initialOrder;
+  const isOnHold = !!(order.is_on_hold || order.status === 'hold');
+  const effectiveReadOnly = readOnly || isOnHold;
   const [showAlloc,  setShowAlloc]  = useState(false);
   const [managingPO, setManagingPO] = useState(null);
   const [paymentBreakdownOpen, setPaymentBreakdownOpen] = useState(true);
@@ -1801,18 +1931,24 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       setMergeBusy(null);
     }
   };
-  const unPOd=allItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, enquiry));
-  const orderVal=allItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0);
-  const orderTaxVal=allItems.reduce((s,li)=>{
+  const activeLineItems=allItems.filter(li=>li.line_status!=='cancelled');
+  const cancelledLineItems=allItems.filter(li=>li.line_status==='cancelled');
+  const unPOd=activeLineItems.filter(li=>!poItemIds.includes(li.id) && !getSourcedSupplierId(li, enquiry));
+  const orderVal=parseFloat(activeLineItems.reduce((s,li)=>s+(li.qty||0)*(li.unit_price||0),0).toFixed(2));
+  const orderTaxVal=parseFloat(activeLineItems.reduce((s,li)=>{
     const base=(li.qty||0)*(li.unit_price||0);
     return s + base*((li.tax_rate||0)/100);
-  },0);
-  const customerTotal=orderVal+orderTaxVal;
+  },0).toFixed(2));
+  const customerTotal=parseFloat((orderVal+orderTaxVal).toFixed(2));
+  const cancelledVal=parseFloat(cancelledLineItems.reduce((s,li)=>{
+    const base=(li.qty||0)*(li.unit_price||0);
+    return s + base + base*((li.tax_rate||0)/100);
+  },0).toFixed(2));
   // Use buying_price_per_unit × qty if available, else confirmed_price
   const procVal = soList.reduce((s,so) => {
     const bpu = parseFloat(so.buying_price_per_unit);
     if (bpu > 0) {
-      const soItems2 = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+      const soItems2 = (so.items||[]).map(id=>activeLineItems.find(li=>li.id===id)).filter(Boolean);
       const totalQty = soItems2.reduce((q,li)=>q+(li.qty||0),0);
       return s + bpu * totalQty;
     }
@@ -1824,14 +1960,15 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
   const returnedForCorrection = soList.some(so=>so.finance_returned===true||so.finance_returned===1);
   // Do not lock the whole allocation after only one supplier group is sent.
   // Every active line must be linked to a supplier PO before allocation is complete.
-  const activeItems = allItems.filter(li=>!['delivered','closed'].includes(li.line_status));
+  const activeItems = allItems.filter(li=>!['delivered','closed','cancelled'].includes(li.line_status));
   const allocationComplete = activeItems.length > 0 && activeItems.every(li=>poItemIds.includes(li.id));
   const allocationLocked = readOnly || (!returnedForCorrection && allocationComplete &&
     (soList.length > 0 || blockedPOs.length > 0 || order.status === 'sup_payment_update'));
   const sourcingRows = enquiry?.sourcing || [];
   const enquiryItems = enquiry?.items || [];
   let supplierSummaries = soList.map(so => {
-    const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+    const rawSoItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+    const soItems = rawSoItems.filter(li=>li.line_status!=='cancelled');
     const itemBreakdown = soItems.map(li => {
       const enqItem = enquiryItems.find(ei => ei.id===li.id || ei.component===li.component);
       const srcRow = sourcingRows.find(s=>s.enquiry_item_id===li.id)
@@ -1848,7 +1985,11 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     });
     const sourceTotal = itemBreakdown.reduce((sum, item) => sum + item.lineSourceTotal, 0);
     const supplierTaxRate = parseFloat(so.supplier_tax_rate)||0;
-    const supplierTaxAmount = parseFloat(so.supplier_tax_amount) || sourceTotal* supplierTaxRate/100;
+    // Calculate tax on active items if line items were cancelled or if tax amount is outdated
+    const activeTax = (sourceTotal * supplierTaxRate) / 100;
+    const supplierTaxAmount = (rawSoItems.length !== soItems.length && supplierTaxRate > 0)
+      ? activeTax
+      : (parseFloat(so.supplier_tax_amount) || activeTax);
     const supplierPayable = sourceTotal + supplierTaxAmount;
     // Additional charges recorded at payment time (advance via finance_queue, net via supplier_orders)
     const parseCharges = (raw) => {
@@ -1864,6 +2005,13 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
     const chargesTotal = charges.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
     const amountChangeNote = so.advance_amount_change_note || so.net_amount_change_note || '';
     const actualAmountRaw = so.advance_actual_amount ?? so.net_actual_amount ?? null;
+    const actualAmount = actualAmountRaw !== null ? parseFloat(actualAmountRaw) : null;
+    const excessSupplierPaid = (actualAmount !== null && actualAmount > (supplierPayable + chargesTotal + 0.01))
+      ? parseFloat((actualAmount - (supplierPayable + chargesTotal)).toFixed(2))
+      : 0;
+    const isSettled = so.settlement_status === 'settled';
+    const isRecoveryPending = (excessSupplierPaid > 0) && !isSettled;
+    const isRecoveryDone = (excessSupplierPaid > 0) && isSettled;
     return {
       id: so.id,
       supplierName: supName(so.supplier_id),
@@ -1875,14 +2023,19 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
       charges,
       chargesTotal,
       amountChangeNote,
-      actualAmount: actualAmountRaw !== null ? parseFloat(actualAmountRaw) : null,
+      actualAmount,
+      excessSupplierPaid,
+      settlementStatus: so.settlement_status,
+      isSettled,
+      isRecoveryPending,
+      isRecoveryDone,
     };
   });
   // Before POs are generated, show the provisional sourcing allocation instead
   // of an empty ₹0 payable box.
   if (supplierSummaries.length===0) {
     const provisional={};
-    allItems.forEach(li=>{
+    activeLineItems.forEach(li=>{
       const enqItem=enquiryItems.find(ei=>ei.id===li.id||ei.component===li.component);
       const srcRow=sourcingRows.find(s=>s.enquiry_item_id===li.id)
         ||(enqItem?sourcingRows.find(s=>s.enquiry_item_id===enqItem.id):null);
@@ -1920,6 +2073,35 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         <div className="modal-body">
+          {/* Prominent On-Hold Alert Banner */}
+          {isOnHold && (
+            <div style={{
+              background: 'linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%)',
+              border: '1.5px solid var(--amber, #d97706)',
+              borderRadius: 'var(--r, 8px)',
+              padding: '12px 16px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              boxShadow: '0 2px 8px rgba(217, 119, 6, 0.1)'
+            }}>
+              <span style={{ fontSize: 26 }}>⏸</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <strong style={{ color: '#92400e', fontSize: 14 }}>THIS ORDER IS ON HOLD — ALL PROCUREMENT ACTIONS LOCKED</strong>
+                  <span style={{ fontSize: 10, background: 'var(--amber, #d97706)', color: '#fff', padding: '2px 8px', borderRadius: 999, fontWeight: 700 }}>LOCKED</span>
+                </div>
+                <div style={{ marginTop: 4, fontSize: 13, color: '#78350f', fontWeight: 600 }}>
+                  Why on Hold: "{order.hold_reason || 'No note specified'}"
+                </div>
+                <div style={{ marginTop: 2, fontSize: 11, color: '#b45309' }}>
+                  Placed on hold by <strong>{order.hold_by || 'Admin'}</strong> {order.hold_at ? `on ${order.hold_at}` : ''}. Operations locked until unheld from All Orders.
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Detect when supplier terms differ from saved PO terms */}
           {(()=>{
             const mismatched = soList.filter(so=>{
@@ -1988,6 +2170,52 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                       <div style={{display:'flex',justifyContent:'space-between',gap:12,paddingTop:6,borderTop:'1px solid var(--border)',fontSize:13}}>
                         <span>Total incl. tax</span><strong style={{color:'var(--green)'}}>{fmtM(customerTotal)}</strong>
                       </div>
+                      {cancelledVal > 0 && (
+                        <div style={{display:'grid',gap:5,paddingTop:5,borderTop:'1px dashed #cbd5e1'}}>
+                          <div style={{display:'flex',justifyContent:'space-between',gap:12,fontSize:11,color:'var(--red,#dc2626)'}}>
+                            <span>🚫 Cancelled Excluded</span><strong>-{fmtM(cancelledVal)}</strong>
+                          </div>
+                          {order.settlement_status === 'settled' ? (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              fontSize:11,
+                              padding:'4px 8px',
+                              borderRadius:4,
+                              background:'var(--green-lt,#f0fdf4)',
+                              border:'1px solid #86efac',
+                              color:'var(--green,#16a34a)',
+                              fontWeight:700
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                                <span style={{fontSize:13}}>✅</span> Customer Settlement Done:
+                              </span>
+                              <span>✓ Settled ({fmtM(cancelledVal)})</span>
+                            </div>
+                          ) : (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              fontSize:11,
+                              padding:'4px 8px',
+                              borderRadius:4,
+                              background:'var(--amber-lt,#fffbeb)',
+                              border:'1px solid #fde68a',
+                              color:'var(--amber,#d97706)',
+                              fontWeight:700
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                                <span style={{fontSize:13}}>⚠️</span> Customer Settlement Pending:
+                              </span>
+                              <span>Action in Finance ({fmtM(cancelledVal)})</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
@@ -2008,6 +2236,45 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                               <span style={{fontFamily:'monospace'}}>{fmtM(c.amount)}</span>
                             </div>
                           ))}
+                          {summary.isRecoveryDone ? (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              fontSize:11,
+                              padding:'3px 6px',
+                              borderRadius:4,
+                              background:'var(--green-lt,#f0fdf4)',
+                              border:'1px solid #86efac',
+                              color:'var(--green,#16a34a)',
+                              fontWeight:700
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                                <span>✅</span> Overpayment Recovered
+                              </span>
+                              <span>✓ Done ({fmtM(summary.excessSupplierPaid)})</span>
+                            </div>
+                          ) : summary.isRecoveryPending ? (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              fontSize:11,
+                              padding:'3px 6px',
+                              borderRadius:4,
+                              background:'#fffbeb',
+                              border:'1px solid #fde68a',
+                              color:'var(--amber,#d97706)',
+                              fontWeight:700
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:4}}>
+                                <span>⚠️</span> Overpaid (Recovery needed)
+                              </span>
+                              <span>{fmtM(summary.excessSupplierPaid)}</span>
+                            </div>
+                          ) : null}
                           {summary.amountChangeNote && (
                             <div style={{fontSize:11,color:'var(--red)',fontStyle:'italic'}}>Note: {summary.amountChangeNote}</div>
                           )}
@@ -2065,6 +2332,45 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                               <strong style={{color:'var(--green)'}}>{fmtM(summary.actualAmount)}</strong>
                             </div>
                           )}
+                          {summary.isRecoveryDone ? (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              padding:'6px 10px',
+                              borderRadius:4,
+                              background:'var(--green-lt,#f0fdf4)',
+                              border:'1.5px solid #22c55e',
+                              color:'var(--green,#16a34a)',
+                              fontWeight:700,
+                              fontSize:11
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:6}}>
+                                <span style={{fontSize:13}}>✅</span> Overpayment Recovered (Item Cancelled):
+                              </span>
+                              <span>✓ Recovered {fmtM(summary.excessSupplierPaid)} in Finance</span>
+                            </div>
+                          ) : summary.isRecoveryPending ? (
+                            <div style={{
+                              display:'flex',
+                              justifyContent:'space-between',
+                              alignItems:'center',
+                              gap:12,
+                              padding:'6px 10px',
+                              borderRadius:4,
+                              background:'#fffbeb',
+                              border:'1.5px solid #f59e0b',
+                              color:'var(--amber,#d97706)',
+                              fontWeight:700,
+                              fontSize:11
+                            }}>
+                              <span style={{display:'flex',alignItems:'center',gap:6}}>
+                                <span style={{fontSize:13}}>⚠️</span> Overpaid (Item Cancelled):
+                              </span>
+                              <span>{fmtM(summary.excessSupplierPaid)} — Recovery required in Finance</span>
+                            </div>
+                          ) : null}
                           {summary.amountChangeNote && (
                             <div style={{fontSize:11,color:'var(--red)',fontStyle:'italic'}}>Note: {summary.amountChangeNote}</div>
                           )}
@@ -2131,10 +2437,14 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                   const srcRow=(enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===li.id)
                     ||(enqItem?(enquiry?.sourcing||[]).find(s=>s.enquiry_item_id===enqItem.id):null);
                   const srcSup=srcRow?.supplier_id;
+                  const isCancelled = li.line_status === 'cancelled';
                   return (
-                    <tr key={li.id}>
+                    <tr key={li.id} style={{
+                      background: isCancelled ? 'var(--red-lt, #fef2f2)' : undefined,
+                      opacity: isCancelled ? 0.85 : 1
+                    }}>
                       <td>{i+1}</td>
-                      <td className="bold">
+                      <td className="bold" style={{textDecoration:isCancelled?'line-through':'none',color:isCancelled?'var(--text3)':'inherit'}}>
                         {li.component}
                         <div style={{fontSize:10,color:'var(--text3)'}}>{li.manufacturer}</div>
                         {canSplitOrder && !so && li.qty > 1 && !li.split_from_item_id && (
@@ -2238,7 +2548,9 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                         })()}
                       </td>
                       <td>
-                        {so
+                        {isCancelled ? (
+                          <span style={{fontSize:11,color:'var(--red,#dc2626)',fontWeight:700}}>🚫 Cancelled</span>
+                        ) : so
                           ? <div style={{display:'flex',flexDirection:'column',gap:3}}>
                               <span style={{fontSize:11,fontWeight:700,color:'var(--accent)'}}>
                                 Assigned: {supName(so.supplier_id)}
@@ -2269,8 +2581,21 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
                               : <span style={{fontSize:11,color:'var(--amber,#d97706)',fontWeight:600}}>⚠ No PO</span>)
                         }
                       </td>
-                      <td><span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{li.line_status==='negotiating'?'Confirmed':li.line_status}</span></td>
-                      <td>{(()=>{
+                      <td>
+                        <div style={{display:'inline-flex',alignItems:'center',gap:4}}>
+                          <span style={{fontSize:11,fontWeight:600,color:isCancelled?'var(--red,#dc2626)':'var(--text2)'}}>
+                            {li.line_status==='negotiating'?'Confirmed':li.line_status}
+                          </span>
+                          {isCancelled && (
+                            <span
+                              style={{padding:'1px 5px',borderRadius:99,fontSize:10,background:'#fee2e2',color:'var(--red,#dc2626)',border:'1px solid var(--red,#dc2626)',fontWeight:800,cursor:'help'}}
+                              title={li.cancellation_reason ? `Cancellation Reason: ${li.cancellation_reason}` : 'Item Cancelled'}>
+                              ℹ️
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td>{isCancelled ? <span style={{color:'var(--text3)'}}>—</span> : (()=>{
                         const srcPrice   = Number(li.procurement_price)||Number(srcRow?.sourced_price) || 0;
                         const quotePrice = Number(srcRow?.quote_price)   || 0;
                         if (!srcPrice || !quotePrice) return <span style={{color:'var(--text3)'}}>—</span>;
@@ -2334,8 +2659,8 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
               <button
                 className="btn btn-xs btn-primary"
                 onClick={()=>setShowAlloc(true)}
-                title={allocationLocked ? 'PO already allocated. View only.' : 'Manage PO allocation'}>
-                {allocationLocked ? '👁 View' : '📋 Manage'}
+                title={isOnHold ? 'Order is on hold. Allocation view only.' : allocationLocked ? 'PO already allocated. View only.' : 'Manage PO allocation'}>
+                {isOnHold ? '🔒 Locked' : allocationLocked ? '👁 View' : '📋 Manage'}
               </button>
             </div>
             {soList.length===0&&<div style={{color:'var(--text3)',fontSize:13,padding:'8px 0'}}>No POs raised. Click "Manage" to assign components to suppliers.</div>}
@@ -2508,10 +2833,10 @@ function OrderProcurementModal({ order, suppliers, inventoryItems, customers, sh
         </div>
         <div className="modal-footer"><button className="btn" onClick={onClose}>Close</button></div>
       </div>
-      {showAlloc&&<AllocationModal order={order} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} enquiry={enquiry} poMode={poMode} readOnly={allocationLocked}
+      {showAlloc&&<AllocationModal order={order} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} enquiry={enquiry} poMode={poMode} readOnly={effectiveReadOnly || allocationLocked}
         onClose={()=>setShowAlloc(false)} onSaved={()=>{setShowAlloc(false);qc.invalidateQueries(['orders']);onSaved();}}/>}
       {managingPO&&<ManagePOModal po={managingPO} order={order} enquiry={enquiry} suppliers={suppliers} inventoryItems={inventoryItems} shippers={shippers} poMode={poMode}
-        readOnly={false}
+        readOnly={effectiveReadOnly}
         poList={soList} poIndex={soList.findIndex(s=>s.id===managingPO.id)}
         onNavigate={(idx)=>setManagingPO(soList[idx])}
         onClose={()=>setManagingPO(null)} onSaved={()=>{setManagingPO(null);qc.invalidateQueries(['orders']);onSaved();}}/>}
@@ -2957,9 +3282,10 @@ export default function ProcurementBinPage() {
 
     // Active procurement orders
     if (['procurement', 'sup_payment_update'].includes(o.status)) return true;
+    if ((o.is_on_hold || o.status === 'hold') && ['procurement', 'sup_payment_update'].includes(o.hold_prev_status)) return true;
 
     // In-transit or partial hub orders with procurement pending
-    if (['transit_hub', 'partial_hub'].includes(o.status)) {
+    if (['transit_hub', 'partial_hub'].includes(o.status) || ((o.is_on_hold || o.status === 'hold') && ['transit_hub', 'partial_hub'].includes(o.hold_prev_status))) {
       return hasUnallocatedItems || !allPOsReceived;
     }
 
