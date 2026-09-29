@@ -2200,9 +2200,17 @@ function SupplierBankDetailsModal({ supplier, onClose, onSaved }) {
 }
 
 // ── Status badge helpers ───────────────────────────────────────────────────────
-function DueBadge({ daysLeft }) {
+function DueBadge({ daysLeft, pendingClose }) {
+  if (pendingClose) {
+    return (
+      <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:600,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe'}}>
+        ⏳ Starts on order close
+      </span>
+    );
+  }
   if (daysLeft === null) return null;
   if (daysLeft < 0)  return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'var(--red-lt,#fef2f2)',color:'var(--red)'}}>⚠ {Math.abs(daysLeft)}d overdue</span>;
+  if (daysLeft === 0) return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'#fff1f2',color:'#e11d48'}}>🚨 Due Today</span>;
   if (daysLeft < 10) return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:700,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)'}}>Due in {daysLeft}d</span>;
   return <span style={{padding:'2px 8px',borderRadius:99,fontSize:11,fontWeight:600,background:'var(--surface2)',color:'var(--text2)'}}>Due in {daysLeft}d</span>;
 }
@@ -3471,7 +3479,10 @@ export default function FinancePage() {
               </tr></thead>
               <tbody>
                 {filterCust([...custNet,...custOther]).map(o=>{
-                  const daysLeft = o.computed_due_date ? daysDiff(o.computed_due_date) : null;
+                  const isOrderClosed = Boolean(o.is_order_closed || o.closed_at || o.status === 'closed');
+                  const isNet = isNetTerms(o.payment_terms);
+                  const pendingClose = isNet && !isOrderClosed;
+                  const daysLeft = (!pendingClose && o.computed_due_date) ? daysDiff(o.computed_due_date) : null;
                   const isHold = Boolean(o.is_on_hold || o.status === 'hold');
                   return (
                     <tr key={o.id} style={{background:daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: o.id, mode:'customer' })}>
@@ -3504,17 +3515,19 @@ export default function FinancePage() {
                         {o.balance_due<=0?'✅ Settled':fmtM(o.balance_due)}
                         {o.credit_badge && (
                           <div style={{marginTop:3}}>
-                            <CreditCountdownBadge badge={o.credit_badge} daysRemaining={o.credit_days_remaining} />
+                            <CreditCountdownBadge badge={o.credit_badge.type} daysRemaining={o.credit_days_remaining} />
                           </div>
                         )}
                       </td>
                       <td>
-                        {o.computed_due_date ? (
+                        {!pendingClose && o.computed_due_date ? (
                           <div>
                             <div style={{fontSize:12}}>{fmtDate(o.computed_due_date)}</div>
                             <DueBadge daysLeft={daysLeft}/>
                           </div>
-                        ) : '—'}
+                        ) : (
+                          <DueBadge daysLeft={null} pendingClose={pendingClose}/>
+                        )}
                       </td>
                       <td>
                         {o.status === 'cancelled' ? (
@@ -3749,8 +3762,9 @@ export default function FinancePage() {
               <tbody>
                 {filterSup(supNet).map(r=>{
                   const isHold = Boolean(r.is_on_hold || r.order_status === 'hold' || r.status === 'hold');
+                  const isOrderClosed = Boolean(r.is_order_closed || r.closed_at || r.order_status === 'closed');
                   const { entity: fullEntity, entityType, displayName } = resolveFinanceSupplier(r.supplier_id);
-                  const daysLeft = r.payment_due_date ? daysDiff(r.payment_due_date) : null;
+                  const daysLeft = (isOrderClosed && r.payment_due_date) ? daysDiff(r.payment_due_date) : null;
                   const isPaid = r.status === 'paid';
                   const isPartial = r.status === 'partial_paid';
                   const total   = parseFloat(r.confirmed_price)||0;
@@ -3778,12 +3792,14 @@ export default function FinancePage() {
                         {balance > 0 ? fmtM(balance, r.confirmed_currency) : '✓ Nil'}
                       </td>
                       <td>
-                        {r.payment_due_date ? (
+                        {isOrderClosed && r.payment_due_date ? (
                           <div>
                             <div style={{fontSize:12}}>{fmtDate(r.payment_due_date)}</div>
                             <DueBadge daysLeft={daysLeft}/>
                           </div>
-                        ) : '—'}
+                        ) : (
+                          <DueBadge daysLeft={null} pendingClose={!isOrderClosed}/>
+                        )}
                       </td>
                       <td>
                         {isHold ? <HoldBadge /> : r.status === 'net_payment_recorded' ? (

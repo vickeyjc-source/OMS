@@ -979,6 +979,16 @@ export function CreditCountdownBadge({ badge, daysRemaining }) {
       </span>
     );
   }
+  if (badge === 'pending_close') {
+    return (
+      <span style={{
+        display:'inline-flex',alignItems:'center',gap:4,padding:'3px 8px',borderRadius:6,
+        fontSize:11,fontWeight:600,background:'#eff6ff',color:'#1d4ed8',border:'1px solid #bfdbfe'
+      }}>
+        ⏳ Starts on order close
+      </span>
+    );
+  }
   if (badge === 'paid') {
     return (
       <span style={{
@@ -1929,7 +1939,7 @@ export function CustomerCreditView({ customer, onClose }) {
                         <td>
                           <div style={{display:'flex',alignItems:'center',gap:8}}>
                             <span style={{fontSize:12,fontWeight:600,color:'var(--text2)'}}>
-                              {d.due_date || '—'}
+                              {d.countdown_badge === 'pending_close' ? '—' : (d.due_date || '—')}
                             </span>
                             <CreditCountdownBadge badge={d.countdown_badge} daysRemaining={d.days_remaining} />
                           </div>

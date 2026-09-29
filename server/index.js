@@ -948,7 +948,7 @@ app.get('/api/customers/:id/credit-profile', auth, asyncRoute(async (req, res) =
   let drawdowns = [];
   try {
     drawdowns = await allAsync(
-      `SELECT d.*, o.po_number, o.customer_payment_status, o.payment_terms,
+      `SELECT d.*, o.po_number, o.customer_payment_status, o.payment_terms, o.status AS order_status, o.closed_at,
         COALESCE((SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) FROM order_items WHERE order_id = o.id), 0) AS order_total
        FROM customer_credit_drawdowns d
        LEFT JOIN orders o ON o.id = d.order_id
@@ -972,39 +972,58 @@ app.get('/api/customers/:id/credit-profile', auth, asyncRoute(async (req, res) =
   const todayDate = new Date(today);
 
   // Compute countdown, overdue status, and repaid amount for active drawdowns
+  // DAY COUNT STARTS WHEN ORDER IS CLOSED (MOVED TO CLOSED BIN)
   const enrichedDrawdowns = drawdowns.map(d => {
     const origAmt = parseFloat(d.amount) || 0;
     const balDue = parseFloat(d.balance_due) || 0;
     const repaidAmt = Math.max(0, origAmt - balDue);
     const isCleared = balDue <= 0.01 || d.status === 'cleared';
-    let daysRemaining = 0;
-    let countdownBadge = 'cleared';
-    if (!isCleared && d.due_date) {
-      const due = new Date(d.due_date);
-      const diffTime = due.getTime() - todayDate.getTime();
-      daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-      if (daysRemaining < 0) {
-        countdownBadge = 'overdue';
-      } else if (daysRemaining === 0) {
-        countdownBadge = 'due_today';
-      } else if (daysRemaining === 1) {
-        countdownBadge = '1_day';
-      } else if (daysRemaining === 2) {
-        countdownBadge = '2_days';
-      } else if (daysRemaining === 3) {
-        countdownBadge = '3_days';
-      } else {
-        countdownBadge = 'normal';
+    const isOrderClosed = !!(d.closed_at || d.order_status === 'closed');
+    const creditDays = parseInt(c.credit_days) || 30;
+
+    let daysRemaining = null;
+    let countdownBadge = 'pending_close';
+    let effectiveDueDate = d.due_date || '';
+
+    if (isCleared) {
+      countdownBadge = 'cleared';
+    } else if (!isOrderClosed) {
+      countdownBadge = 'pending_close';
+      daysRemaining = null;
+      effectiveDueDate = '';
+    } else {
+      if (!effectiveDueDate && d.closed_at) {
+        effectiveDueDate = addDaysIso(d.closed_at.slice(0, 10), creditDays);
+      }
+      if (effectiveDueDate) {
+        const due = new Date(effectiveDueDate);
+        const diffTime = due.getTime() - todayDate.getTime();
+        daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        if (daysRemaining < 0) {
+          countdownBadge = 'overdue';
+        } else if (daysRemaining === 0) {
+          countdownBadge = 'due_today';
+        } else if (daysRemaining === 1) {
+          countdownBadge = '1_day';
+        } else if (daysRemaining === 2) {
+          countdownBadge = '2_days';
+        } else if (daysRemaining === 3) {
+          countdownBadge = '3_days';
+        } else {
+          countdownBadge = 'normal';
+        }
       }
     }
     return {
       ...d,
+      due_date: effectiveDueDate,
       amount: origAmt,
       balance_due: balDue,
       repaid_amount: parseFloat(repaidAmt.toFixed(2)),
       days_remaining: daysRemaining,
       countdown_badge: countdownBadge,
       is_cleared: isCleared,
+      is_order_closed: isOrderClosed,
     };
   });
 
@@ -2948,7 +2967,49 @@ app.put('/api/orders/:id', auth, asyncRoute(async (req, res) => {
   }
 
   if (d.status === 'closed') {
-    await runAsync('UPDATE orders SET closed_at=? WHERE id=?', [nowStr(), oid]);
+    const closedDate = nowStr();
+    await runAsync('UPDATE orders SET closed_at=? WHERE id=?', [closedDate, oid]);
+
+    // DAY COUNT STARTS ON ORDER CLOSE:
+    // 1) Customer Net terms
+    try {
+      const effectiveTerms = (d.payment_terms !== undefined ? d.payment_terms : o.payment_terms) || '';
+      const parsedCustomerTerms = parsePaymentTerms(effectiveTerms);
+      if (parsedCustomerTerms.payment_terms_type === 'net') {
+        const orderDueDate = addDaysIso(closedDate.slice(0, 10), parsedCustomerTerms.payment_net_days || 30);
+        await runAsync('UPDATE orders SET payment_due_date=? WHERE id=?', [orderDueDate, oid]);
+      }
+    } catch(e) {
+      console.warn('[ORDER-CLOSE] Customer Net due_date update error:', e?.message || e);
+    }
+
+    // 2) Customer Credit Line drawdowns for this order
+    try {
+      const cust = await getAsync('SELECT credit_days FROM customers WHERE id=?', [o.customer_id]);
+      const creditDays = parseInt(cust?.credit_days) || 30;
+      const creditDueDate = addDaysIso(closedDate.slice(0, 10), creditDays);
+      await runAsync(
+        "UPDATE customer_credit_drawdowns SET due_date=? WHERE order_id=? AND status NOT IN ('cleared', 'cancelled')",
+        [creditDueDate, oid]
+      );
+    } catch(e) {
+      console.warn('[ORDER-CLOSE] Customer Credit drawdowns due_date update error:', e?.message || e);
+    }
+
+    // 3) Supplier Net terms on linked POs
+    try {
+      const linkedSos = await allAsync(
+        "SELECT id, payment_net_days FROM supplier_orders WHERE order_id=? AND (payment_terms_type='net' OR payment_terms_type IS NULL)",
+        [oid]
+      );
+      for (const so of linkedSos) {
+        const soDueDate = addDaysIso(closedDate.slice(0, 10), parseInt(so.payment_net_days) || 30);
+        await runAsync('UPDATE supplier_orders SET payment_due_date=? WHERE id=?', [soDueDate, so.id]);
+      }
+    } catch(e) {
+      console.warn('[ORDER-CLOSE] Supplier Net due_date update error:', e?.message || e);
+    }
+
     try { await createCostAudit(oid); } catch(_) {}
     if (o.enquiry_id) {
       await runAsync("UPDATE enquiries SET status='closed', updated_at=? WHERE id=?", [nowStr(), o.enquiry_id]);
@@ -5559,7 +5620,13 @@ function normalizedFinanceDocNo(prefix, orderId, existingValue) {
 
 // GET /api/finance/customer-queue
 app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
-  const orders = await allAsync("SELECT * FROM orders WHERE status NOT IN ('closed','cancelled','deleted') OR (status='cancelled' AND settlement_status='pending') ORDER BY created_at DESC");
+  const orders = await allAsync(`
+    SELECT * FROM orders 
+    WHERE (status NOT IN ('closed','cancelled','deleted')) 
+       OR (status = 'closed' AND (customer_payment_status != 'paid' OR customer_payment_status IS NULL))
+       OR (status = 'cancelled' AND settlement_status = 'pending')
+    ORDER BY created_at DESC
+  `);
   const customers = await allAsync('SELECT id, name, email, phone, gstin, vat_number, customer_scope, customer_no, billing_attention, billing_street1, billing_street2, billing_city, billing_state, billing_country, billing_pincode, billing_phone, credit_enabled, credit_limit, credit_days, wallet_balance, credit_score, on_time_count, overdue_count FROM customers');
   let payments = [];
   try { payments = await allAsync("SELECT * FROM customer_payments WHERE status IN ('paid', 'payment_recorded') ORDER BY recorded_at DESC"); } catch(_) {}
@@ -5592,6 +5659,10 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const filtered = orders.filter(o => {
     if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
+    // Closed orders: only keep if payment is pending/recorded and not fully paid
+    if (o.status === 'closed') {
+      return o.customer_payment_status !== 'paid';
+    }
     // Returned from Finance: keep it visible/editable in Orders only until the
     // order team explicitly sends it back with status='payment_approval'.
     if (o.status === 'cust_payment_update') return false;
@@ -5622,8 +5693,20 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     const items = itemsByOrder[o.id] || [];
     const effectivePaymentTerms = o.payment_terms || custMap[o.customer_id]?.payment_terms || '';
     const parsedTerms = parsePaymentTerms(effectivePaymentTerms);
-    const computedDueDate = o.payment_due_date
-      || (parsedTerms.payment_terms_type === 'net' ? addDaysIso(o.created_at, parsedTerms.payment_net_days) : '');
+    const isOrderClosed = !!(o.closed_at || o.status === 'closed');
+    let computedDueDate = '';
+    if (parsedTerms.payment_terms_type === 'net') {
+      if (isOrderClosed && o.closed_at) {
+        computedDueDate = o.payment_due_date || addDaysIso(o.closed_at.slice(0, 10), parsedTerms.payment_net_days || 30);
+      } else if (isOrderClosed && o.payment_due_date) {
+        computedDueDate = o.payment_due_date;
+      } else {
+        // Not closed yet — day count starts when moved to Closed Bin!
+        computedDueDate = '';
+      }
+    } else {
+      computedDueDate = o.payment_due_date || '';
+    }
     const total = items.reduce((s, li) => {
       const base = (li.qty||0)*(li.unit_price||0);
       return s + base + base*((li.tax_rate||0)/100);
@@ -5642,17 +5725,28 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
 
     const orderDrawdown = drawdownsByOrder[o.id] || null;
     let creditBadge = null;
-    if (orderDrawdown && orderDrawdown.due_date) {
-      const today = todayStr();
-      const diff = Math.ceil((new Date(orderDrawdown.due_date) - new Date(today)) / (1000 * 60 * 60 * 24));
-      if (diff < 0) creditBadge = { type: 'overdue', label: `⚠️ Overdue by ${Math.abs(diff)}d`, days: diff };
-      else if (diff === 0) creditBadge = { type: 'due_today', label: '🚨 Due Today', days: 0 };
-      else if (diff <= 3) creditBadge = { type: 'urgent', label: `⏳ Due in ${diff}d`, days: diff };
-      else creditBadge = { type: 'normal', label: `Due in ${diff}d`, days: diff };
+    let creditDaysRemaining = null;
+    if (orderDrawdown) {
+      if (!isOrderClosed) {
+        creditBadge = { type: 'pending_close', label: '⏳ Starts on order close', days: null };
+      } else {
+        const creditDays = parseInt(custMap[o.customer_id]?.credit_days) || 30;
+        const drawdownDueDate = orderDrawdown.due_date || (o.closed_at ? addDaysIso(o.closed_at.slice(0, 10), creditDays) : '');
+        if (drawdownDueDate) {
+          const today = todayStr();
+          const diff = Math.ceil((new Date(drawdownDueDate) - new Date(today)) / (1000 * 60 * 60 * 24));
+          creditDaysRemaining = diff;
+          if (diff < 0) creditBadge = { type: 'overdue', label: `⚠️ Overdue by ${Math.abs(diff)}d`, days: diff };
+          else if (diff === 0) creditBadge = { type: 'due_today', label: '🚨 Due Today', days: 0 };
+          else if (diff <= 3) creditBadge = { type: 'urgent', label: `⏳ Due in ${diff}d`, days: diff };
+          else creditBadge = { type: 'normal', label: `Due in ${diff}d`, days: diff };
+        }
+      }
     }
 
     return {
       ...o,
+      is_order_closed: isOrderClosed,
       customer: custMap[o.customer_id] || null,
       payment_terms: effectivePaymentTerms,
       computed_due_date: computedDueDate,
@@ -5672,6 +5766,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
       quote_additional_charges: quoteChargesById[o.quote_id] || [],
       credit_drawdown: orderDrawdown,
       credit_badge: creditBadge,
+      credit_days_remaining: creditDaysRemaining,
       _computed_total: total,
       _computed_paid: paid,
     };
@@ -5848,8 +5943,11 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
       return res.status(400).json({ error: `Credit amount (₹${creditAmount.toFixed(2)}) exceeds available credit limit (₹${availableCredit.toFixed(2)})` });
     }
 
+    const isOrderClosed = !!(o.closed_at || o.status === 'closed');
     const creditDays = parseInt(cust.credit_days) || 30;
-    const dueDate = addDaysIso(now.slice(0, 10), creditDays);
+    const dueDate = (isOrderClosed && o.closed_at)
+      ? addDaysIso(o.closed_at.slice(0, 10), creditDays)
+      : '';
     const ddId = uuid();
 
     await runAsync(
@@ -5863,6 +5961,7 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
       ]
     );
 
+    const dueInfo = dueDate ? ` (Due: ${dueDate})` : ' (Due: Starts on Order Close)';
     await runAsync(
       `INSERT INTO customer_credit_ledger(
          id, customer_id, order_id, drawdown_id, transaction_type,
@@ -5874,10 +5973,10 @@ app.post('/api/finance/customer-pay/:order_id', auth, asyncRoute(async (req, res
         uuid(), cust.id, o.id, ddId, 'credit_drawdown',
         creditAmount, d.currency || 'INR', 'Ciflux Credit Line', `CREDIT-${o.po_number || o.id}`,
         creditLimit, Math.max(0, availableCredit - creditAmount), parseFloat(cust.wallet_balance) || 0,
-        `Order ${o.id}: ₹${creditAmount.toFixed(2)} drawn via Ciflux Credit (Due: ${dueDate})`, req.session.user.name, now
+        `Order ${o.id}: ₹${creditAmount.toFixed(2)} drawn via Ciflux Credit${dueInfo}`, req.session.user.name, now
       ]
     );
-    breakdownNotes.push(`Credit: ₹${creditAmount.toFixed(2)} (Due: ${dueDate})`);
+    breakdownNotes.push(`Credit: ₹${creditAmount.toFixed(2)}${dueInfo}`);
   }
 
   // 3. Process Bank Transfer
@@ -6295,7 +6394,24 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
         const paid = parseFloat(r.net_total_paid) || 0;
         return total <= 0 || (total - paid) > 0.009 || r.status === 'net_payment_recorded';
       })
-      .map(r => ({ ...r, supplier: supMap[r.supplier_id]||null })),
+      .map(r => {
+        const isOrderClosed = !!(r.closed_at || r.order_status === 'closed');
+        let effectiveDueDate = '';
+        if (isOrderClosed && r.closed_at) {
+          effectiveDueDate = r.payment_due_date || addDaysIso(r.closed_at.slice(0, 10), parseInt(r.payment_net_days) || 30);
+        } else if (isOrderClosed && r.payment_due_date) {
+          effectiveDueDate = r.payment_due_date;
+        } else {
+          // Order NOT closed: countdown starts on order close!
+          effectiveDueDate = '';
+        }
+        return {
+          ...r,
+          is_order_closed: isOrderClosed,
+          payment_due_date: effectiveDueDate,
+          supplier: supMap[r.supplier_id] || null,
+        };
+      }),
   });
 }));
 
