@@ -1008,6 +1008,7 @@ function RepayCreditModal({ customer, drawdown, onClose, onSuccess }) {
   const [notes, setNotes] = useState('');
   const [receiptFile, setReceiptFile] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -1036,6 +1037,7 @@ function RepayCreditModal({ customer, drawdown, onClose, onSuccess }) {
       qc.invalidateQueries(['customer-credit-profile', customer.id]);
       qc.invalidateQueries(['customers']);
       qc.invalidateQueries(['finance-customer']);
+      setShowConfirm(false);
       onSuccess && onSuccess();
       onClose();
     },
@@ -1044,6 +1046,19 @@ function RepayCreditModal({ customer, drawdown, onClose, onSuccess }) {
       toast.error(e?.response?.data?.error || 'Repayment failed');
     }
   });
+
+  const handlePreConfirm = () => {
+    const num = parseFloat(amount);
+    if (!num || num <= 0) {
+      toast.error('Please enter a valid repayment amount');
+      return;
+    }
+    if (!ref.trim()) {
+      toast.error('Bank UTR / Transaction Reference is required');
+      return;
+    }
+    setShowConfirm(true);
+  };
 
   return (
     <div className="overlay" style={{zIndex: 1100}}>
@@ -1088,11 +1103,49 @@ function RepayCreditModal({ customer, drawdown, onClose, onSuccess }) {
           <button
             className="btn btn-primary"
             disabled={!parseFloat(amount) || !ref.trim() || mutation.isPending || uploading}
-            onClick={() => mutation.mutate()}
+            onClick={handlePreConfirm}
           >
             {mutation.isPending || uploading ? 'Recording…' : '✅ Confirm Repayment'}
           </button>
         </div>
+
+        {showConfirm && (
+          <div className="overlay" style={{zIndex: 1300}}>
+            <div className="modal modal-sm" style={{maxWidth: 480}}>
+              <div className="modal-header">
+                <h2>⚠️ Confirm Credit Repayment</h2>
+                <button className="close-x" disabled={mutation.isPending || uploading} onClick={() => setShowConfirm(false)}>×</button>
+              </div>
+              <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  Are you sure you want to record this credit repayment?
+                </div>
+                <div style={{fontSize:12,padding:'12px 14px',borderRadius:8,background:'var(--surface2,#f8fafc)',border:'1px solid var(--border)',lineHeight:1.6}}>
+                  <div><strong>Customer:</strong> {customer.name}</div>
+                  {drawdown && <div><strong>Target Order:</strong> <span className="mono">{drawdown.order_id}</span></div>}
+                  <div><strong>Repayment Amount:</strong> <strong style={{color:'var(--green)',fontSize:13}}>₹{parseFloat(amount || 0).toFixed(2)}</strong></div>
+                  <div><strong>Payment Method:</strong> {method}</div>
+                  <div><strong>Bank UTR / Ref:</strong> <span className="mono">{ref.trim()}</span></div>
+                  {receiptFile && <div><strong>Receipt Attached:</strong> {receiptFile.name}</div>}
+                </div>
+                <div style={{fontSize:12,color:'var(--green,#16a34a)',fontWeight:600}}>
+                  ℹ️ This will restore ₹{parseFloat(amount || 0).toFixed(2)} back to the customer's available credit line limit.
+                </div>
+              </div>
+              <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+                <button className="btn" disabled={mutation.isPending || uploading} onClick={() => setShowConfirm(false)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+                  disabled={mutation.isPending || uploading}
+                  onClick={() => mutation.mutate()}
+                >
+                  {mutation.isPending || uploading ? 'Recording…' : '✅ Yes, Confirm Repayment'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1105,6 +1158,7 @@ function WalletDepositModal({ customer, onClose, onSuccess }) {
   const [method, setMethod] = useState('Bank Transfer');
   const [ref, setRef] = useState('');
   const [notes, setNotes] = useState('');
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const mutation = useMutation({
     mutationFn: () => api.post(`/customers/${customer.id}/wallet-deposit`, {
@@ -1117,11 +1171,25 @@ function WalletDepositModal({ customer, onClose, onSuccess }) {
       toast.success('Funds deposited to customer wallet');
       qc.invalidateQueries(['customer-credit-profile', customer.id]);
       qc.invalidateQueries(['customers']);
+      setShowConfirm(false);
       onSuccess && onSuccess();
       onClose();
     },
     onError: e => toast.error(e?.response?.data?.error || 'Deposit failed')
   });
+
+  const handlePreConfirm = () => {
+    const num = parseFloat(amount);
+    if (!num || num <= 0) {
+      toast.error('Please enter a valid deposit amount');
+      return;
+    }
+    if (!ref.trim()) {
+      toast.error('Bank UTR / Ref is required');
+      return;
+    }
+    setShowConfirm(true);
+  };
 
   return (
     <div className="overlay" style={{zIndex: 1100}}>
@@ -1163,11 +1231,48 @@ function WalletDepositModal({ customer, onClose, onSuccess }) {
             className="btn btn-primary"
             style={{background:'var(--green)',borderColor:'var(--green)'}}
             disabled={!parseFloat(amount) || !ref.trim() || mutation.isPending}
-            onClick={() => mutation.mutate()}
+            onClick={handlePreConfirm}
           >
             {mutation.isPending ? 'Depositing…' : '💰 Deposit to Wallet'}
           </button>
         </div>
+
+        {showConfirm && (
+          <div className="overlay" style={{zIndex: 1300}}>
+            <div className="modal modal-sm" style={{maxWidth: 480}}>
+              <div className="modal-header">
+                <h2>⚠️ Confirm Wallet Deposit</h2>
+                <button className="close-x" disabled={mutation.isPending} onClick={() => setShowConfirm(false)}>×</button>
+              </div>
+              <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  Are you sure you want to deposit funds into customer wallet?
+                </div>
+                <div style={{fontSize:12,padding:'12px 14px',borderRadius:8,background:'rgba(22,163,74,0.08)',border:'1px solid rgba(22,163,74,0.25)',lineHeight:1.6}}>
+                  <div><strong>Customer:</strong> {customer.name}</div>
+                  <div><strong>Deposit Amount:</strong> <strong style={{color:'var(--green)',fontSize:13}}>₹{parseFloat(amount || 0).toFixed(2)}</strong></div>
+                  <div><strong>Payment Method:</strong> {method}</div>
+                  <div><strong>Bank UTR / Ref:</strong> <span className="mono">{ref.trim()}</span></div>
+                  {notes && <div><strong>Notes:</strong> {notes}</div>}
+                </div>
+                <div style={{fontSize:12,color:'var(--text3)'}}>
+                  This will credit ₹{parseFloat(amount || 0).toFixed(2)} directly to customer's prepaid wallet balance for future orders.
+                </div>
+              </div>
+              <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+                <button className="btn" disabled={mutation.isPending} onClick={() => setShowConfirm(false)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  style={{background:'var(--green)',borderColor:'var(--green)',fontWeight:700}}
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate()}
+                >
+                  {mutation.isPending ? 'Depositing…' : '✅ Yes, Confirm Deposit'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1180,6 +1285,7 @@ function WalletWithdrawModal({ customer, currentBalance, onClose, onSuccess }) {
   const [method, setMethod] = useState('Bank Transfer');
   const [ref, setRef] = useState('');
   const [notes, setNotes] = useState('');
+  const [showConfirm, setShowConfirm] = useState(false);
 
   const maxBalance = parseFloat(currentBalance) || 0;
 
@@ -1194,6 +1300,7 @@ function WalletWithdrawModal({ customer, currentBalance, onClose, onSuccess }) {
       toast.success('Funds sent / refunded to customer');
       qc.invalidateQueries(['customer-credit-profile', customer.id]);
       qc.invalidateQueries(['customers']);
+      setShowConfirm(false);
       onSuccess && onSuccess();
       onClose();
     },
@@ -1202,6 +1309,22 @@ function WalletWithdrawModal({ customer, currentBalance, onClose, onSuccess }) {
 
   const parsedAmount = parseFloat(amount) || 0;
   const isOver = parsedAmount > (maxBalance + 0.009);
+
+  const handlePreConfirm = () => {
+    if (parsedAmount <= 0) {
+      toast.error('Please enter a valid amount');
+      return;
+    }
+    if (isOver) {
+      toast.error('Amount exceeds available wallet balance');
+      return;
+    }
+    if (!ref.trim()) {
+      toast.error('Bank UTR / Ref is required');
+      return;
+    }
+    setShowConfirm(true);
+  };
 
   return (
     <div className="overlay" style={{zIndex: 1100}}>
@@ -1275,11 +1398,49 @@ function WalletWithdrawModal({ customer, currentBalance, onClose, onSuccess }) {
             className="btn btn-primary"
             style={{background:'var(--accent)',borderColor:'var(--accent)',fontWeight:700}}
             disabled={parsedAmount <= 0 || isOver || !ref.trim() || mutation.isPending}
-            onClick={() => mutation.mutate()}
+            onClick={handlePreConfirm}
           >
             {mutation.isPending ? 'Processing…' : '📤 Send to Customer'}
           </button>
         </div>
+
+        {showConfirm && (
+          <div className="overlay" style={{zIndex: 1300}}>
+            <div className="modal modal-sm" style={{maxWidth: 480}}>
+              <div className="modal-header">
+                <h2>⚠️ Confirm Send Funds to Customer</h2>
+                <button className="close-x" disabled={mutation.isPending} onClick={() => setShowConfirm(false)}>×</button>
+              </div>
+              <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  Are you sure you want to send/refund funds to the customer?
+                </div>
+                <div style={{fontSize:12,padding:'12px 14px',borderRadius:8,background:'rgba(99,102,241,0.08)',border:'1px solid rgba(99,102,241,0.25)',lineHeight:1.6}}>
+                  <div><strong>Customer:</strong> {customer.name}</div>
+                  <div><strong>Amount to Send:</strong> <strong style={{color:'var(--accent)',fontSize:13}}>₹{parsedAmount.toFixed(2)}</strong></div>
+                  <div><strong>Remaining Wallet Balance:</strong> ₹{(maxBalance - parsedAmount).toFixed(2)}</div>
+                  <div><strong>Payment Mode:</strong> {method}</div>
+                  <div><strong>Bank UTR / Reference:</strong> <span className="mono">{ref.trim()}</span></div>
+                  {notes && <div><strong>Notes:</strong> {notes}</div>}
+                </div>
+                <div style={{fontSize:12,color:'var(--text3)'}}>
+                  This will deduct ₹{parsedAmount.toFixed(2)} from customer's wallet balance and record a payout refund to customer bank.
+                </div>
+              </div>
+              <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+                <button className="btn" disabled={mutation.isPending} onClick={() => setShowConfirm(false)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  style={{background:'var(--accent)',borderColor:'var(--accent)',fontWeight:700}}
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate()}
+                >
+                  {mutation.isPending ? 'Processing…' : '✅ Yes, Confirm Payout'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

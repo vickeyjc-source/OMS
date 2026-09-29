@@ -430,7 +430,19 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   const [editMode, setEditMode]   = useState(false);
   const [approving, setApproving] = useState(false);
   const [approvalErr, setApprovalErr] = useState('');
-  const pmt = item.last_payment || null;
+
+  const isSupplier = Boolean(item.supplier_id || item.supplier_order_id || item.confirmed_price !== undefined);
+  const pmt = item.last_payment || (isSupplier ? {
+    amount: item.confirmed_price !== undefined ? (item.net_total_paid || item.confirmed_price) : (item.paid_amount || item.amount),
+    currency: item.confirmed_currency || item.currency || 'INR',
+    payment_method: item.net_payment_method || item.payment_method || 'Bank Transfer',
+    payment_ref: item.net_payment_ref || item.payment_ref || '—',
+    payment_date: item.net_payment_date || item.payment_date || '',
+    notes: item.net_payment_notes || item.notes || '',
+    recorded_by: item.net_paid_by || item.paid_by || 'Finance',
+    recorded_at: item.net_paid_at || item.paid_at || '',
+    isSupplier: true,
+  } : null);
 
   const [form, setForm] = useState({
     amount:         String(pmt?.amount || ''),
@@ -445,7 +457,7 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
   const set = (k,v) => setForm(f=>({...f,[k]:v}));
 
   const editMutation = useMutation({
-    mutationFn: d => api.put('/finance/customer-pay/'+pmt.id, d),
+    mutationFn: d => api.put('/finance/customer-pay/'+pmt?.id, d),
     onSuccess: () => {
       toast.success('Payment updated');
       qc.invalidateQueries(['finance-customer']);
@@ -467,7 +479,18 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
     </div>
   );
 
-  const rows = [
+  const rows = isSupplier ? [
+    {l:'Supplier',          v: item._resolvedName || item.supplier?.name || item.supplier_id},
+    {l:'Supplier PO',       v: item.internal_po_no || item.id, mono:true},
+    {l:'Zoho PO',           v: item.zoho_po_number || '—', mono:true},
+    {l:'Supplier PI / Ref', v: item.supplier_ref || '—', mono:true},
+    {l:'Amount Paid',       v: fmtM(pmt.amount, pmt.currency)},
+    {l:'Method',            v: pmt.payment_method || '—'},
+    {l:'UTR / Ref',         v: pmt.payment_ref    || '—', mono:true},
+    {l:'Payment Date',      v: fmtDate(pmt.payment_date)},
+    {l:'Status',            v: '✅ Payment Recorded (Awaiting Release)'},
+    {l:'Notes',             v: pmt.notes          || '—'},
+  ] : [
     {l:'Customer PO Number', v: item.po_number || '—', mono:true},
     {l:'PI Number',      v: item.pi_no || '—', mono:true, highlight: !!item.pi_no},
     {l:'Amount',         v: fmtM(pmt.amount, pmt.currency)},
@@ -490,7 +513,7 @@ function ViewPaymentModal({ item, onClose, onSaved }) {
           {/* Order ref strip */}
           <div style={{padding:'8px 12px',borderRadius:6,background:'var(--accent-lt)',
             fontSize:12,marginBottom:14,fontWeight:600,color:'var(--accent)'}}>
-            {item.id} · {item.customer?.name || ''}
+            {item.order_id || item.id} · {item.customer?.name || item._resolvedName || item.supplier?.name || ''}
           </div>
 
           {!editMode ? (
@@ -618,15 +641,29 @@ function SettleAmountModal({ order, onClose, onSettled }) {
   const [refundRemainder, setRefundRemainder] = useState(true);
   const [remMethod, setRemMethod] = useState('Bank Transfer');
   const [remRef, setRemRef] = useState('');
+  const [confirmData, setConfirmData] = useState(null);
 
-  const { data: customerOrders = [], isLoading: loadingOrders } = useQuery({
-    queryKey: ['active-customer-orders', order.customer_id],
-    queryFn: () => api.get('/orders').then(r => (r.data || []).filter(o => 
-      o.customer_id === order.customer_id && 
-      o.id !== order.id && 
-      !['closed', 'cancelled', 'failed', 'deleted'].includes((o.status || '').toLowerCase())
-    )),
+  const { data: financeCustomerQueue = [], isLoading: loadingOrders } = useQuery({
+    queryKey: ['finance-customer'],
+    queryFn: () => api.get('/finance/customer-queue').then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
   });
+
+  const customerOrders = useMemo(() => {
+    return (financeCustomerQueue || []).filter(to => {
+      // 1. Must be the exact same customer
+      if (to.customer_id !== order.customer_id) return false;
+      // 2. Must not be this order itself
+      if (to.id === order.id) return false;
+      // 3. Must not be a cancelled order or another order pending settlement
+      if (to.settlement_status === 'pending' || to.status === 'cancelled') return false;
+      if (['closed', 'failed', 'deleted'].includes((to.status || '').toLowerCase())) return false;
+      // 4. Must be awaiting payment in Finance (Customer Advance or Customer Net) with balance due > 0
+      const bal = to.full_balance_due !== undefined && Number(to.full_balance_due) >= 0 ? Number(to.full_balance_due) 
+                : to.balance_due !== undefined && Number(to.balance_due) >= 0 ? Number(to.balance_due) 
+                : Math.max(0, (Number(to.order_total || to.total_amount || 0)) - Number(to.total_paid || 0));
+      return bal > 0.009;
+    });
+  }, [financeCustomerQueue, order.customer_id, order.id]);
 
   const { data: orderPayments = [] } = useQuery({
     queryKey: ['customer-payments-for-settle', order.id],
@@ -634,6 +671,13 @@ function SettleAmountModal({ order, onClose, onSettled }) {
   });
 
   const origPmt = orderPayments.find(p => p.status === 'paid' && parseFloat(p.amount) > 0) || orderPayments[0] || {};
+  
+  // Extract payment breakdown from payment notes to display at the top of settle modal
+  const pmtWithBreakdown = orderPayments.find(p => (p.notes || '').includes('Breakdown:')) || origPmt;
+  const rawBreakdownNote = pmtWithBreakdown?.notes || order.payment_breakdown || '';
+  const breakdownMatch = rawBreakdownNote.match(/Breakdown:\s*\[(.*?)\]/i);
+  const paymentBreakdownContent = breakdownMatch ? breakdownMatch[1] : (rawBreakdownNote.startsWith('Breakdown:') ? rawBreakdownNote.replace(/^Breakdown:\s*/i, '') : rawBreakdownNote);
+
   const totalPaid = parseFloat(order.total_paid) || parseFloat(origPmt?.amount) || 0;
   const unsettled = order.unsettled_amount !== undefined && order.unsettled_amount !== null && Number(order.unsettled_amount) > 0
     ? Number(order.unsettled_amount)
@@ -667,7 +711,11 @@ function SettleAmountModal({ order, onClose, onSettled }) {
   const targetOrder = customerOrders.find(o => o.id === targetOrderId);
   const targetTotal = targetOrder ? getOrderTotal(targetOrder) : 0;
   const targetPaid = targetOrder ? (parseFloat(targetOrder.total_paid) || 0) : 0;
-  const targetRequired = targetOrder ? Math.max(0, targetTotal - targetPaid) : 0;
+  const targetRequired = targetOrder ? (
+    targetOrder.full_balance_due !== undefined && Number(targetOrder.full_balance_due) >= 0 ? Number(targetOrder.full_balance_due)
+    : targetOrder.balance_due !== undefined && Number(targetOrder.balance_due) >= 0 ? Number(targetOrder.balance_due)
+    : Math.max(0, targetTotal - targetPaid)
+  ) : 0;
 
   useEffect(() => {
     if (targetOrder) {
@@ -707,52 +755,25 @@ function SettleAmountModal({ order, onClose, onSettled }) {
       toast.error(e?.response?.data?.error || 'Settlement failed');
     }
   });
-  // Rule: When a FULL order is cancelled, credit obligation is ALREADY automatically released by the system.
-  // Therefore, "Add to Credit Line" NEVER shows for a full order cancellation.
-  // It ONLY shows when the full order is NOT cancelled (e.g. specific item cancelled / partial settlement),
-  // AND credit was used alongside another payment method (Bank or Wallet).
-  const isFullOrderCancelled = (order.status || '').toLowerCase() === 'cancelled';
-
-  const usedCreditWithOther = Boolean(
-    orderPayments.some(p => {
-      const method = (p.payment_method || '').toLowerCase();
-      const notes = (p.notes || '').toLowerCase();
-      const hasCredit = method.includes('credit') || notes.includes('credit:') || notes.includes('ciflux credit') || notes.includes('credit line');
-      const hasOther = method.includes('bank') || method.includes('wallet') || notes.includes('bank transfer') || notes.includes('wallet');
-      return hasCredit && hasOther;
-    }) ||
-    (
-      ((origPmt?.payment_method || '').toLowerCase().includes('credit') || (origPmt?.notes || '').toLowerCase().includes('credit:')) &&
-      ((origPmt?.payment_method || '').toLowerCase().includes('bank') || (origPmt?.notes || '').toLowerCase().includes('bank transfer') || (origPmt?.notes || '').toLowerCase().includes('wallet'))
-    ) ||
-    (
-      orderPayments.some(p => (p.payment_method || '').toLowerCase().includes('credit') || (p.notes || '').toLowerCase().includes('credit:')) &&
-      orderPayments.some(p => (p.payment_method || '').toLowerCase().includes('bank') || (p.notes || '').toLowerCase().includes('bank transfer') || (p.notes || '').toLowerCase().includes('wallet'))
-    )
-  );
-
-  const hasCreditOption = !isFullOrderCancelled && usedCreditWithOther;
-
-  useEffect(() => {
-    if (!hasCreditOption && settleType === 'credit_line_restore') {
-      setSettleType('refund');
-    }
-  }, [hasCreditOption, settleType]);
+  // Active customer credit dues across the account
+  const activeCustomerCreditDue = parseFloat(order.customer?.total_outstanding_due) || 0;
+  // Credit portion already automatically released on this order
+  const orderCreditReleased = orderPayments
+    .filter(p => p.payment_type === 'credit_adjustment')
+    .reduce((s, p) => s + Math.abs(parseFloat(p.amount) || 0), 0);
 
   const handleConfirm = () => {
-    if (settleType === 'credit_line_restore') {
-      settleMutation.mutate({
-        settlement_type: 'credit_line_restore',
-        amount: unsettled,
-        notes,
-      });
-      return;
-    }
     if (settleType === 'credit_to_wallet') {
-      settleMutation.mutate({
-        settlement_type: 'credit_to_wallet',
+      setConfirmData({
+        actionLabel: 'Deposit to Customer Wallet',
         amount: unsettled,
-        notes,
+        entity: order.customer?.name || order.customer_id,
+        summary: `Credit ₹${unsettled.toFixed(2)} to customer prepaid wallet balance.`,
+        payload: {
+          settlement_type: 'credit_to_wallet',
+          amount: unsettled,
+          notes,
+        }
       });
       return;
     }
@@ -769,16 +790,24 @@ function SettleAmountModal({ order, onClose, onSettled }) {
         toast.error('Please enter Refund UTR / Reference for the remaining balance');
         return;
       }
-      settleMutation.mutate({
-        settlement_type: 'transfer_to_order',
+      setConfirmData({
+        actionLabel: 'Move Funds to Another Order',
         amount: numTransfer,
-        target_order_id: targetOrderId,
-        payment_method: origPmt.payment_method || 'Bank Transfer',
-        payment_ref: origPmt.payment_ref || `TRANSFER-${order.id}`,
-        notes,
-        remainder_action: (remainder > 0.01 && refundRemainder) ? 'refund' : 'keep_pending',
-        remainder_payment_ref: remRef.trim(),
-        remainder_payment_method: remMethod,
+        entity: order.customer?.name || order.customer_id,
+        targetOrder: targetOrderId,
+        remainder: remainder > 0.01 && refundRemainder ? remainder : 0,
+        summary: `Transfer ₹${numTransfer.toFixed(2)} to Order ${targetOrderId}${remainder > 0.01 && refundRemainder ? ` and refund remaining balance ₹${remainder.toFixed(2)}` : ''}.`,
+        payload: {
+          settlement_type: 'transfer_to_order',
+          amount: numTransfer,
+          target_order_id: targetOrderId,
+          payment_method: origPmt.payment_method || 'Bank Transfer',
+          payment_ref: origPmt.payment_ref || `TRANSFER-${order.id}`,
+          notes,
+          remainder_action: (remainder > 0.01 && refundRemainder) ? 'refund' : 'keep_pending',
+          remainder_payment_ref: remRef.trim(),
+          remainder_payment_method: remMethod,
+        }
       });
     } else {
       const numRefund = parseFloat(refundAmount) || 0;
@@ -790,12 +819,20 @@ function SettleAmountModal({ order, onClose, onSettled }) {
         toast.error('Refund reference / UTR is required');
         return;
       }
-      settleMutation.mutate({
-        settlement_type: 'refund',
+      setConfirmData({
+        actionLabel: 'Direct Refund to Customer Bank',
         amount: numRefund,
-        payment_method: refundMethod,
-        payment_ref: refundRef.trim(),
-        notes,
+        entity: order.customer?.name || order.customer_id,
+        method: refundMethod,
+        ref: refundRef.trim(),
+        summary: `Refund ₹${numRefund.toFixed(2)} directly to customer via ${refundMethod}.`,
+        payload: {
+          settlement_type: 'refund',
+          amount: numRefund,
+          payment_method: refundMethod,
+          payment_ref: refundRef.trim(),
+          notes,
+        }
       });
     }
   };
@@ -831,10 +868,60 @@ function SettleAmountModal({ order, onClose, onSettled }) {
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,fontSize:12}}>
               <div>Customer: <strong>{order.customer?.name || order.customer_id}</strong></div>
-              <div>Available to Settle: <strong style={{color:'var(--green)',fontSize:13}}>₹{unsettled.toFixed(2)}</strong></div>
+              <div>Available to Settle (Bank Cash): <strong style={{color:'var(--green)',fontSize:13}}>₹{unsettled.toFixed(2)}</strong></div>
               {origPmt.payment_ref && <div>Original Ref/UTR: <span className="mono">{origPmt.payment_ref}</span></div>}
               {origPmt.payment_method && <div>Original Method: {origPmt.payment_method}</div>}
             </div>
+
+            {/* Original Payment Breakdown (matches History Note) */}
+            {paymentBreakdownContent ? (
+              <div style={{
+                marginTop: 8,
+                padding: '8px 12px',
+                background: 'var(--surface, #ffffff)',
+                border: '1px dashed #94a3b8',
+                borderRadius: 6,
+                fontSize: 12,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 2
+              }}>
+                <div style={{fontWeight: 700, color: 'var(--text2)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em'}}>
+                  📋 Original Payment Breakdown:
+                </div>
+                <div style={{fontFamily: 'monospace', fontWeight: 600, color: 'var(--accent)', fontSize: 12, wordBreak: 'break-word'}}>
+                  {paymentBreakdownContent}
+                </div>
+              </div>
+            ) : (
+              origPmt.notes && (
+                <div style={{marginTop: 6, fontSize: 11.5, color: 'var(--text2)', fontStyle: 'italic'}}>
+                  Note: {origPmt.notes}
+                </div>
+              )
+            )}
+
+            {orderCreditReleased > 0.009 && (
+              <div style={{
+                marginTop: 8,
+                padding: '8px 12px',
+                background: '#f0fdf4',
+                border: '1px solid #86efac',
+                borderRadius: 6,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: 12
+              }}>
+                <div>
+                  <span style={{fontWeight: 700, color: '#166534'}}>💳 Order Credit Portion (₹{orderCreditReleased.toFixed(2)}):</span>{' '}
+                  <span style={{color: '#15803d'}}>Automatically released back to customer credit limit</span>
+                </div>
+                <span style={{fontSize: 11, fontWeight: 800, color: '#166534', background: '#dcfce7', padding: '2px 8px', borderRadius: 99}}>
+                  ✅ Restored
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Mode Switcher — Radio Tick Cards (1st: Refund, 2nd: Move/Transfer, 3rd: Add to Wallet) */}
@@ -928,38 +1015,6 @@ function SettleAmountModal({ order, onClose, onSettled }) {
               </div>
               {settleType==='credit_to_wallet' && <span style={{fontSize:14,color:'var(--green,#16a34a)'}}>✓</span>}
             </label>
-
-            {hasCreditOption && (
-              <label style={{
-                display:'flex',
-                alignItems:'center',
-                gap:10,
-                padding:'12px 14px',
-                borderRadius:'var(--r,8px)',
-                border: settleType==='credit_line_restore' ? '2px solid #6366f1' : '1px solid var(--border)',
-                background: settleType==='credit_line_restore' ? 'rgba(99,102,241,0.08)' : 'var(--surface)',
-                cursor:'pointer',
-                transition:'all 0.15s'
-              }}>
-                <input
-                  type="radio"
-                  name="settle_type"
-                  value="credit_line_restore"
-                  checked={settleType==='credit_line_restore'}
-                  onChange={()=>setSettleType('credit_line_restore')}
-                  style={{accentColor:'#6366f1',width:17,height:17,cursor:'pointer'}}
-                />
-                <div style={{flex:1}}>
-                  <div style={{fontWeight:700,fontSize:13,color:settleType==='credit_line_restore'?'#6366f1':'var(--text)'}}>
-                    💳 Add to Credit Line
-                  </div>
-                  <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>
-                    Release credit obligation & restore available limit
-                  </div>
-                </div>
-                {settleType==='credit_line_restore' && <span style={{fontSize:14,color:'#6366f1'}}>✓</span>}
-              </label>
-            )}
           </div>
 
           {/* 1. DIRECT REFUND MODE */}
@@ -1012,9 +1067,9 @@ function SettleAmountModal({ order, onClose, onSettled }) {
           {settleType === 'transfer_to_order' && (
             <div style={{display:'flex',flexDirection:'column',gap:12}}>
               {loadingOrders ? (
-                <div style={{fontSize:12,color:'var(--text3)'}}>Checking active orders…</div>
+                <div style={{fontSize:12,color:'var(--text3)'}}>Checking active orders in Finance…</div>
               ) : customerOrders.length === 0 ? (
-                /* No active orders found fallback */
+                /* No active orders found in Finance fallback */
                 <div style={{
                   padding:'14px 16px',
                   background:'var(--amber-lt,#fffbeb)',
@@ -1025,12 +1080,12 @@ function SettleAmountModal({ order, onClose, onSettled }) {
                   gap:10
                 }}>
                   <div style={{display:'flex',alignItems:'center',gap:8,color:'var(--amber,#b45309)',fontWeight:700,fontSize:13}}>
-                    <span>⚠️</span> No active orders found for this customer!
+                    <span>⚠️</span> No pending orders in Finance for this customer!
                   </div>
                   <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
-                    You don't have any active orders to move this amount to. Please refund directly to the customer instead.
+                    This customer has no active orders currently awaiting payment in <strong>Customer Advance</strong> or <strong>Customer Net</strong> sections. Orders created in Sales must be sent to Finance before funds can be transferred to them. Please refund directly to the customer or deposit to Wallet instead.
                   </div>
-                  <div>
+                  <div style={{display:'flex',gap:8}}>
                     <button
                       type="button"
                       className="btn btn-sm"
@@ -1038,22 +1093,33 @@ function SettleAmountModal({ order, onClose, onSettled }) {
                       onClick={()=>setSettleType('refund')}>
                       💸 Switch to Direct Refund
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      style={{background:'var(--green,#16a34a)',color:'#fff',borderColor:'var(--green,#16a34a)',fontWeight:700}}
+                      onClick={()=>setSettleType('credit_to_wallet')}>
+                      💰 Add to Wallet
+                    </button>
                   </div>
                 </div>
               ) : (
-                /* Active orders available */
+                /* Active orders available in Finance */
                 <>
                   <div className="form-group" style={{marginBottom:0}}>
-                    <label className="label">Target Active Order <span className="req">*</span></label>
+                    <label className="label">Target Order in Finance (Customer Advance / Net) <span className="req">*</span></label>
                     <select className="input" value={targetOrderId} onChange={e=>setTargetOrderId(e.target.value)}>
-                      <option value="">— Select Target Active Order —</option>
+                      <option value="">— Select Target Order in Finance —</option>
                       {customerOrders.map(to => {
+                        const isNet = isNetTerms(to.payment_terms);
+                        const sectionName = isNet ? 'Customer Net' : 'Customer Advance';
                         const tot = getOrderTotal(to);
                         const paid = parseFloat(to.total_paid) || 0;
-                        const req = Math.max(0, tot - paid);
+                        const req = to.full_balance_due !== undefined && Number(to.full_balance_due) >= 0 ? Number(to.full_balance_due)
+                          : to.balance_due !== undefined && Number(to.balance_due) >= 0 ? Number(to.balance_due)
+                          : Math.max(0, tot - paid);
                         return (
                           <option key={to.id} value={to.id}>
-                            {to.id} {to.po_number ? `(PO: ${to.po_number})` : ''} — Required: ₹{req.toFixed(2)} (Total: ₹{tot.toFixed(2)})
+                            {to.id} {to.po_number ? `(PO: ${to.po_number})` : ''} · [{sectionName}] · Due: ₹{req.toFixed(2)} (Total: ₹{tot.toFixed(2)})
                           </option>
                         );
                       })}
@@ -1064,7 +1130,7 @@ function SettleAmountModal({ order, onClose, onSettled }) {
                     <div style={{background:'var(--blue-lt,#eff6ff)',border:'1px solid var(--accent)',borderRadius:'var(--r-sm)',padding:'10px 14px',display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,fontSize:12}}>
                       <div>Order Total: <strong style={{display:'block',fontSize:13}}>₹{targetTotal.toFixed(2)}</strong></div>
                       <div>Already Paid: <strong style={{display:'block',color:'var(--green)',fontSize:13}}>₹{targetPaid.toFixed(2)}</strong></div>
-                      <div>Payment Required: <strong style={{display:'block',color:'var(--red,#dc2626)',fontSize:14,fontWeight:800}}>₹{targetRequired.toFixed(2)}</strong></div>
+                      <div>Due in Finance ({isNetTerms(targetOrder.payment_terms) ? 'Customer Net' : 'Customer Advance'}): <strong style={{display:'block',color:'var(--red,#dc2626)',fontSize:14,fontWeight:800}}>₹{targetRequired.toFixed(2)}</strong></div>
                     </div>
                   )}
 
@@ -1161,26 +1227,6 @@ function SettleAmountModal({ order, onClose, onSettled }) {
             </div>
           )}
 
-          {/* 4. RESTORE TO CREDIT LINE MODE */}
-          {settleType === 'credit_line_restore' && (
-            <div style={{
-              background: 'rgba(99, 102, 241, 0.06)',
-              border: '1px solid rgba(99, 102, 241, 0.25)',
-              borderRadius: 8,
-              padding: '16px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 8
-            }}>
-              <div style={{fontWeight: 700, color: '#6366f1', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
-                <span>💳</span> RESTORE TO CIFLUX CREDIT LINE
-              </div>
-              <div style={{fontSize: 12, color: 'var(--text2)', lineHeight: 1.5}}>
-                The settlement amount of <strong>₹{unsettled.toFixed(2)}</strong> will be applied towards the customer's credit line. Any active credit drawdown balance will be cleared/reduced, immediately restoring their available credit limit.
-              </div>
-            </div>
-          )}
-
           <div className="form-group" style={{marginBottom:0}}>
             <label className="label">Notes / Remarks</label>
             <input
@@ -1219,6 +1265,54 @@ function SettleAmountModal({ order, onClose, onSettled }) {
             }
           </button>
         </div>
+
+        {confirmData && (
+          <div className="overlay" style={{zIndex:1300}}>
+            <div className="modal modal-sm" style={{maxWidth:480}}>
+              <div className="modal-header">
+                <h2>⚠️ Confirm Settlement</h2>
+                <button className="close-x" disabled={settleMutation.isPending || uploadingReceipt} onClick={() => setConfirmData(null)}>×</button>
+              </div>
+              <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  Are you sure you want to proceed with this settlement?
+                </div>
+                <div style={{fontSize:12,padding:'12px 14px',borderRadius:8,background:'var(--surface2,#f8fafc)',border:'1px solid var(--border)',lineHeight:1.6}}>
+                  <div><strong>Action:</strong> <span style={{color:'var(--accent)'}}>{confirmData.actionLabel}</span></div>
+                  <div><strong>Customer:</strong> {confirmData.entity}</div>
+                  <div><strong>Source Order:</strong> <span className="mono">{order.id}</span></div>
+                  <div><strong>Settlement Amount:</strong> <strong style={{color:'var(--green)',fontSize:13}}>₹{confirmData.amount.toFixed(2)}</strong></div>
+                  {confirmData.targetOrder && (
+                    <div><strong>Destination Order:</strong> <span className="mono">{confirmData.targetOrder}</span></div>
+                  )}
+                  {confirmData.remainder > 0 && (
+                    <div><strong>Remainder Refund:</strong> ₹{confirmData.remainder.toFixed(2)}</div>
+                  )}
+                  {confirmData.method && (
+                    <div><strong>Refund Method:</strong> {confirmData.method}</div>
+                  )}
+                  {confirmData.ref && (
+                    <div><strong>Refund Ref / UTR:</strong> <span className="mono">{confirmData.ref}</span></div>
+                  )}
+                </div>
+                <div style={{fontSize:12,color:'var(--text3)'}}>
+                  This action will update the order settlement status, record ledger entries, and cannot be undone.
+                </div>
+              </div>
+              <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+                <button className="btn" disabled={settleMutation.isPending || uploadingReceipt} onClick={() => setConfirmData(null)}>Cancel</button>
+                <button
+                  className="btn btn-primary"
+                  style={{background:'var(--green,#16a34a)',borderColor:'var(--green,#16a34a)',fontWeight:700}}
+                  disabled={settleMutation.isPending || uploadingReceipt}
+                  onClick={() => settleMutation.mutate(confirmData.payload)}
+                >
+                  {settleMutation.isPending || uploadingReceipt ? 'Processing…' : '✅ Yes, Confirm Settlement'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2586,23 +2680,34 @@ function SupplierRecoverModal({ item, onClose, onSaved }) {
   const [ref, setRef] = useState('');
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     const numAmt = parseFloat(amount);
     if (!numAmt || numAmt <= 0) {
       toast.error('Please enter a valid recovery amount');
       return;
     }
+    if (!ref.trim()) {
+      toast.error('Reference / UTR / Credit Note No. is required');
+      return;
+    }
+    setShowConfirm(true);
+  };
+
+  const doRecover = async () => {
+    const numAmt = parseFloat(amount);
     setSubmitting(true);
     try {
       await api.post(`/finance/supplier-recover/${item.supplier_order_id || item.id}`, {
         amount: numAmt,
         payment_method: method,
-        payment_ref: ref || `REC-${item.internal_po_no || item.id}`,
+        payment_ref: ref.trim() || `REC-${item.internal_po_no || item.id}`,
         notes,
       });
       toast.success(`Supplier recovery recorded — ₹${numAmt.toFixed(2)}`);
+      setShowConfirm(false);
       onSaved();
     } catch(err) {
       toast.error(err.response?.data?.error || 'Failed to record supplier recovery');
@@ -2687,10 +2792,50 @@ function SupplierRecoverModal({ item, onClose, onSaved }) {
               Cancel
             </button>
             <button type="submit" className="btn btn-primary" disabled={submitting} style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)'}}>
-              {submitting ? 'Recording…' : 'Confirm Recovery'}
+              Confirm Recovery
             </button>
           </div>
         </form>
+
+        {showConfirm && (
+          <div className="overlay" style={{zIndex:1300}}>
+            <div className="modal modal-sm" style={{maxWidth:480}}>
+              <div className="modal-header">
+                <h2>⚠️ Confirm Supplier Recovery</h2>
+                <button className="close-x" disabled={submitting} onClick={() => setShowConfirm(false)}>×</button>
+              </div>
+              <div className="modal-body" style={{display:'flex',flexDirection:'column',gap:12}}>
+                <div style={{fontSize:14,fontWeight:600}}>
+                  Are you sure you want to record this supplier recovery?
+                </div>
+                <div style={{fontSize:12,padding:'12px 14px',borderRadius:8,background:'var(--surface2,#f8fafc)',border:'1px solid var(--border)',lineHeight:1.6}}>
+                  <div><strong>Supplier:</strong> {item.supplier?.name || item.supplier_id}</div>
+                  <div><strong>Order ID:</strong> <span className="mono">{item.order_id}</span></div>
+                  <div><strong>Supplier PO:</strong> <span className="mono">{item.internal_po_no || item.id}</span></div>
+                  <div><strong>Recovery Amount:</strong> <strong style={{color:'var(--amber,#d97706)',fontSize:13}}>₹{parseFloat(amount || 0).toFixed(2)}</strong></div>
+                  <div><strong>Method:</strong> {method}</div>
+                  <div><strong>Reference / UTR:</strong> <span className="mono">{ref.trim() || `REC-${item.internal_po_no || item.id}`}</span></div>
+                  {notes && <div><strong>Notes:</strong> {notes}</div>}
+                </div>
+                <div style={{fontSize:12,color:'var(--text3)'}}>
+                  This will record the recovered funds from the supplier and deduct the overpayment balance in Finance.
+                </div>
+              </div>
+              <div className="modal-footer" style={{display:'flex',justifyContent:'flex-end',gap:8}}>
+                <button className="btn" disabled={submitting} onClick={() => setShowConfirm(false)}>Cancel</button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{background:'var(--amber,#d97706)',borderColor:'var(--amber,#d97706)',fontWeight:700}}
+                  disabled={submitting}
+                  onClick={doRecover}
+                >
+                  {submitting ? 'Recording…' : '✅ Yes, Confirm Recovery'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2999,9 +3144,18 @@ export default function FinancePage() {
     return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const supAdvance  = (supQueue.advance || []).filter(r => {
-    if (r.is_recovery_pending || r.settlement_status === 'pending') return true;
+    // Supplier recovery MUST only show if order or order item was cancelled!
+    const isCancelledRecovery = (r.is_recovery_pending || r.settlement_status === 'pending') &&
+      ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled);
+    if (isCancelledRecovery) return true;
+    if (r.is_recovery_pending || r.settlement_status === 'pending') {
+      const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
+        ? parseFloat(r.full_balance_due) || 0
+        : Math.max(0, (parseFloat(r.amount) || 0) - (parseFloat(r.paid_amount) || 0));
+      if (r.status === 'paid' || (balance <= 0.009 && !r.release_pending)) return false;
+    }
     if (r.status === 'paid') return false;
-    const releasePending = r.release_pending === 1 || r.release_pending === true;
+    const releasePending = r.release_pending === 1 || r.release_pending === true || r.status === 'payment_recorded';
     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
       ? parseFloat(r.full_balance_due) || 0
       : Math.max(0, (parseFloat(r.amount) || 0) - (parseFloat(r.paid_amount) || 0));
@@ -3010,8 +3164,11 @@ export default function FinancePage() {
     return true;
   });
   const supNet      = (supQueue.net || []).filter(r => {
-    if (r.is_recovery_pending || r.settlement_status === 'pending') return true;
+    const isCancelledRecovery = (r.is_recovery_pending || r.settlement_status === 'pending') &&
+      ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled);
+    if (isCancelledRecovery) return true;
     if (r.status === 'paid') return false;
+    if (r.status === 'net_payment_recorded') return true;
     const total = parseFloat(r.confirmed_price || r.total_amount || 0);
     const paid = parseFloat(r.net_total_paid || 0);
     const balance = Math.max(0, total - paid);
@@ -3222,11 +3379,24 @@ export default function FinancePage() {
                           🚫 CANCELLED
                         </span>
                       ) : o.settlement_status === 'pending' ? (
-                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
-                          ⚠️ EXCESS PAID
+                        <div>
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                            ⚠️ EXCESS PAID
+                          </span>
+                          {o.payment_breakdown && (
+                            <div style={{fontSize:10,color:'var(--text3)',marginTop:3,fontStyle:'italic',maxWidth:170,lineHeight:1.3}} title={o.payment_breakdown}>
+                              {o.payment_breakdown.replace(/^Breakdown:\s*/i, '')}
+                            </div>
+                          )}
+                        </div>
+                      ) : isHold ? (
+                        <HoldBadge />
+                      ) : o.customer_payment_status === 'payment_recorded' ? (
+                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt,#dcfce7)',color:'var(--green,#16a34a)',fontWeight:800,border:'1px solid var(--green,#16a34a)'}}>
+                          ✅ Payment Recorded
                         </span>
                       ) : (
-                        isHold ? <HoldBadge /> : <StatusBadge s={o.status}/>
+                        <StatusBadge s={o.status}/>
                       )}
                     </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
@@ -3253,18 +3423,14 @@ export default function FinancePage() {
                               title={isHold ? 'Order is on hold' : ''}
                               style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>📄 {o.pi_no?'Re-print PI':'Generate PI'}</button>
                             {o.customer_payment_status === 'payment_recorded' ? (
-                              <>
-                                <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
-                                  style={{fontSize:11}}>👁 View</button>
-                                <button className="btn btn-xs"
-                                  disabled={isHold}
-                                  title={isHold ? 'Order is on hold' : ''}
-                                  style={{fontSize:11,background:'var(--green)',color:'#fff',
-                                    borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
-                                  onClick={()=>setReleaseConfirm(o)}>
-                                  🚀 Release
-                                </button>
-                              </>
+                              <button className="btn btn-xs"
+                                disabled={isHold}
+                                title={isHold ? 'Order is on hold' : ''}
+                                style={{fontSize:11,background:'var(--green)',color:'#fff',
+                                  borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
+                                onClick={()=>setReleaseConfirm(o)}>
+                                🚀 Release
+                              </button>
                             ) : (
                               <button className="btn btn-xs btn-primary"
                                 onClick={()=>setPayModal({item:o,type:'customer'})}
@@ -3356,11 +3522,24 @@ export default function FinancePage() {
                             🚫 CANCELLED
                           </span>
                         ) : o.settlement_status === 'pending' ? (
-                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
-                            ⚠️ EXCESS PAID
+                          <div>
+                            <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
+                              ⚠️ EXCESS PAID
+                            </span>
+                            {o.payment_breakdown && (
+                              <div style={{fontSize:10,color:'var(--text3)',marginTop:3,fontStyle:'italic',maxWidth:170,lineHeight:1.3}} title={o.payment_breakdown}>
+                                {o.payment_breakdown.replace(/^Breakdown:\s*/i, '')}
+                              </div>
+                            )}
+                          </div>
+                        ) : isHold ? (
+                          <HoldBadge />
+                        ) : o.customer_payment_status === 'payment_recorded' ? (
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt,#dcfce7)',color:'var(--green,#16a34a)',fontWeight:800,border:'1px solid var(--green,#16a34a)'}}>
+                            ✅ Payment Recorded
                           </span>
                         ) : (
-                          isHold ? <HoldBadge /> : <StatusBadge s={o.customer_payment_status||'pending'}/>
+                          <StatusBadge s={o.customer_payment_status||'pending'}/>
                         )}
                       </td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
@@ -3372,18 +3551,14 @@ export default function FinancePage() {
                           </button>
                         ) : (
                           o.customer_payment_status === 'payment_recorded' ? (
-                            <>
-                              <button className="btn btn-xs" onClick={()=>setViewPayModal({item:o})}
-                                style={{fontSize:11,marginRight:4}}>👁 View</button>
-                              <button className="btn btn-xs"
-                                disabled={isHold}
-                                title={isHold ? 'Order is on hold' : ''}
-                                style={{fontSize:11,background:'var(--green)',color:'#fff',
-                                  borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
-                                onClick={()=>setReleaseConfirm(o)}>
-                                🚀 Release
-                              </button>
-                            </>
+                            <button className="btn btn-xs"
+                              disabled={isHold}
+                              title={isHold ? 'Order is on hold' : ''}
+                              style={{fontSize:11,background:'var(--green)',color:'#fff',
+                                borderColor:'var(--green)',fontWeight:600,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}
+                              onClick={()=>setReleaseConfirm(o)}>
+                              🚀 Release
+                            </button>
                           ) : o.balance_due > 0 && (
                             <button className="btn btn-xs btn-primary"
                               disabled={isHold}
@@ -3436,8 +3611,8 @@ export default function FinancePage() {
                     const balance = r.full_balance_due !== undefined && r.full_balance_due !== null
                       ? parseFloat(r.full_balance_due)||0
                       : Math.max(0, (parseFloat(r.amount)||0) - paid);
-                    const releasePending = r.release_pending === 1 || r.release_pending === true;
-                    const canReleaseSupplier = paid > 0 && releasePending;
+                    const releasePending = r.release_pending === 1 || r.release_pending === true || r.status === 'payment_recorded';
+                    const canReleaseSupplier = (paid > 0 && releasePending) || r.status === 'payment_recorded';
                     return (
                   <tr key={r.id} style={{cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.supplier_order_id || r.id })}>
                     <td>
@@ -3479,15 +3654,19 @@ export default function FinancePage() {
                       {!hasBank && <span style={{color:'var(--text3)'}}>No bank details</span>}
                     </td>
                     <td>
-                      {r.is_recovery_pending || r.settlement_status === 'pending' ? (
+                      {((r.is_recovery_pending || r.settlement_status === 'pending') && ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled)) ? (
                         <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'#fffbeb',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)'}}>
                           ⚠️ OVERPAID
                         </span>
-                      ) : isHold ? <HoldBadge /> : <StatusBadge s={r.order_status || r.status || 'pending'} />}
+                      ) : isHold ? <HoldBadge /> : canReleaseSupplier ? (
+                        <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt,#dcfce7)',color:'var(--green,#16a34a)',fontWeight:800,border:'1px solid var(--green,#16a34a)'}}>
+                          ✅ Payment Recorded
+                        </span>
+                      ) : <StatusBadge s={r.order_status || r.status || 'pending'} />}
                     </td>
                     <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                       <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
-                        {r.is_recovery_pending || r.settlement_status === 'pending' ? (
+                        {((r.is_recovery_pending || r.settlement_status === 'pending') && ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled)) ? (
                           <button className="btn btn-xs"
                             style={{fontSize:11,background:'var(--amber,#d97706)',color:'#fff',borderColor:'var(--amber,#d97706)',fontWeight:700}}
                             onClick={()=>setSupplierRecoverModal(r)}>
@@ -3606,7 +3785,13 @@ export default function FinancePage() {
                           </div>
                         ) : '—'}
                       </td>
-                      <td>{isHold ? <HoldBadge /> : <StatusBadge s={r.status||'pending'}/>}</td>
+                      <td>
+                        {isHold ? <HoldBadge /> : r.status === 'net_payment_recorded' ? (
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt,#dcfce7)',color:'var(--green,#16a34a)',fontWeight:800,border:'1px solid var(--green,#16a34a)'}}>
+                            ✅ Payment Recorded
+                          </span>
+                        ) : <StatusBadge s={r.status||'pending'}/>}
+                      </td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
                         <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
                         {paid <= 0 && r.status === 'draft' && (
@@ -3741,7 +3926,11 @@ export default function FinancePage() {
         <ViewPaymentModal
           item={viewPayModal.item}
           onClose={()=>setViewPayModal(null)}
-          onSaved={()=>{ qc.invalidateQueries(['finance-customer']); setViewPayModal(null); }}
+          onSaved={()=>{
+            qc.invalidateQueries(['finance-customer']);
+            qc.invalidateQueries(['finance-supplier']);
+            setViewPayModal(null);
+          }}
         />
       )}
       {/* In-app confirmation for returning unpaid cases */}
