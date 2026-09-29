@@ -3134,7 +3134,6 @@ export default function FinancePage() {
     );
   });
   const custNet     = custQueue.filter(o => {
-    if (o.status === 'closed' || o.is_order_closed || o.closed_at) return false;
     if ((o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009 && isNetTerms(o.payment_terms)) {
       return true;
     }
@@ -3146,7 +3145,6 @@ export default function FinancePage() {
     return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const custOther   = custQueue.filter(o => {
-    if (o.status === 'closed' || o.is_order_closed || o.closed_at) return false;
     if (o.status === 'payment_approval') return false;
     if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms) || isNetTerms(o.payment_terms)) return false;
     if (!o.payment_terms) return false;
@@ -3176,11 +3174,10 @@ export default function FinancePage() {
     return true;
   });
   const supNet      = (supQueue.net || []).filter(r => {
-    if (r.order_status === 'closed' || r.is_order_closed || r.closed_at || r.status === 'closed') return false;
     const isCancelledRecovery = (r.is_recovery_pending || r.settlement_status === 'pending') &&
       ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled);
     if (isCancelledRecovery) return true;
-    if (r.status === 'paid') return false;
+    if (r.status === 'paid' || r.status === 'cancelled') return false;
     if (r.status === 'net_payment_recorded') return true;
     const total = parseFloat(r.confirmed_price || r.total_amount || 0);
     const paid = parseFloat(r.net_total_paid || 0);

@@ -5684,6 +5684,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const orders = await allAsync(`
     SELECT * FROM orders 
     WHERE (status NOT IN ('closed','cancelled','deleted') AND closed_at IS NULL) 
+       OR (status = 'closed' AND (customer_payment_status != 'paid' OR customer_payment_status IS NULL))
        OR (status = 'cancelled' AND settlement_status = 'pending')
     ORDER BY created_at DESC
   `);
@@ -5717,7 +5718,13 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const filtered = orders.filter(o => {
-    if (o.status === 'closed' || o.closed_at) return false;
+    const isClosed = o.status === 'closed' || !!o.closed_at;
+    if (isClosed) {
+      // Advance orders NEVER show when closed (already fulfilled)
+      if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms)) return false;
+      // Net orders show ONLY if payment is still unpaid/pending
+      return o.customer_payment_status !== 'paid';
+    }
     if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
     // Returned from Finance: keep it visible/editable in Orders only until the
@@ -5829,10 +5836,16 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => o).filter(o => {
-    if (o.status === 'closed' || o.closed_at) return false;
     if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
     if (o.customer_payment_status === 'paid') return false;
+
+    const isClosed = o.status === 'closed' || !!o.closed_at;
+    if (isClosed) {
+      if (o.payment_type === 'full_advance' || o.payment_type === 'partial_advance') return false;
+      return o.full_balance_due > 0.009 || o.customer_payment_status === 'payment_recorded';
+    }
+
     return o.customer_payment_status === 'payment_recorded' || o.full_balance_due > 0.009;
   });
   res.json(result);
@@ -6317,7 +6330,7 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
       AND (so.status NOT IN ('paid','cancelled') OR so.status = 'net_payment_recorded')
       AND (so.net_total_paid IS NULL OR so.confirmed_price IS NULL OR so.confirmed_price <= 0 OR so.net_total_paid < (so.confirmed_price - 0.01) OR so.status = 'net_payment_recorded')
       AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
-      AND (o.status IS NULL OR (o.status NOT IN ('closed', 'cancelled', 'deleted') AND o.closed_at IS NULL))
+      AND (o.status IS NULL OR o.status NOT IN ('cancelled', 'deleted'))
       AND NOT EXISTS (
         SELECT 1 FROM finance_queue fq
         WHERE fq.supplier_order_id=so.id AND fq.status='returned_to_procurement'
@@ -6450,7 +6463,7 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
     advance: [...normalAdv, ...soRecoveryRows],
     net: netRows
       .filter(r => {
-        if (r.order_status === 'closed' || r.closed_at || r.status === 'closed') return false;
+        if (r.status === 'paid' || r.status === 'cancelled') return false;
         const total = parseFloat(r.confirmed_price) || 0;
         const paid = parseFloat(r.net_total_paid) || 0;
         return total <= 0 || (total - paid) > 0.009 || r.status === 'net_payment_recorded';
