@@ -5,8 +5,6 @@ import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { fmtDate as fmt } from '../utils/helpers';
 
-const fmtNum = n => new Intl.NumberFormat('en-IN',{maximumFractionDigits:2}).format(n||0);
-
 export default function ClosedBinPage() {
   const { user } = useAuth();
   const [search, setSearch] = useState('');
@@ -26,34 +24,15 @@ export default function ClosedBinPage() {
     return !q || o.id.toLowerCase().includes(q) || (o.po_number||'').toLowerCase().includes(q) || custName(o.customer_id).toLowerCase().includes(q);
   });
 
-  // Summary stats
-  const totalValue = orders.reduce((sum, o) => {
-    const inrItems = (o.lineItems||[]).filter(li=>li.currency==='INR');
-    return sum + inrItems.reduce((s,li)=>s+(li.qty*li.unit_price),0);
-  }, 0);
-
   return (
     <div style={{maxWidth:1100}}>
-      {/* Stats strip */}
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12,marginBottom:16}}>
-        {[
-          { label:'Total Closed Orders', value: orders.length, icon:'✅' },
-          { label:'Total INR Value',      value: '₹'+fmtNum(totalValue), icon:'💰' },
-          { label:'This Month',           value: orders.filter(o=>o.closed_at && o.closed_at.slice(0,7)===new Date().toISOString().slice(0,7)).length, icon:'📅' },
-        ].map(s=>(
-          <div key={s.label} className="card" style={{padding:'14px 18px',marginBottom:0}}>
-            <div style={{fontSize:22,marginBottom:4}}>{s.icon}</div>
-            <div style={{fontSize:22,fontWeight:700,color:'var(--accent)'}}>{s.value}</div>
-            <div style={{fontSize:11,color:'var(--text3)'}}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-
       <div className="card">
         <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:14}}>
           <span style={{fontSize:20}}>📦</span>
           <div style={{flex:1}}>
-            <div className="card-title" style={{marginBottom:0}}>Closed Orders</div>
+            <div className="card-title" style={{marginBottom:0,display:'flex',alignItems:'center',gap:6}}>
+              Closed Orders <span style={{fontSize:15,fontWeight:600,color:'var(--text2)'}}>({orders.length})</span>
+            </div>
             <div style={{fontSize:12,color:'var(--text3)'}}>Successfully completed and closed orders</div>
           </div>
           <input className="input" placeholder="Search orders…" value={search}

@@ -5381,15 +5381,185 @@ app.put('/api/orders/:id/items/:itemId/split-pricing', auth, asyncRoute(async (r
 // Orders land here automatically the moment they close (see createCostAudit(),
 // called from both places orders.status becomes 'closed'). Never locked —
 // actuals can be entered/edited any time after the audit is created.
-// Sum whatever was actually paid for an order, on each side of the deal —
-// customer_payments (money IN) and finance_queue (money OUT to suppliers).
-// Falls back actual_amount -> paid_amount -> amount, same convention Finance
-// itself uses to decide what "actually paid" means.
-async function paidTotalsForOrder(orderId) {
-  const custRows = await allAsync('SELECT actual_amount, amount FROM customer_payments WHERE order_id=?', [orderId]);
-  const supRows  = await allAsync('SELECT actual_amount, paid_amount, amount FROM finance_queue WHERE order_id=?', [orderId]);
-  const sum = rows => rows.reduce((s,r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
-  return { customer_paid_computed: sum(custRows), supplier_paid_computed: sum(supRows) };
+// Sum whatever was actually paid for an order, on each side of the deal:
+// Customer Paid: customer_payments (money IN) with fallback to full order total for closed orders.
+// Supplier Paid: supplier_advance_payment_logs + supplier_net_payment_logs + finance_queue
+//                + supplier_orders (for settled Net/Advance POs) + order_cost_audit_items actuals.
+async function paidTotalsForOrder(orderId, preloadedOrder = null) {
+  let order = preloadedOrder;
+  if (!order) {
+    try {
+      order = await getAsync(
+        "SELECT id, status, closed_at, customer_payment_status FROM orders WHERE id=?",
+        [orderId]
+      );
+    } catch (_) {}
+  }
+  const isOrderClosed = !!(order && (order.status === 'closed' || order.closed_at || order.customer_payment_status === 'paid'));
+
+  // ── 1. CUSTOMER PAID ────────────────────────────────────────────────────────
+  let customerPaid = 0;
+  try {
+    const custRows = await allAsync(
+      "SELECT actual_amount, amount FROM customer_payments WHERE order_id=? AND (status IS NULL OR status NOT IN ('cancelled', 'refunded'))",
+      [orderId]
+    );
+    customerPaid = (custRows || []).reduce(
+      (s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0),
+      0
+    );
+  } catch (_) {}
+
+  // If no customer_payments row was recorded, but the order is closed or marked paid,
+  // derive the customer paid total from the order items / audit items.
+  if (customerPaid <= 0.001 && isOrderClosed) {
+    try {
+      const itemRow = await getAsync(
+        `SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) AS total
+         FROM order_items
+         WHERE order_id = ? AND (line_status != 'cancelled' OR line_status IS NULL)`,
+        [orderId]
+      );
+      if (itemRow && parseFloat(itemRow.total) > 0) {
+        customerPaid = parseFloat(itemRow.total);
+      } else {
+        const auditItemRow = await getAsync(
+          "SELECT SUM(customer_total) AS total FROM order_cost_audit_items WHERE order_id = ?",
+          [orderId]
+        );
+        if (auditItemRow && parseFloat(auditItemRow.total) > 0) {
+          customerPaid = parseFloat(auditItemRow.total);
+        }
+      }
+    } catch (_) {}
+  }
+
+  // ── 2. SUPPLIER PAID ────────────────────────────────────────────────────────
+  let supplierPaid = 0;
+  try {
+    const supOrders = await allAsync("SELECT * FROM supplier_orders WHERE order_id=?", [orderId]);
+    const countedSoIds = new Set();
+
+    if (supOrders && supOrders.length > 0) {
+      for (const so of supOrders) {
+        countedSoIds.add(so.id);
+        let soAmount = 0;
+
+        // a) Advance payment logs for this supplier order
+        const advLogs = await allAsync(
+          "SELECT actual_amount, amount FROM supplier_advance_payment_logs WHERE supplier_order_id=?",
+          [so.id]
+        );
+        const advSum = (advLogs || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0), 0);
+
+        // b) Net payment logs for this supplier order
+        const netLogs = await allAsync(
+          "SELECT actual_amount, amount FROM supplier_net_payment_logs WHERE supplier_order_id=?",
+          [so.id]
+        );
+        const netSum = (netLogs || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0), 0);
+
+        // c) finance_queue paid records for this supplier order (where not in advance logs)
+        const fqRows = await allAsync(
+          `SELECT actual_amount, paid_amount, amount FROM finance_queue
+           WHERE supplier_order_id = ?
+             AND (status = 'paid' OR (paid_amount IS NOT NULL AND paid_amount > 0))
+             AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id = finance_queue.id)`,
+          [so.id]
+        );
+        const fqSum = (fqRows || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
+
+        soAmount = advSum + netSum + fqSum;
+
+        // d) If no per-payment logs were found, check if PO or order is closed/paid/received
+        if (soAmount <= 0.001 && (isOrderClosed || so.status === 'paid' || so.status === 'received' || (parseFloat(so.net_total_paid) || 0) > 0)) {
+          // Check audit items actual cost first (if audit has entered actual cost for this SO)
+          const auditAct = await getAsync(
+            "SELECT act_total, est_material, est_total FROM order_cost_audit_items WHERE supplier_order_id=?",
+            [so.id]
+          );
+          if (auditAct && parseFloat(auditAct.act_total) > 0) {
+            soAmount = parseFloat(auditAct.act_total);
+          } else {
+            soAmount = parseFloat(so.net_actual_amount)
+              || parseFloat(so.net_total_paid)
+              || parseFloat(so.confirmed_price)
+              || parseFloat(so.supplier_subtotal)
+              || 0;
+
+            if (soAmount <= 0.001 && auditAct) {
+              soAmount = parseFloat(auditAct.est_material) || parseFloat(auditAct.est_total) || 0;
+            }
+
+            if (soAmount <= 0.001) {
+              const soItemSum = await getAsync(
+                `SELECT SUM(COALESCE(oi.procurement_price, oi.unit_price, 0) * oi.qty * (1 + COALESCE(so.supplier_tax_rate, 18) / 100)) AS total
+                 FROM supplier_order_items soi
+                 JOIN order_items oi ON oi.id = soi.item_id
+                 JOIN supplier_orders so ON so.id = soi.supplier_order_id
+                 WHERE soi.supplier_order_id = ?`,
+                [so.id]
+              );
+              soAmount = parseFloat(soItemSum?.total) || 0;
+            }
+          }
+        }
+
+        supplierPaid += soAmount;
+      }
+    }
+
+    // Also check any finance_queue or supplier_advance_payment_logs tied directly to order_id
+    // but without supplier_order_id (or supplier_order_id not in supOrders)
+    const directAdvLogs = await allAsync(
+      `SELECT actual_amount, amount FROM supplier_advance_payment_logs
+       WHERE order_id = ? ${countedSoIds.size ? `AND (supplier_order_id IS NULL OR supplier_order_id NOT IN (${[...countedSoIds].map(()=>'?').join(',')}))` : ''}`,
+      countedSoIds.size ? [orderId, ...countedSoIds] : [orderId]
+    );
+    supplierPaid += (directAdvLogs || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0), 0);
+
+    const directFqRows = await allAsync(
+      `SELECT actual_amount, paid_amount, amount FROM finance_queue
+       WHERE order_id = ?
+         AND (status = 'paid' OR (paid_amount IS NOT NULL AND paid_amount > 0))
+         ${countedSoIds.size ? `AND (supplier_order_id IS NULL OR supplier_order_id NOT IN (${[...countedSoIds].map(()=>'?').join(',')}))` : ''}
+         AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id = finance_queue.id)`,
+      countedSoIds.size ? [orderId, ...countedSoIds] : [orderId]
+    );
+    supplierPaid += (directFqRows || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
+
+    // If supplierPaid is still 0 and order is closed, check order_cost_audit_items or order_items procurement
+    if (supplierPaid <= 0.001 && isOrderClosed) {
+      const auditActSum = await getAsync(
+        "SELECT SUM(act_total) AS total FROM order_cost_audit_items WHERE order_id=? AND act_total > 0",
+        [orderId]
+      );
+      if (auditActSum && parseFloat(auditActSum.total) > 0) {
+        supplierPaid = parseFloat(auditActSum.total);
+      } else {
+        const auditEstSum = await getAsync(
+          "SELECT SUM(COALESCE(NULLIF(est_material, 0), est_total, 0)) AS total FROM order_cost_audit_items WHERE order_id=?",
+          [orderId]
+        );
+        if (auditEstSum && parseFloat(auditEstSum.total) > 0) {
+          supplierPaid = parseFloat(auditEstSum.total);
+        } else {
+          const oiSum = await getAsync(
+            `SELECT SUM(COALESCE(NULLIF(procurement_price, 0), unit_price, 0) * qty * (1 + COALESCE(tax_rate, 18) / 100)) AS total
+             FROM order_items
+             WHERE order_id = ? AND supplier_id IS NOT NULL AND (line_status != 'cancelled' OR line_status IS NULL)`,
+            [orderId]
+          );
+          supplierPaid = parseFloat(oiSum?.total) || 0;
+        }
+      }
+    }
+  } catch (_) {}
+
+  return {
+    customer_paid_computed: Math.round(customerPaid * 100) / 100,
+    supplier_paid_computed: Math.round(supplierPaid * 100) / 100,
+  };
 }
 // Manual overrides (order_cost_audits.customer_paid_override / supplier_paid_override)
 // win over the computed Finance sum whenever a user has set one from Audit Bin —
@@ -5423,11 +5593,11 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     : [];
   const orderIds = [...new Set(audits.map(a => a.order_id))];
   const orders = orderIds.length
-    ? await allAsync('SELECT id, po_number, customer_id, customer_ref, closed_at FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
+    ? await allAsync('SELECT id, po_number, customer_id, customer_ref, status, closed_at, customer_payment_status FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
     : [];
   const orderById = {}; orders.forEach(o => { orderById[o.id] = o; });
   const paidByOrder = {};
-  for (const oid of orderIds) paidByOrder[oid] = await paidTotalsForOrder(oid);
+  for (const oid of orderIds) paidByOrder[oid] = await paidTotalsForOrder(oid, orderById[oid]);
   res.json(audits.map(a => ({
     ...a,
     order: orderById[a.order_id] || null,
