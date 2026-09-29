@@ -6031,7 +6031,7 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   if (!o) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
   const items = await allAsync("SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)", [req.params.order_id]);
-  const total = items.reduce((s,li)=>{const b=(li.qty||0)*(li.unit_price||0);return s+b+b*((li.tax_rate||0)/100);},0);
+  await runAsync("UPDATE customer_payments SET status='paid' WHERE order_id=? AND status='payment_recorded'", [req.params.order_id]);
   const paid = await getAsync(
     "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
     [req.params.order_id]
@@ -6052,7 +6052,6 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
     await runAsync("UPDATE orders SET customer_payment_status=?, advance_released=1 WHERE id=?",
       [newPaymentStatus, req.params.order_id]);
   }
-  await runAsync("UPDATE customer_payments SET status='paid' WHERE order_id=? AND status='payment_recorded'", [req.params.order_id]);
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), req.params.order_id, 'Customer payment released to procurement', req.session.user.name, '', now]); } catch(_) {}
   saveNow();
@@ -7232,9 +7231,44 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                     FROM customer_payments cp
                     LEFT JOIN orders o ON o.id=cp.order_id
                     LEFT JOIN customers c ON c.id=o.customer_id
-                    WHERE (cp.status = 'paid' OR (cp.status IS NULL AND o.customer_payment_status != 'payment_recorded'))
+                    WHERE cp.status != 'payment_recorded' 
+                       OR (cp.status = 'payment_recorded' AND o.customer_payment_status != 'payment_recorded')
                     ORDER BY cp.recorded_at DESC`);
   } catch(_) {}
+
+  // Fallback: orders marked paid or closed that have no row in customer_payments
+  try {
+    const legacyOrders = await allAsync(`
+      SELECT 
+        o.id AS id,
+        o.id AS order_id,
+        COALESCE(o.po_number, '') AS customer_po_no,
+        COALESCE(o.po_number, '') AS po_number,
+        COALESCE(o.finance_po_no, '') AS finance_po_no,
+        o.customer_id,
+        c.name AS customer_name,
+        COALESCE(
+          (SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) FROM order_items WHERE order_id = o.id AND (line_status != 'cancelled' OR line_status IS NULL)),
+          0
+        ) AS amount,
+        'INR' AS currency,
+        'Bank Transfer' AS payment_method,
+        '' AS payment_ref,
+        COALESCE(NULLIF(o.closed_at, ''), o.created_at) AS payment_date,
+        COALESCE(NULLIF(o.closed_at, ''), o.created_at) AS recorded_at,
+        'Historical Order Payment' AS notes,
+        'paid' AS status
+      FROM orders o
+      LEFT JOIN customers c ON c.id = o.customer_id
+      WHERE (o.customer_payment_status = 'paid' OR o.status = 'closed')
+        AND o.status NOT IN ('cancelled', 'deleted')
+        AND NOT EXISTS (SELECT 1 FROM customer_payments cp WHERE cp.order_id = o.id)
+      ORDER BY COALESCE(NULLIF(o.closed_at, ''), o.created_at) DESC
+    `);
+    custPmts = [...custPmts, ...legacyOrders];
+  } catch(e) {
+    console.warn('[FINANCE] history legacy customer orders fallback error:', e?.message || e);
+  }
 
   // Supplier ADVANCE history — one row per installment, from the per-payment log table.
   let supPmts  = [];
@@ -7255,12 +7289,13 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                    FROM supplier_advance_payment_logs l
                    LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (l.status IS NULL OR l.status = 'released' OR l.status = 'paid')
+                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid')
                    ORDER BY l.paid_at DESC`);
   } catch(_) { supPmts = []; }
   // Legacy fallback: finance_queue rows paid BEFORE the per-installment log existed.
   try {
     const legacy = await allAsync(`SELECT fq.*,
+                           COALESCE(NULLIF(fq.paid_at, ''), fq.created_at) AS paid_at,
                            COALESCE(NULLIF(fq.order_id, ''), so.order_id) AS order_id,
                            COALESCE(NULLIF(fq.order_id, ''), so.order_id) AS linked_order_id,
                            so.internal_po_no, so.po_no, so.supplier_ref,
@@ -7270,9 +7305,9 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
                     LEFT JOIN suppliers s ON s.id=so.supplier_id
-                    WHERE fq.status = 'paid' AND fq.paid_at IS NOT NULL AND fq.paid_at != ''
+                    WHERE (fq.status = 'paid' OR (fq.paid_amount IS NOT NULL AND fq.paid_amount > 0))
                       AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id=fq.id)
-                    ORDER BY fq.paid_at DESC`);
+                    ORDER BY COALESCE(NULLIF(fq.paid_at, ''), fq.created_at) DESC`);
     supPmts = [...supPmts, ...legacy];
   } catch(_) {}
 
@@ -7292,7 +7327,7 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                    FROM supplier_net_payment_logs l
                    LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (l.status IS NULL OR l.status = 'released' OR l.status = 'paid')
+                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid')
                    ORDER BY l.paid_at DESC`);
   } catch(_) {}
 
@@ -7322,9 +7357,11 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           'net' AS payment_kind
                    FROM supplier_orders so
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
-                     AND so.status='paid'
+                   WHERE (so.status IN ('paid', 'received') OR (so.net_total_paid IS NOT NULL AND so.net_total_paid > 0) OR (so.advance_actual_amount IS NOT NULL AND so.advance_actual_amount > 0))
+                     AND so.status != 'cancelled'
                      AND NOT EXISTS (SELECT 1 FROM supplier_net_payment_logs l WHERE l.supplier_order_id=so.id)
+                     AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs al WHERE al.supplier_order_id=so.id)
+                     AND NOT EXISTS (SELECT 1 FROM finance_queue fq WHERE fq.supplier_order_id=so.id AND (fq.status='paid' OR fq.paid_amount > 0))
                    ORDER BY COALESCE(so.net_paid_at, so.received_at, so.created_at) DESC`);
     netPmts = [...netPmts, ...legacyNet];
   } catch(e) {
