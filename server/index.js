@@ -4685,6 +4685,67 @@ initDb().then(async () => {
   try {
     await runAsync(`UPDATE orders SET customer_payment_status='payment_recorded' WHERE customer_payment_status='paid' AND status='payment_approval'`);
   } catch(_) {}
+  // ── Auto-heal all closed orders (in Closed Bin): mark payments as paid/released ──
+  // Closed orders are already completed and delivered. They must NEVER require manual
+  // release or appear in any of the 4 active pending queues.
+  try {
+    const oRes = await runAsync(`
+      UPDATE orders
+      SET customer_payment_status = 'paid'
+      WHERE (status = 'closed' OR closed_at IS NOT NULL)
+        AND (customer_payment_status IS NULL OR customer_payment_status != 'paid')
+    `);
+    if (oRes && oRes.rowCount) console.log('[STARTUP] Auto-healed', oRes.rowCount, 'closed orders to customer_payment_status=paid');
+
+    const cpRes = await runAsync(`
+      UPDATE customer_payments
+      SET status = 'paid'
+      WHERE status != 'paid'
+        AND order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL)
+    `);
+    if (cpRes && cpRes.rowCount) console.log('[STARTUP] Auto-healed', cpRes.rowCount, 'closed order customer_payments to status=paid');
+
+    const fqRes = await runAsync(`
+      UPDATE finance_queue
+      SET status = 'paid', release_pending = 0
+      WHERE (status != 'paid' OR release_pending = 1)
+        AND order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL)
+    `);
+    if (fqRes && fqRes.rowCount) console.log('[STARTUP] Auto-healed', fqRes.rowCount, 'closed order finance_queue items to paid');
+
+    const soRes = await runAsync(`
+      UPDATE supplier_orders
+      SET status = 'paid',
+          net_total_paid = CASE WHEN confirmed_price IS NOT NULL AND confirmed_price > 0 THEN confirmed_price ELSE net_total_paid END
+      WHERE status NOT IN ('paid', 'cancelled', 'deleted')
+        AND order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL)
+    `);
+    if (soRes && soRes.rowCount) console.log('[STARTUP] Auto-healed', soRes.rowCount, 'closed order supplier_orders to status=paid');
+
+    const salRes = await runAsync(`
+      UPDATE supplier_advance_payment_logs
+      SET status = 'released'
+      WHERE status != 'released'
+        AND (
+          order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL)
+          OR supplier_order_id IN (SELECT id FROM supplier_orders WHERE status = 'paid' OR order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL))
+        )
+    `);
+    if (salRes && salRes.rowCount) console.log('[STARTUP] Auto-healed', salRes.rowCount, 'supplier advance logs to released');
+
+    const snlRes = await runAsync(`
+      UPDATE supplier_net_payment_logs
+      SET status = 'released'
+      WHERE status != 'released'
+        AND (
+          supplier_order_id IN (SELECT id FROM supplier_orders WHERE status = 'paid' OR order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL))
+          OR order_id IN (SELECT id FROM orders WHERE status = 'closed' OR closed_at IS NOT NULL)
+        )
+    `);
+    if (snlRes && snlRes.rowCount) console.log('[STARTUP] Auto-healed', snlRes.rowCount, 'supplier net logs to released');
+  } catch(e) {
+    console.warn('[STARTUP] Closed orders payment heal error:', e?.message || e);
+  }
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
   // customer_payments table created by db.js initDb() via pool.query()
   // ─────────────────────────────────────────────────────────────────────────────
@@ -5622,8 +5683,7 @@ function normalizedFinanceDocNo(prefix, orderId, existingValue) {
 app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
   const orders = await allAsync(`
     SELECT * FROM orders 
-    WHERE (status NOT IN ('closed','cancelled','deleted')) 
-       OR (status = 'closed' AND (customer_payment_status != 'paid' OR customer_payment_status IS NULL))
+    WHERE (status NOT IN ('closed','cancelled','deleted') AND closed_at IS NULL) 
        OR (status = 'cancelled' AND settlement_status = 'pending')
     ORDER BY created_at DESC
   `);
@@ -5657,12 +5717,9 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const filtered = orders.filter(o => {
+    if (o.status === 'closed' || o.closed_at) return false;
     if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
-    // Closed orders: only keep if payment is pending/recorded and not fully paid
-    if (o.status === 'closed') {
-      return o.customer_payment_status !== 'paid';
-    }
     // Returned from Finance: keep it visible/editable in Orders only until the
     // order team explicitly sends it back with status='payment_approval'.
     if (o.status === 'cust_payment_update') return false;
@@ -5772,6 +5829,7 @@ app.get('/api/finance/customer-queue', auth, asyncRoute(async (req, res) => {
     };
   });
   const result = enriched.map(({ _computed_total, _computed_paid, ...o }) => o).filter(o => {
+    if (o.status === 'closed' || o.closed_at) return false;
     if (o.settlement_status === 'pending' && (parseFloat(o.unsettled_amount) > 0.009)) return true;
     if (o.status === 'cancelled') return false;
     if (o.customer_payment_status === 'paid') return false;
@@ -6212,11 +6270,12 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
     advRows = await allAsync(`
       SELECT fq.*, fq.release_pending, so.payment_terms_type, so.payment_advance_pct, so.payment_blocked,
              so.confirmed_price, so.confirmed_currency, so.zoho_po_number, so.supplier_ref, so.internal_po_no,
-             o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status
+             o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status, o.closed_at
       FROM finance_queue fq
       LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
       LEFT JOIN orders o ON o.id=fq.order_id
       WHERE fq.status IN ('pending', 'payment_recorded')
+        AND (o.status IS NULL OR (o.status NOT IN ('closed', 'cancelled', 'deleted') AND o.closed_at IS NULL))
     `);
   } catch(_) {}
 
@@ -6251,13 +6310,14 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
   }
 
   const netRows = await allAsync(`SELECT so.*,
-      o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status
+      o.is_on_hold, o.hold_reason, o.hold_by, o.hold_at, o.status AS order_status, o.closed_at
     FROM supplier_orders so
     LEFT JOIN orders o ON o.id=so.order_id
     WHERE (so.payment_terms_type='net' OR so.payment_terms_type IS NULL)
       AND (so.status NOT IN ('paid','cancelled') OR so.status = 'net_payment_recorded')
       AND (so.net_total_paid IS NULL OR so.confirmed_price IS NULL OR so.confirmed_price <= 0 OR so.net_total_paid < (so.confirmed_price - 0.01) OR so.status = 'net_payment_recorded')
       AND (so.payment_blocked IS NULL OR so.payment_blocked=0)
+      AND (o.status IS NULL OR (o.status NOT IN ('closed', 'cancelled', 'deleted') AND o.closed_at IS NULL))
       AND NOT EXISTS (
         SELECT 1 FROM finance_queue fq
         WHERE fq.supplier_order_id=so.id AND fq.status='returned_to_procurement'
@@ -6380,6 +6440,7 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
       };
     })
     .filter(r => {
+      if (r.order_status === 'closed' || r.closed_at) return false;
       const releasePending = r.release_pending === 1 || r.release_pending === true || r.status === 'payment_recorded';
       if (r.full_balance_due <= 0.009 && !releasePending) return false;
       return true;
@@ -6389,6 +6450,7 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
     advance: [...normalAdv, ...soRecoveryRows],
     net: netRows
       .filter(r => {
+        if (r.order_status === 'closed' || r.closed_at || r.status === 'closed') return false;
         const total = parseFloat(r.confirmed_price) || 0;
         const paid = parseFloat(r.net_total_paid) || 0;
         return total <= 0 || (total - paid) > 0.009 || r.status === 'net_payment_recorded';
@@ -7233,6 +7295,7 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                     LEFT JOIN customers c ON c.id=o.customer_id
                     WHERE cp.status != 'payment_recorded' 
                        OR (cp.status = 'payment_recorded' AND o.customer_payment_status != 'payment_recorded')
+                       OR (o.status = 'closed' OR o.closed_at IS NOT NULL)
                     ORDER BY cp.recorded_at DESC`);
   } catch(_) {}
 
@@ -7260,7 +7323,7 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
         'paid' AS status
       FROM orders o
       LEFT JOIN customers c ON c.id = o.customer_id
-      WHERE (o.customer_payment_status = 'paid' OR o.status = 'closed')
+      WHERE (o.customer_payment_status = 'paid' OR o.status = 'closed' OR o.closed_at IS NOT NULL)
         AND o.status NOT IN ('cancelled', 'deleted')
         AND NOT EXISTS (SELECT 1 FROM customer_payments cp WHERE cp.order_id = o.id)
       ORDER BY COALESCE(NULLIF(o.closed_at, ''), o.created_at) DESC
@@ -7289,9 +7352,11 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                    FROM supplier_advance_payment_logs l
                    LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid')
+                   LEFT JOIN orders o ON o.id=COALESCE(NULLIF(l.order_id, ''), so.order_id)
+                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid' OR o.status = 'closed' OR o.closed_at IS NOT NULL)
                    ORDER BY l.paid_at DESC`);
   } catch(_) { supPmts = []; }
+
   // Legacy fallback: finance_queue rows paid BEFORE the per-installment log existed.
   try {
     const legacy = await allAsync(`SELECT fq.*,
@@ -7305,7 +7370,8 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                     FROM finance_queue fq
                     LEFT JOIN supplier_orders so ON so.id=fq.supplier_order_id
                     LEFT JOIN suppliers s ON s.id=so.supplier_id
-                    WHERE (fq.status = 'paid' OR (fq.paid_amount IS NOT NULL AND fq.paid_amount > 0))
+                    LEFT JOIN orders o ON o.id=COALESCE(NULLIF(fq.order_id, ''), so.order_id)
+                    WHERE (fq.status = 'paid' OR (fq.paid_amount IS NOT NULL AND fq.paid_amount > 0) OR o.status = 'closed' OR o.closed_at IS NOT NULL)
                       AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id=fq.id)
                     ORDER BY COALESCE(NULLIF(fq.paid_at, ''), fq.created_at) DESC`);
     supPmts = [...supPmts, ...legacy];
@@ -7327,7 +7393,8 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                    FROM supplier_net_payment_logs l
                    LEFT JOIN supplier_orders so ON so.id=l.supplier_order_id
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid')
+                   LEFT JOIN orders o ON o.id=so.order_id
+                   WHERE (l.status IS NULL OR l.status != 'payment_recorded' OR l.status = 'released' OR l.status = 'paid' OR o.status = 'closed' OR o.closed_at IS NOT NULL)
                    ORDER BY l.paid_at DESC`);
   } catch(_) {}
 
@@ -7335,18 +7402,36 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
   try {
     const legacyNet = await allAsync(`SELECT
                           so.id,
-                          COALESCE(NULLIF(so.net_paid_at,''), so.received_at, so.created_at) AS paid_at,
-                          so.net_paid_by AS paid_by,
-                          COALESCE(so.net_actual_amount, so.net_total_paid, so.confirmed_price) AS amount,
-                          so.confirmed_currency AS currency,
-                          so.net_payment_ref AS payment_ref,
-                          COALESCE(NULLIF(so.net_payment_date,''), SUBSTRING(so.net_paid_at, 1, 10), '') AS payment_date,
-                          so.net_payment_method AS payment_method,
-                          so.net_payment_notes AS notes,
+                          COALESCE(NULLIF(so.net_paid_at,''), so.received_at, so.confirmed_at, so.created_at) AS paid_at,
+                          COALESCE(so.net_paid_by, 'System') AS paid_by,
+                          COALESCE(
+                            NULLIF(so.net_actual_amount, 0),
+                            NULLIF(so.net_total_paid, 0),
+                            NULLIF(so.confirmed_price, 0),
+                            NULLIF(so.supplier_subtotal, 0),
+                            (SELECT SUM(COALESCE(oi.procurement_price, oi.unit_price, 0) * oi.qty * (1 + COALESCE(so.supplier_tax_rate, 18) / 100))
+                             FROM supplier_order_items soi
+                             JOIN order_items oi ON oi.id = soi.item_id
+                             WHERE soi.supplier_order_id = so.id),
+                            0
+                          ) AS amount,
+                          COALESCE(so.confirmed_currency, 'INR') AS currency,
+                          COALESCE(so.net_payment_ref, '') AS payment_ref,
+                          COALESCE(NULLIF(so.net_payment_date,''), SUBSTRING(COALESCE(so.net_paid_at, so.received_at, so.confirmed_at, so.created_at), 1, 10), '') AS payment_date,
+                          COALESCE(so.net_payment_method, 'Bank Transfer') AS payment_method,
+                          COALESCE(so.net_payment_notes, 'Supplier Order Payment') AS notes,
                           so.zoho_po_number, so.supplier_ref,
-                          so.net_total_paid AS total_paid_snapshot,
+                          COALESCE(so.net_total_paid, so.confirmed_price, so.supplier_subtotal, 0) AS total_paid_snapshot,
                           0 AS remaining_snapshot,
-                          so.confirmed_price AS grand_total,
+                          COALESCE(
+                            NULLIF(so.confirmed_price, 0),
+                            NULLIF(so.supplier_subtotal, 0),
+                            (SELECT SUM(COALESCE(oi.procurement_price, oi.unit_price, 0) * oi.qty * (1 + COALESCE(so.supplier_tax_rate, 18) / 100))
+                             FROM supplier_order_items soi
+                             JOIN order_items oi ON oi.id = soi.item_id
+                             WHERE soi.supplier_order_id = so.id),
+                            0
+                          ) AS grand_total,
                           so.net_additional_charges AS additional_charges,
                           so.net_actual_amount AS actual_amount,
                           so.net_amount_change_note AS amount_change_note,
@@ -7354,18 +7439,73 @@ app.get('/api/finance/history', auth, asyncRoute(async (req, res) => {
                           so.internal_po_no, so.po_no,
                           so.supplier_id, so.confirmed_currency,
                           s.name AS supplier_name,
-                          'net' AS payment_kind
+                          COALESCE(so.payment_terms_type, 'net') AS payment_kind
                    FROM supplier_orders so
                    LEFT JOIN suppliers s ON s.id=so.supplier_id
-                   WHERE (so.status IN ('paid', 'received') OR (so.net_total_paid IS NOT NULL AND so.net_total_paid > 0) OR (so.advance_actual_amount IS NOT NULL AND so.advance_actual_amount > 0))
-                     AND so.status != 'cancelled'
+                   LEFT JOIN orders o ON o.id=so.order_id
+                   WHERE (
+                       so.status IN ('paid', 'received')
+                       OR (so.net_total_paid IS NOT NULL AND so.net_total_paid > 0)
+                       OR (o.status = 'closed' OR o.closed_at IS NOT NULL)
+                     )
+                     AND so.status NOT IN ('cancelled', 'deleted')
+                     AND (
+                       COALESCE(so.confirmed_price, so.net_total_paid, so.supplier_subtotal, 0) > 0
+                       OR EXISTS (SELECT 1 FROM supplier_order_items soi WHERE soi.supplier_order_id = so.id)
+                     )
                      AND NOT EXISTS (SELECT 1 FROM supplier_net_payment_logs l WHERE l.supplier_order_id=so.id)
                      AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs al WHERE al.supplier_order_id=so.id)
                      AND NOT EXISTS (SELECT 1 FROM finance_queue fq WHERE fq.supplier_order_id=so.id AND (fq.status='paid' OR fq.paid_amount > 0))
-                   ORDER BY COALESCE(so.net_paid_at, so.received_at, so.created_at) DESC`);
+                   ORDER BY COALESCE(so.net_paid_at, so.received_at, so.confirmed_at, so.created_at) DESC`);
     netPmts = [...netPmts, ...legacyNet];
   } catch(e) {
     console.warn('[FINANCE] history legacyNet error:', e?.message || e);
+  }
+
+  // Fallback: items in closed orders with supplier assigned where no supplier_orders row was raised
+  try {
+    const legacyItemSups = await allAsync(`
+      SELECT
+        'item_sup_' || oi.id AS id,
+        COALESCE(NULLIF(o.closed_at, ''), o.created_at) AS paid_at,
+        'System' AS paid_by,
+        COALESCE(NULLIF(oi.procurement_price, 0), oi.unit_price, 0) * oi.qty * (1 + COALESCE(oi.tax_rate, 18) / 100) AS amount,
+        'INR' AS currency,
+        '' AS payment_ref,
+        COALESCE(NULLIF(o.closed_at, ''), o.created_at) AS payment_date,
+        'Bank Transfer' AS payment_method,
+        'Historical Order Fulfillment' AS notes,
+        '' AS zoho_po_number,
+        '' AS supplier_ref,
+        COALESCE(NULLIF(oi.procurement_price, 0), oi.unit_price, 0) * oi.qty * (1 + COALESCE(oi.tax_rate, 18) / 100) AS total_paid_snapshot,
+        0 AS remaining_snapshot,
+        COALESCE(NULLIF(oi.procurement_price, 0), oi.unit_price, 0) * oi.qty * (1 + COALESCE(oi.tax_rate, 18) / 100) AS grand_total,
+        '[]' AS additional_charges,
+        COALESCE(NULLIF(oi.procurement_price, 0), oi.unit_price, 0) * oi.qty * (1 + COALESCE(oi.tax_rate, 18) / 100) AS actual_amount,
+        NULL AS amount_change_note,
+        o.id AS order_id,
+        o.id AS linked_order_id,
+        '' AS internal_po_no,
+        '' AS po_no,
+        oi.supplier_id,
+        'INR' AS confirmed_currency,
+        s.name AS supplier_name,
+        'net' AS payment_kind
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      LEFT JOIN suppliers s ON s.id = oi.supplier_id
+      WHERE (o.status = 'closed' OR o.closed_at IS NOT NULL)
+        AND o.status NOT IN ('cancelled', 'deleted')
+        AND (oi.line_status IS NULL OR oi.line_status != 'cancelled')
+        AND oi.supplier_id IS NOT NULL AND oi.supplier_id != ''
+        AND NOT EXISTS (
+          SELECT 1 FROM supplier_orders so WHERE so.order_id = o.id AND so.supplier_id = oi.supplier_id
+        )
+      ORDER BY COALESCE(NULLIF(o.closed_at, ''), o.created_at) DESC
+    `);
+    netPmts = [...netPmts, ...legacyItemSups];
+  } catch(e) {
+    console.warn('[FINANCE] history legacyItemSups error:', e?.message || e);
   }
 
   const allSupPmts = [...supPmts, ...netPmts].sort((a,b)=>{

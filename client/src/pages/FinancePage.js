@@ -3122,6 +3122,7 @@ export default function FinancePage() {
   // Separate customer queue by type
   // FIX 4: also include payment_approval status orders even if payment_terms not yet saved
   const custAdvance = custQueue.filter(o => {
+    if (o.status === 'closed' || o.is_order_closed || o.closed_at) return false;
     if ((o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009) {
       return isAdvanceTerms(o.payment_terms) || !isNetTerms(o.payment_terms);
     }
@@ -3133,6 +3134,7 @@ export default function FinancePage() {
     );
   });
   const custNet     = custQueue.filter(o => {
+    if (o.status === 'closed' || o.is_order_closed || o.closed_at) return false;
     if ((o.settlement_status === 'pending' || o.status === 'cancelled') && (parseFloat(o.unsettled_amount) || 0) > 0.009 && isNetTerms(o.payment_terms)) {
       return true;
     }
@@ -3144,6 +3146,7 @@ export default function FinancePage() {
     return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const custOther   = custQueue.filter(o => {
+    if (o.status === 'closed' || o.is_order_closed || o.closed_at) return false;
     if (o.status === 'payment_approval') return false;
     if (isAdvanceTerms(o.payment_terms) || isPartialAdvance(o.payment_terms) || isNetTerms(o.payment_terms)) return false;
     if (!o.payment_terms) return false;
@@ -3152,6 +3155,7 @@ export default function FinancePage() {
     return o.customer_payment_status === 'payment_recorded' || bal > 0.009;
   });
   const supAdvance  = (supQueue.advance || []).filter(r => {
+    if (r.order_status === 'closed' || r.is_order_closed || r.closed_at || r.status === 'closed') return false;
     // Supplier recovery MUST only show if order or order item was cancelled!
     const isCancelledRecovery = (r.is_recovery_pending || r.settlement_status === 'pending') &&
       ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled);
@@ -3172,6 +3176,7 @@ export default function FinancePage() {
     return true;
   });
   const supNet      = (supQueue.net || []).filter(r => {
+    if (r.order_status === 'closed' || r.is_order_closed || r.closed_at || r.status === 'closed') return false;
     const isCancelledRecovery = (r.is_recovery_pending || r.settlement_status === 'pending') &&
       ((r.order_status || '').toLowerCase() === 'cancelled' || (r.status || '').toLowerCase() === 'cancelled' || r.has_cancelled_item || r.is_order_cancelled);
     if (isCancelledRecovery) return true;

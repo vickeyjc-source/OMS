@@ -1073,6 +1073,26 @@ async function initDb() {
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_payment_ref TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_payment_date TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_payment_method TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_paid_by TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_paid_at TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_payment_notes TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_payment_amount NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_orders ADD COLUMN net_total_paid NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query(`CREATE TABLE IF NOT EXISTS supplier_net_payment_logs (
+    id TEXT PRIMARY KEY, supplier_order_id TEXT, order_id TEXT,
+    amount NUMERIC, currency TEXT, payment_ref TEXT, payment_date TEXT,
+    payment_method TEXT, zoho_po_number TEXT, supplier_ref TEXT,
+    notes TEXT, paid_by TEXT, paid_at TEXT,
+    total_paid_snapshot NUMERIC DEFAULT 0, remaining_snapshot NUMERIC DEFAULT 0, grand_total NUMERIC,
+    additional_charges TEXT DEFAULT '[]', actual_amount NUMERIC DEFAULT NULL,
+    amount_change_note TEXT DEFAULT NULL, status TEXT DEFAULT 'released',
+    receipt_file_url TEXT DEFAULT ''
+  )`); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_advance_payment_logs ADD COLUMN status TEXT DEFAULT 'released'"); } catch(_) {}
+  try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN status TEXT DEFAULT 'released'"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN additional_charges TEXT DEFAULT '[]'"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN actual_amount NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE supplier_net_payment_logs ADD COLUMN amount_change_note TEXT DEFAULT NULL"); } catch(_) {}
