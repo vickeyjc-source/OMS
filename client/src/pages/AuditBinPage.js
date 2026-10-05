@@ -343,14 +343,51 @@ function AuditItemCard({ item, onSaved }) {
   });
 
   const [notes, setNotes] = useState(isAlreadyAudited ? (item.notes || '') : '');
+  const [boeNumber, setBoeNumber] = useState(item.boe_number || '');
+  const [boeFileUrl, setBoeFileUrl] = useState(item.boe_file_url || '');
+  const [boeFileName, setBoeFileName] = useState(item.boe_file_name || '');
+  const [uploadingBoe, setUploadingBoe] = useState(false);
+
   const [saving, setSaving] = useState(false);
   const [isAuditedLocal, setIsAuditedLocal] = useState(Number(item.is_audited) === 1);
   useEffect(() => {
     setIsAuditedLocal(Number(item.is_audited) === 1);
-  }, [item.is_audited]);
+    setBoeNumber(item.boe_number || '');
+    setBoeFileUrl(item.boe_file_url || '');
+    setBoeFileName(item.boe_file_name || '');
+  }, [item.is_audited, item.boe_number, item.boe_file_url, item.boe_file_name]);
+
+  const handleBoeUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingBoe(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('entity_type', 'audit_item');
+      fd.append('entity_id', item.id);
+      fd.append('field_name', 'boe_file');
+      const res = await api.post('/files', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120000,
+      });
+      const fileData = res.data;
+      const downloadUrl = fileData.download_url || `/api/files/${fileData.id}/download`;
+      setBoeFileUrl(downloadUrl);
+      setBoeFileName(fileData.original_name || file.name);
+      toast.success('BOE document uploaded successfully');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to upload BOE document');
+    } finally {
+      setUploadingBoe(false);
+      e.target.value = '';
+    }
+  };
 
   const hasEnteredActuals = Boolean(
     isAuditedLocal ||
+    boeNumber ||
+    boeFileUrl ||
     actRates.sourced_price ||
     actRates.src_price_foreign ||
     actRates.freight ||
@@ -458,6 +495,9 @@ function AuditItemCard({ item, onSaved }) {
         },
         act_total: actCalc.finalCost,
         notes: notes || '',
+        boe_number: boeNumber || '',
+        boe_file_url: boeFileUrl || '',
+        boe_file_name: boeFileName || '',
       };
       await api.put(`/audit-items/${item.id}`, payload);
       setIsAuditedLocal(true);
@@ -586,6 +626,99 @@ function AuditItemCard({ item, onSaved }) {
             style={{ fontSize: 11, padding: '3px 12px', fontWeight: 700 }}>
             {saving ? 'Saving…' : (isAuditedLocal ? '✓ Update Actuals' : '💾 Save Actuals')}
           </button>
+        </div>
+      </div>
+
+      {/* ── Highlighted BOE Number & Document Bar ── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'flex-start',
+        padding: '8px 16px',
+        background: 'linear-gradient(90deg, rgba(245,158,11,0.06) 0%, rgba(59,130,246,0.06) 100%)',
+        borderBottom: '1px solid var(--border)',
+        flexWrap: 'wrap', gap: 18
+      }}>
+        {/* BOE Number Entry */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: 11, fontWeight: 800, color: 'var(--text)',
+            display: 'inline-flex', alignItems: 'center', gap: 5, letterSpacing: '.03em', textTransform: 'uppercase'
+          }}>
+            📑 BOE NUMBER:
+          </span>
+          <input
+            className="input"
+            type="text"
+            placeholder="Enter BOE number (optional)..."
+            value={boeNumber}
+            onChange={e => setBoeNumber(e.target.value)}
+            style={{
+              height: 30, width: 320, minWidth: 260, fontSize: 11.5, padding: '4px 10px',
+              fontFamily: 'monospace', fontWeight: 600, background: 'var(--surface)',
+              borderColor: boeNumber ? 'var(--accent)' : 'var(--border)'
+            }}
+          />
+          {boeNumber && (
+            <span style={{ fontSize: 10.5, color: '#10b981', fontWeight: 700 }}>✓ Recorded</span>
+          )}
+        </div>
+
+        {/* Divider */}
+        <div style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 2px' }} />
+
+        {/* BOE Document (PDF) Upload / View — directly next to BOE Number */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text2)', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            📎 BOE Document (PDF):
+          </span>
+          {boeFileUrl ? (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              background: 'var(--surface)', padding: '3px 10px', borderRadius: 6,
+              border: '1px solid var(--border)', boxShadow: '0 1px 2px rgba(0,0,0,0.04)'
+            }}>
+              <a
+                href={boeFileUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  fontSize: 11.5, color: 'var(--accent)', textDecoration: 'none',
+                  fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5
+                }}
+                title="Click to view or download uploaded BOE document"
+              >
+                📄 {boeFileName || 'View BOE Document'} ↗
+              </a>
+              <button
+                type="button"
+                onClick={() => { setBoeFileUrl(''); setBoeFileName(''); }}
+                style={{
+                  background: 'none', border: 'none', color: '#ef4444',
+                  cursor: 'pointer', padding: '0 2px', fontSize: 13, fontWeight: 700, lineHeight: 1
+                }}
+                title="Remove attached file"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <label style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '4px 12px', borderRadius: 6, fontSize: 11, fontWeight: 700,
+              background: 'var(--surface)', border: '1px dashed var(--accent)',
+              color: 'var(--accent)', cursor: uploadingBoe ? 'wait' : 'pointer',
+              transition: 'all .15s ease'
+            }}>
+              {uploadingBoe ? '⏳ Uploading...' : '⬆ Upload BOE PDF'}
+              <input
+                type="file"
+                accept=".pdf,application/pdf,image/*"
+                style={{ display: 'none' }}
+                disabled={uploadingBoe}
+                onChange={handleBoeUpload}
+              />
+            </label>
+          )}
+          <span style={{ fontSize: 10, color: 'var(--text3)', fontStyle: 'italic' }}>(Optional)</span>
         </div>
       </div>
 

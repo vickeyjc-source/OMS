@@ -523,7 +523,7 @@ async function createSchema() {
       act_bcd NUMERIC, act_sws NUMERIC, act_cess NUMERIC, act_bank NUMERIC,
       act_clearing NUMERIC, act_margin NUMERIC, act_extra_charges NUMERIC,
       act_extra_charges_detail TEXT DEFAULT NULL, act_field_modes TEXT DEFAULT NULL, act_total NUMERIC,
-      notes TEXT DEFAULT '', updated_by TEXT, updated_at TEXT
+      notes TEXT DEFAULT '', boe_number TEXT DEFAULT '', boe_file_url TEXT DEFAULT '', boe_file_name TEXT DEFAULT '', updated_by TEXT, updated_at TEXT
     );
 
     -- Per-line-item Estimate detail — mirrors Sourcing exactly: same field, same
@@ -800,6 +800,9 @@ async function initDb() {
   // this never touches the real Finance payment records.
   try { await pool.query("ALTER TABLE order_cost_audits ADD COLUMN customer_paid_override NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE order_cost_audits ADD COLUMN supplier_paid_override NUMERIC DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN boe_number TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN boe_file_url TEXT DEFAULT ''"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN boe_file_name TEXT DEFAULT ''"); } catch(_) {}
   // Per-line-item Estimate detail mirroring Sourcing exactly (see schema comment
   // on order_cost_audit_item_lines above).
   try {

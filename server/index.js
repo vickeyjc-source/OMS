@@ -6247,15 +6247,21 @@ app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
     : item.act_field_modes;
 
   try { await runAsync("ALTER TABLE order_cost_audit_items ADD COLUMN is_audited INTEGER DEFAULT 0"); } catch(_) {}
+  try { await runAsync("ALTER TABLE order_cost_audit_items ADD COLUMN boe_number TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE order_cost_audit_items ADD COLUMN boe_file_url TEXT DEFAULT ''"); } catch(_) {}
+  try { await runAsync("ALTER TABLE order_cost_audit_items ADD COLUMN boe_file_name TEXT DEFAULT ''"); } catch(_) {}
 
   await runAsync(
     `UPDATE order_cost_audit_items SET
        act_material=?, act_freight=?, act_insurance=?, act_transport=?, act_packaging=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?, act_buffer=?,
        act_extra_charges=?, act_extra_charges_detail=?, act_field_modes=?,
-       act_total=?, notes=?, updated_by=?, updated_at=?, is_audited=1
+       act_total=?, notes=?, boe_number=?, boe_file_url=?, boe_file_name=?, updated_by=?, updated_at=?, is_audited=1
      WHERE id=?`,
     [...vals, actExtraChargesTotal, actExtraCharges.length ? JSON.stringify(actExtraCharges) : null, actFieldModes,
-     actTotal, d.notes ?? item.notes ?? '', req.session.user.name, nowStr(), req.params.id]
+     actTotal, d.notes ?? item.notes ?? '', d.boe_number !== undefined ? d.boe_number : (item.boe_number || ''),
+     d.boe_file_url !== undefined ? d.boe_file_url : (item.boe_file_url || ''),
+     d.boe_file_name !== undefined ? d.boe_file_name : (item.boe_file_name || ''),
+     req.session.user.name, nowStr(), req.params.id]
   );
 
   const allItems = await allAsync('SELECT is_audited FROM order_cost_audit_items WHERE audit_id=?', [item.audit_id]);
