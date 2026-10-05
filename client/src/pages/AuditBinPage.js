@@ -172,8 +172,13 @@ function runCalcLanded({
 // ── 2-Way Item Audit Card (Exact Sourcing UI on both sides) ───────────
 function AuditItemCard({ item, onSaved }) {
   const line = item.lines?.[0] || {};
-  const qty = Number(line.qty) || Number(item.quantity) || 1;
-  const compName = line.component || item.supplier_order_id || 'PO Item';
+  const totalQty = item.lines && item.lines.length > 1
+    ? item.lines.reduce((s, l) => s + (Number(l.qty) || 0), 0)
+    : (Number(line.qty) || Number(item.quantity) || 1);
+  const qty = totalQty || 1;
+  const compName = (item.lines && item.lines.length > 1)
+    ? item.lines.map(l => l.component).filter(Boolean).join(', ')
+    : (line.component || item.supplier_order_id || 'PO Item');
 
   // 1. Sourcing Modes & Rates (baseline from Sourcing)
   const srcModes = useMemo(() => {
@@ -515,9 +520,13 @@ function AuditItemCard({ item, onSaved }) {
               ⏳ Pending Audit
             </span>
           )}
-          {item.supplier_order_id && (
+          {item.supplier_order_id ? (
             <span className="mono" style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)', padding: '2px 8px', borderRadius: 4, color: 'var(--text2)' }}>
               PO: {item.supplier_order_id}
+            </span>
+          ) : (
+            <span style={{ fontSize: 11, background: 'rgba(255,255,255,0.05)', padding: '2px 8px', borderRadius: 4, color: 'var(--text3)' }}>
+              Direct / Sourced
             </span>
           )}
           <span style={{
@@ -1561,7 +1570,7 @@ export default function AuditBinPage() {
                 </div>
 
                 <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, color: isDone || hasPartial ? 'var(--purple, #a855f7)' : 'var(--text3)' }}>
-                  {isDone ? fmtM(act) : hasPartial ? `${fmtM(act)} (partial)` : <span style={{ fontStyle: 'italic', fontSize: 12 }}>Pending Actuals</span>}
+                  {isDone ? fmtM(act) : hasPartial ? `${fmtM(act)} (partial)` : '—'}
                 </div>
 
                 <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 700, color: isDone ? (profit >= 0 ? '#10b981' : '#ef4444') : 'var(--text3)' }}>
@@ -1570,7 +1579,9 @@ export default function AuditBinPage() {
 
                 <div>
                   {isPending ? (
-                    <span style={{ fontSize: 11, color: 'var(--text3)' }}>Est Budget: {fmtM(est)}</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text3)', background: 'var(--surface2)', padding: '2px 8px', borderRadius: 12, border: '1px solid var(--border)' }}>
+                      ⏳ Pending
+                    </span>
                   ) : hasPartial ? (
                     <span style={{ fontSize: 11, fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.12)', padding: '2px 8px', borderRadius: 12 }}>
                       ⏳ Partial ({a.audited_count}/{a.total_items_count})

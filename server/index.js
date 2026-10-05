@@ -388,140 +388,346 @@ function parseJsonSafe(raw, fallback) {
   try { const p = typeof raw === 'string' ? JSON.parse(raw) : raw; return Array.isArray(p) ? p : fallback; }
   catch(_) { return fallback; }
 }
+async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourcing) {
+  if (!li) return null;
+  // 1. If split_from_item_id
+  if (li.split_from_item_id) {
+    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id);
+    if (s) return s;
+    try {
+      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1', [li.split_from_item_id]);
+      if (dbS) return dbS;
+    } catch (_) {}
+  }
+
+  // 2. Direct match on enquiry_item_id if li.id is an enquiry_item_id
+  const direct = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id);
+  if (direct) return direct;
+
+  const compClean = (li.component || '').trim().toLowerCase();
+  const mfrClean = (li.manufacturer || '').trim().toLowerCase();
+
+  // 3. Match via enquiryItems component & manufacturer
+  let matchedEnqItem = (enquiryItems || []).find(ei =>
+    (ei.component || '').trim().toLowerCase() === compClean &&
+    (ei.manufacturer || '').trim().toLowerCase() === mfrClean
+  );
+  if (!matchedEnqItem) {
+    matchedEnqItem = (enquiryItems || []).find(ei => (ei.component || '').trim().toLowerCase() === compClean);
+  }
+
+  if (matchedEnqItem) {
+    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id);
+    if (s) return s;
+    try {
+      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1', [matchedEnqItem.id]);
+      if (dbS) return dbS;
+    } catch (_) {}
+  }
+
+  // 4. DB search joining enquiry_items
+  if (enqId && compClean) {
+    try {
+      const dbJoin = await getAsync(
+        `SELECT es.* FROM enquiry_sourcing es
+         JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
+         WHERE (es.enquiry_id=? OR ei.enquiry_id=?)
+           AND LOWER(TRIM(ei.component)) = ?
+         ORDER BY (CASE WHEN LOWER(TRIM(COALESCE(ei.manufacturer,'')))=? THEN 1 ELSE 2 END), es.updated_at DESC
+         LIMIT 1`,
+        [enqId, enqId, compClean, mfrClean]
+      );
+      if (dbJoin) return dbJoin;
+    } catch (_) {}
+  }
+
+  // 5. Check quote_items if quoteId
+  if (quoteId && compClean) {
+    try {
+      const dbQuote = await getAsync(
+        `SELECT es.* FROM enquiry_sourcing es
+         JOIN quote_items qi ON qi.enquiry_item_id = es.enquiry_item_id
+         WHERE qi.quote_id=? AND LOWER(TRIM(qi.component))=?
+         ORDER BY es.updated_at DESC LIMIT 1`,
+        [quoteId, compClean]
+      );
+      if (dbQuote) return dbQuote;
+    } catch (_) {}
+  }
+
+  // 6. Sourcing row where supplier matches and enquiry matches
+  if (enqId && li.supplier_id) {
+    try {
+      const dbSup = await getAsync(
+        `SELECT * FROM enquiry_sourcing WHERE enquiry_id=? AND supplier_id=? ORDER BY updated_at DESC LIMIT 1`,
+        [enqId, li.supplier_id]
+      );
+      if (dbSup) return dbSup;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
 async function createCostAudit(orderId) {
   try {
-    const existing = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [orderId]);
-    if (existing) return;
-
     const order = await getAsync('SELECT * FROM orders WHERE id=?', [orderId]);
     if (!order) return;
-    const supplierOrders = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [orderId]);
-    if (!supplierOrders.length) return;
 
-    const soIds = supplierOrders.map(s => s.id);
-    const soItemRows = await allAsync(
-      'SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')',
-      soIds
+    let audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [orderId]);
+    let auditId;
+    if (!audit) {
+      auditId = uuid();
+      await runAsync('INSERT INTO order_cost_audits (id, order_id, status, created_at) VALUES (?,?,?,?)',
+        [auditId, orderId, 'pending', nowStr()]);
+    } else {
+      auditId = audit.id;
+    }
+
+    const orderItems = await allAsync(
+      "SELECT * FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)",
+      [orderId]
     );
-    const orderItems = await allAsync('SELECT * FROM order_items WHERE order_id=?', [orderId]);
-    const itemsById = {}; orderItems.forEach(li => { itemsById[li.id] = li; });
+    if (!orderItems.length) return;
+    const itemsById = {};
+    orderItems.forEach(li => { itemsById[li.id] = li; });
 
-    const enquiryItems = order.enquiry_id
-      ? await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [order.enquiry_id])
+    let enqId = order.enquiry_id;
+    if (!enqId && order.quote_id) {
+      const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=?', [order.quote_id]);
+      if (q?.enquiry_id) enqId = q.enquiry_id;
+    }
+    if (!enqId && order.enquiry_no) {
+      const e = await getAsync('SELECT id FROM enquiries WHERE enquiry_no=?', [order.enquiry_no]);
+      if (e?.id) enqId = e.id;
+    }
+
+    const enquiryItems = enqId
+      ? await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [enqId])
       : [];
-    // Resolve each order_item to the enquiry_sourcing row that actually priced it —
-    // split-created items were written keyed to their own id (see the split route);
-    // every other item has to be re-found via its original enquiry_item.
-    const resolvedSourcingId = {};
-    orderItems.forEach(li => {
-      if (li.split_from_item_id) { resolvedSourcingId[li.id] = li.id; return; }
-      const enqItem = enquiryItems.find(ei => ei.component === li.component && (ei.manufacturer||'') === (li.manufacturer||''));
-      resolvedSourcingId[li.id] = enqItem ? enqItem.id : null;
+    const allEnqSourcing = enqId
+      ? await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=? ORDER BY updated_at DESC', [enqId])
+      : [];
+
+    const existingAuditItems = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [auditId]);
+    const existingAiIds = existingAuditItems.map(i => i.id);
+    const existingLines = existingAiIds.length
+      ? await allAsync('SELECT * FROM order_cost_audit_item_lines WHERE audit_item_id IN (' + existingAiIds.map(()=>'?').join(',') + ')', existingAiIds)
+      : [];
+
+    const supplierOrders = await allAsync('SELECT * FROM supplier_orders WHERE order_id=?', [orderId]);
+    const soIds = supplierOrders.map(s => s.id);
+    const soItemRows = soIds.length
+      ? await allAsync('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
+      : [];
+
+    // 1. Backfill lines for any existing audit items that currently have no lines
+    for (const ai of existingAuditItems) {
+      const lines = existingLines.filter(l => l.audit_item_id === ai.id);
+      if (lines.length === 0) {
+        let matchedItems = [];
+        if (ai.supplier_order_id) {
+          const itemIds = soItemRows.filter(r => r.supplier_order_id === ai.supplier_order_id).map(r => r.item_id);
+          matchedItems = itemIds.map(id => itemsById[id]).filter(Boolean);
+        }
+        if (matchedItems.length === 0 && ai.supplier_id) {
+          matchedItems = orderItems.filter(li => li.supplier_id === ai.supplier_id);
+        }
+        if (matchedItems.length === 0) {
+          const coveredComps = new Set(existingLines.map(l => (l.component || '').trim().toLowerCase()));
+          matchedItems = orderItems.filter(li => !coveredComps.has((li.component || '').trim().toLowerCase()));
+        }
+        for (const li of matchedItems) {
+          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
+          const isIntl = src
+            ? ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0)
+            : (li.currency && li.currency !== 'INR');
+          const lineScope = isIntl ? 'international' : 'domestic';
+          const modesObj = parseJsonSafe(src?.field_modes, {});
+          const unitPrice = parseFloat(src?.sourced_price) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0;
+          const cifValue = (Number(ai.est_material)||0) + (Number(ai.est_freight)||0) + (Number(ai.est_insurance)||0);
+          const cessLine = Number(src?.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src?.bank_fixed_usd)||0)/100) : 0)||0;
+
+          await runAsync(
+            `INSERT INTO order_cost_audit_item_lines
+               (id, audit_item_id, component, manufacturer, qty, supplier_id, scope, unit_price, sourced_currency, field_modes,
+                freight_raw, insurance_raw, bcd_raw, sws_raw, cess_raw, bank_raw, clearing_raw, margin_raw,
+                freight_inr, insurance_inr, bcd_inr, sws_inr, cess_inr, bank_inr, clearing_inr, margin_inr)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            [uuid(), ai.id, li.component||'', li.manufacturer||'', Number(li.qty)||1, ai.supplier_id||src?.supplier_id||'', lineScope, unitPrice, src?.sourced_currency||'INR',
+             Object.keys(modesObj).length ? JSON.stringify(modesObj) : null,
+             src?.freight_pct, src?.insurance_pct, src?.duty_pct, src?.cess_pct, src?.bank_fixed_foreign, src?.bank_fixed_inr, src?.clearance_fixed_inr, src?.margin_pct,
+             Number(src?.freight_inr)||0, Number(src?.insurance_inr)||0, Number(src?.duty_inr)||0, Number(src?.cess_inr)||0,
+             cessLine, Number(src?.bank_inr)||0, Number(src?.clearance_inr)||0, Number(src?.margin_inr)||0]
+          );
+          existingLines.push({ audit_item_id: ai.id, component: li.component, manufacturer: li.manufacturer });
+        }
+      }
+    }
+
+    // 2. Identify which order items are already covered in the audit
+    const coveredItemIds = new Set();
+    const coveredComponents = new Set();
+    existingLines.forEach(l => {
+      if (l.component) coveredComponents.add(l.component.trim().toLowerCase());
     });
-    const searchIds = [...new Set(Object.values(resolvedSourcingId).filter(Boolean))];
-    const sourcingRows = searchIds.length
-      ? await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id IN (' + searchIds.map(()=>'?').join(',') + ') ORDER BY updated_at DESC', searchIds)
-      : [];
-    const srcByResolvedId = {};
-    sourcingRows.forEach(s => { if (!srcByResolvedId[s.enquiry_item_id]) srcByResolvedId[s.enquiry_item_id] = s; });
 
-    const auditId = uuid();
-    await runAsync('INSERT INTO order_cost_audits (id, order_id, status, created_at) VALUES (?,?,?,?)',
-      [auditId, orderId, 'pending', nowStr()]);
+    for (const ai of existingAuditItems) {
+      if (ai.supplier_order_id) {
+        soItemRows.filter(r => r.supplier_order_id === ai.supplier_order_id).forEach(r => coveredItemIds.add(r.item_id));
+      }
+    }
+    orderItems.forEach(li => {
+      if (coveredComponents.has((li.component || '').trim().toLowerCase())) {
+        coveredItemIds.add(li.id);
+      }
+    });
 
-    for (const so of supplierOrders) {
-      const itemIds = soItemRows.filter(r => r.supplier_order_id === so.id).map(r => r.item_id);
-      const items = itemIds.map(id => itemsById[id]).filter(Boolean).filter(li => li.line_status !== 'cancelled');
+    // 3. Find all order items that are NOT yet covered
+    const uncoveredItems = orderItems.filter(li => !coveredItemIds.has(li.id));
+    if (uncoveredItems.length === 0) return;
+
+    // 4. Group uncovered items by supplier / PO
+    const groups = []; // { supplier_order_id, supplier_id, items: [] }
+    const unlinkedItems = [];
+
+    for (const li of uncoveredItems) {
+      const soRow = soItemRows.find(r => r.item_id === li.id);
+      if (soRow) {
+        let g = groups.find(x => x.supplier_order_id === soRow.supplier_order_id);
+        if (!g) {
+          g = { supplier_order_id: soRow.supplier_order_id, supplier_id: soRow.supplier_id || '', items: [] };
+          groups.push(g);
+        }
+        g.items.push(li);
+      } else {
+        unlinkedItems.push(li);
+      }
+    }
+
+    // For unlinked items, group by supplier from sourcing or order_items
+    for (const li of unlinkedItems) {
+      const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
+      const sid = src?.supplier_id || li.supplier_id || 'unassigned';
+      let g = groups.find(x => !x.supplier_order_id && x.supplier_id === sid);
+      if (!g) {
+        g = { supplier_order_id: null, supplier_id: sid, items: [] };
+        groups.push(g);
+      }
+      g.items.push(li);
+    }
+
+    // 5. Create audit items and lines for each group
+    for (const grp of groups) {
+      const items = grp.items;
+      if (!items.length) continue;
+
+      const so = grp.supplier_order_id ? supplierOrders.find(s => s.id === grp.supplier_order_id) : null;
       const customerTotal = items.reduce((s, li) => {
         const base = (Number(li.qty)||0) * (Number(li.unit_price)||0);
         return s + base + base * ((Number(li.tax_rate)||0)/100);
       }, 0);
 
-      // Material cost is the PO's own confirmed price — the final procurement
-      // decision Procurement actually locked in — NOT re-derived from
-      // enquiry_sourcing, which can have moved on since (re-priced, re-sourced,
-      // etc.) after the PO was raised. The structured freight/duty/etc.
-      // breakdown still comes from enquiry_sourcing, since the PO itself has
-      // no per-charge columns — only its confirmed_price/buying_price_per_unit.
-      const bpu = parseFloat(so.buying_price_per_unit);
-      const qtySum = items.reduce((s,li)=>s+(Number(li.qty)||0),0);
-      const poMaterialTotal = bpu > 0 ? bpu * qtySum : (parseFloat(so.confirmed_price) || 0);
-      // Per-item material share (proportional to qty) — only used to seed each
-      // line's own snapshot below; the aggregated est_material stays the PO's
-      // real confirmed total either way.
-      const materialPerUnit = qtySum > 0 ? poMaterialTotal / qtySum : 0;
+      // Material cost
+      let groupMaterialTotal = 0;
+      if (so) {
+        const bpu = parseFloat(so.buying_price_per_unit);
+        const qtySum = items.reduce((s,li)=>s+(Number(li.qty)||0),0);
+        groupMaterialTotal = bpu > 0 ? bpu * qtySum : (parseFloat(so.confirmed_price) || 0);
+      } else {
+        for (const li of items) {
+          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
+          const unitMat = parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0;
+          groupMaterialTotal += unitMat * (Number(li.qty)||0);
+        }
+      }
 
-      const totals = { material: poMaterialTotal, freight:0, insurance:0, bcd:0, sws:0, cess:0, bank:0, clearing:0, margin:0 };
-      // Sourcing's own free-form named charges (e.g. "Customs Inspection Fee") —
-      // kept strictly separate from Finance's actual-paid charges below; one is
-      // an estimate-time guess, the other is real money that has moved.
+      const qtySum = items.reduce((s,li)=>s+(Number(li.qty)||0),0);
+      const materialPerUnit = qtySum > 0 ? groupMaterialTotal / qtySum : 0;
+
+      const totals = { material: groupMaterialTotal, freight:0, insurance:0, bcd:0, sws:0, cess:0, bank:0, clearing:0, margin:0 };
       const estExtraChargesDetail = [];
       const lineSnapshots = [];
       let scope = 'domestic';
+
       for (const li of items) {
-        const rid = resolvedSourcingId[li.id];
-        const src = rid ? srcByResolvedId[rid] : null;
-        if (!src) continue;
-        const isIntl = (src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0;
+        const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
+        const isIntl = src
+          ? ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0)
+          : (li.currency && li.currency !== 'INR');
         const lineScope = isIntl ? 'international' : 'domestic';
         if (isIntl) scope = 'international';
-        totals.freight   += Number(src.freight_inr) || 0;
-        totals.insurance += Number(src.insurance_inr) || 0;
-        totals.bcd       += Number(src.duty_inr) || 0;
-        totals.sws       += Number(src.cess_inr) || 0;
-        totals.bank      += Number(src.bank_inr) || 0;
-        totals.clearing  += Number(src.clearance_inr) || 0;
-        totals.margin    += Number(src.margin_inr) || 0;
-        const srcExtra = parseJsonSafe(src.extra_charges, []);
-        if (Array.isArray(srcExtra)) estExtraChargesDetail.push(...srcExtra);
 
-        // Snapshot this line exactly as Sourcing had it — same raw %/₹ value,
-        // same mode, same per-item computed ₹ amounts — so Audit Bin can render
-        // this component's row identically to how Sourcing showed it.
+        if (src) {
+          totals.freight   += Number(src.freight_inr) || 0;
+          totals.insurance += Number(src.insurance_inr) || 0;
+          totals.bcd       += Number(src.duty_inr) || 0;
+          totals.sws       += Number(src.cess_inr) || 0;
+          totals.bank      += Number(src.bank_inr) || 0;
+          totals.clearing  += Number(src.clearance_inr) || 0;
+          totals.margin    += Number(src.margin_inr) || 0;
+          const srcExtra = parseJsonSafe(src.extra_charges, []);
+          if (Array.isArray(srcExtra)) estExtraChargesDetail.push(...srcExtra);
+        }
+
+        const unitMat = materialPerUnit > 0
+          ? materialPerUnit
+          : (parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0);
+
         lineSnapshots.push({
           li, src, scope: lineScope,
           qty: Number(li.qty)||0,
-          unit_price: materialPerUnit,
+          unit_price: unitMat,
         });
       }
+
       const estExtraChargesTotal = estExtraChargesDetail.reduce((s,c) => s + (Number(c?.amount)||0), 0);
-      // CESS reuses bank_fixed_usd on enquiry_sourcing (same convention as the split feature) — no separate *_inr column exists for it, so back it out of the raw pct/amt the same way the split route computes it, using cif value = material+freight+insurance.
       const cifValue = totals.material + totals.freight + totals.insurance;
       let cessTotal = 0;
       for (const li of items) {
-        const rid = resolvedSourcingId[li.id];
-        const src = rid ? srcByResolvedId[rid] : null;
+        const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
         if (!src) continue;
-        const modesObj = (() => { try { return typeof src.field_modes === 'string' ? JSON.parse(src.field_modes||'{}') : (src.field_modes||{}); } catch(_) { return {}; } })();
+        const modesObj = parseJsonSafe(src.field_modes, {});
         const cessRaw = Number(src.bank_fixed_usd) || 0;
         cessTotal += modesObj.cess === 'pct' ? (cifValue * cessRaw / 100) : cessRaw;
       }
       totals.cess = cessTotal;
 
-      // Finance's own ad-hoc charges already committed to this PO before
-      // delivery (entered during payment processing) — real money, kept as its
-      // OWN section, never merged into Sourcing's estimate-time charges.
-      let fq = null;
-      try { fq = await getAsync('SELECT additional_charges FROM finance_queue WHERE supplier_order_id=?', [so.id]); } catch(_) {}
-      const netCharges = parseJsonSafe(so.net_additional_charges, []);
-      const advCharges = parseJsonSafe(fq?.additional_charges, []);
-      const financeCharges = (advCharges.length ? advCharges : netCharges)
-        .map(c => ({ name: c?.name || c?.label || 'PO charge', amount: parseFloat(c?.amount)||0 }));
-      const financeChargesTotal = financeCharges.reduce((s,c) => s + c.amount, 0);
+      let financeChargesTotal = 0;
+      let financeCharges = [];
+      if (so) {
+        let fq = null;
+        try { fq = await getAsync('SELECT additional_charges FROM finance_queue WHERE supplier_order_id=?', [so.id]); } catch(_) {}
+        const netCharges = parseJsonSafe(so.net_additional_charges, []);
+        const advCharges = parseJsonSafe(fq?.additional_charges, []);
+        financeCharges = (advCharges.length ? advCharges : netCharges)
+          .map(c => ({ name: c?.name || c?.label || 'PO charge', amount: parseFloat(c?.amount)||0 }));
+        financeChargesTotal = financeCharges.reduce((s,c) => s + c.amount, 0);
+      }
 
       const estTotal = totals.material + totals.freight + totals.insurance + totals.bcd + totals.sws
         + totals.cess + totals.bank + totals.clearing + totals.margin + estExtraChargesTotal + financeChargesTotal;
 
-      const supplier = so.supplier_id ? await getAsync('SELECT name FROM suppliers WHERE id=?', [so.supplier_id]) : null;
+      const effectiveSupplierId = grp.supplier_id && grp.supplier_id !== 'unassigned' ? grp.supplier_id : (so?.supplier_id || '');
+      let supplierName = '';
+      if (effectiveSupplierId) {
+        try {
+          const supRec = await getAsync('SELECT name FROM suppliers WHERE id=?', [effectiveSupplierId]);
+          if (supRec?.name) supplierName = supRec.name;
+        } catch (_) {}
+      }
+      if (!supplierName) {
+        supplierName = effectiveSupplierId || 'Direct / Sourced';
+      }
 
       const auditItemId = uuid();
       await runAsync(
         `INSERT INTO order_cost_audit_items
            (id, audit_id, order_id, supplier_order_id, supplier_id, supplier_name, scope, customer_total,
             est_material, est_freight, est_insurance, est_bcd, est_sws, est_cess, est_bank, est_clearing, est_margin,
-            est_extra_charges, est_extra_charges_detail, est_finance_charges, est_finance_charges_detail, est_total)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [auditItemId, auditId, orderId, so.id, so.supplier_id||'', supplier?.name||'', scope, customerTotal,
+            est_extra_charges, est_extra_charges_detail, est_finance_charges, est_finance_charges_detail, est_total, is_audited)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`,
+        [auditItemId, auditId, orderId, so ? so.id : '', effectiveSupplierId, supplierName, scope, customerTotal,
          totals.material, totals.freight, totals.insurance, totals.bcd, totals.sws, totals.cess, totals.bank, totals.clearing, totals.margin,
          estExtraChargesTotal, estExtraChargesDetail.length ? JSON.stringify(estExtraChargesDetail) : null,
          financeChargesTotal, financeCharges.length ? JSON.stringify(financeCharges) : null, estTotal]
@@ -529,19 +735,19 @@ async function createCostAudit(orderId) {
 
       for (const snap of lineSnapshots) {
         const { li, src, scope: lineScope, qty, unit_price } = snap;
-        const modesObj = (() => { try { return typeof src.field_modes === 'string' ? JSON.parse(src.field_modes||'{}') : (src.field_modes||{}); } catch(_) { return {}; } })();
+        const modesObj = parseJsonSafe(src?.field_modes, {});
+        const cessLine = Number(src?.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src?.bank_fixed_usd)||0)/100) : 0)||0;
         await runAsync(
           `INSERT INTO order_cost_audit_item_lines
              (id, audit_item_id, component, manufacturer, qty, supplier_id, scope, unit_price, sourced_currency, field_modes,
               freight_raw, insurance_raw, bcd_raw, sws_raw, cess_raw, bank_raw, clearing_raw, margin_raw,
               freight_inr, insurance_inr, bcd_inr, sws_inr, cess_inr, bank_inr, clearing_inr, margin_inr)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [uuid(), auditItemId, li.component||'', li.manufacturer||'', qty, src.supplier_id||'', lineScope, unit_price, src.sourced_currency||'INR',
+          [uuid(), auditItemId, li.component||'', li.manufacturer||'', qty, effectiveSupplierId||src?.supplier_id||'', lineScope, unit_price, src?.sourced_currency||'INR',
            Object.keys(modesObj).length ? JSON.stringify(modesObj) : null,
-           src.freight_pct, src.insurance_pct, src.duty_pct, src.cess_pct, src.bank_fixed_foreign, src.bank_fixed_inr, src.clearance_fixed_inr, src.margin_pct,
-           Number(src.freight_inr)||0, Number(src.insurance_inr)||0, Number(src.duty_inr)||0, Number(src.cess_inr)||0,
-           Number(src.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src.bank_fixed_usd)||0)/100) : 0)||0,
-           Number(src.bank_inr)||0, Number(src.clearance_inr)||0, Number(src.margin_inr)||0]
+           src?.freight_pct, src?.insurance_pct, src?.duty_pct, src?.cess_pct, src?.bank_fixed_foreign, src?.bank_fixed_inr, src?.clearance_fixed_inr, src?.margin_pct,
+           Number(src?.freight_inr)||0, Number(src?.insurance_inr)||0, Number(src?.duty_inr)||0, Number(src?.cess_inr)||0,
+           cessLine, Number(src?.bank_inr)||0, Number(src?.clearance_inr)||0, Number(src?.margin_inr)||0]
         );
       }
     }
@@ -5740,6 +5946,34 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     await runAsync("UPDATE order_cost_audit_items SET act_material = NULL, act_total = 0 WHERE is_audited = 0 OR is_audited IS NULL");
   } catch(_) {}
 
+  // 1. Backfill any closed orders that never got an audit record
+  try {
+    const missingAudits = await allAsync(
+      `SELECT o.id FROM orders o
+       LEFT JOIN order_cost_audits a ON a.order_id = o.id
+       WHERE o.status = 'closed' AND a.id IS NULL`
+    );
+    for (const row of (missingAudits || [])) {
+      try { await createCostAudit(row.id); } catch(_) {}
+    }
+  } catch(_) {}
+
+  // 2. Repair any audits that have missing items compared to active order items
+  try {
+    const incompleteAudits = await allAsync(
+      `SELECT a.order_id FROM order_cost_audits a
+       JOIN orders o ON o.id = a.order_id
+       WHERE (
+         SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND (oi.line_status != 'cancelled' OR oi.line_status IS NULL)
+       ) > (
+         SELECT COUNT(DISTINCT l.component) FROM order_cost_audit_item_lines l JOIN order_cost_audit_items ai ON ai.id = l.audit_item_id WHERE ai.audit_id = a.id
+       )`
+    );
+    for (const row of (incompleteAudits || [])) {
+      try { await createCostAudit(row.order_id); } catch(_) {}
+    }
+  } catch(_) {}
+
   const u = req.session.user;
   const perms = getPerms(u);
   const allowedSections = await getAllowedSections(u);
@@ -5804,31 +6038,29 @@ app.put('/api/audit-bin/:id/paid', auth, asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// One-time/ad-hoc backfill: any order already sitting in Closed Bin from before
-// createCostAudit() existed (or that slipped through for any other reason) never
-// got an order_cost_audits row, so it never appears in Audit Bin. This walks every
-// closed order missing an audit row and creates it now — safe to re-run any time,
-// createCostAudit() itself is a no-op for orders that already have one.
+// One-time/ad-hoc backfill: ensure all closed orders have full audit records with all items
 app.post('/api/audit-bin/backfill', auth, asyncRoute(async (req, res) => {
   if (!['admin','manager'].includes(req.session.user.role)) return res.status(403).json({ error: 'Only managers or admins can backfill Audit Bin' });
-  const missing = await allAsync(
-    `SELECT o.id FROM orders o
-     LEFT JOIN order_cost_audits a ON a.order_id = o.id
-     WHERE o.status='closed' AND a.id IS NULL`
-  );
-  let created = 0;
-  for (const row of missing) {
-    const before = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [row.id]);
-    if (before) continue;
-    await createCostAudit(row.id);
-    const after = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [row.id]);
-    if (after) created++;
+  const closedOrders = await allAsync("SELECT id FROM orders WHERE status='closed'");
+  let processed = 0;
+  for (const row of (closedOrders || [])) {
+    try {
+      await createCostAudit(row.id);
+      processed++;
+    } catch (_) {}
   }
   saveNow();
-  res.json({ ok: true, scanned: missing.length, created });
+  res.json({ ok: true, scanned: (closedOrders || []).length, processed });
 }));
 
 app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
+  // Ensure audit row and all line items exist
+  try {
+    await createCostAudit(req.params.id);
+  } catch(e) {
+    console.warn('[GET /api/orders/:id/audit] createCostAudit:', e?.message || e);
+  }
+
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
   const auditItems = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
@@ -5887,18 +6119,49 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
       };
     }
     try {
-      const enqSrc = await getAsync(
-        `SELECT es.field_modes, es.margin_pct, es.freight_pct, es.insurance_pct, es.duty_pct, es.cess_pct,
-                es.bank_fixed_foreign, es.bank_fixed_inr, es.clearance_fixed_inr, es.margin_inr,
-                es.exchange_rate, es.src_price_foreign, es.sourced_currency, es.sourced_price,
-                es.quote_price, es.quote_currency, es.tax_rate, es.extra_charges
-         FROM enquiry_sourcing es
-         JOIN order_items oi ON (oi.id = es.enquiry_item_id OR oi.split_from_item_id = es.enquiry_item_id)
-         JOIN supplier_order_items soi ON soi.item_id = oi.id
-         WHERE soi.supplier_order_id = ?
-         LIMIT 1`,
-        [it.supplier_order_id]
-      );
+      let enqSrc = null;
+      if (it.supplier_order_id) {
+        enqSrc = await getAsync(
+          `SELECT es.field_modes, es.margin_pct, es.freight_pct, es.insurance_pct, es.duty_pct, es.cess_pct,
+                  es.bank_fixed_foreign, es.bank_fixed_inr, es.clearance_fixed_inr, es.margin_inr,
+                  es.exchange_rate, es.src_price_foreign, es.sourced_currency, es.sourced_price,
+                  es.quote_price, es.quote_currency, es.tax_rate, es.extra_charges
+           FROM enquiry_sourcing es
+           JOIN order_items oi ON (oi.id = es.enquiry_item_id OR oi.split_from_item_id = es.enquiry_item_id)
+           JOIN supplier_order_items soi ON soi.item_id = oi.id
+           WHERE soi.supplier_order_id = ?
+           LIMIT 1`,
+          [it.supplier_order_id]
+        );
+      }
+      if (!enqSrc && lines && lines.length > 0) {
+        const ord = await getAsync('SELECT enquiry_id, quote_id, enquiry_no FROM orders WHERE id=?', [req.params.id]);
+        let eId = ord?.enquiry_id;
+        if (!eId && ord?.quote_id) {
+          const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=?', [ord.quote_id]);
+          if (q?.enquiry_id) eId = q.enquiry_id;
+        }
+        if (!eId && ord?.enquiry_no) {
+          const e = await getAsync('SELECT id FROM enquiries WHERE enquiry_no=?', [ord.enquiry_no]);
+          if (e?.id) eId = e.id;
+        }
+        if (eId) {
+          enqSrc = await getAsync(
+            `SELECT es.field_modes, es.margin_pct, es.freight_pct, es.insurance_pct, es.duty_pct, es.cess_pct,
+                    es.bank_fixed_foreign, es.bank_fixed_inr, es.clearance_fixed_inr, es.margin_inr,
+                    es.exchange_rate, es.src_price_foreign, es.sourced_currency, es.sourced_price,
+                    es.quote_price, es.quote_currency, es.tax_rate, es.extra_charges
+             FROM enquiry_sourcing es
+             JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
+             WHERE (es.enquiry_id=? OR ei.enquiry_id=?)
+               AND LOWER(TRIM(ei.component)) = LOWER(TRIM(?))
+             ORDER BY (CASE WHEN LOWER(TRIM(COALESCE(ei.manufacturer,'')))=LOWER(TRIM(?)) THEN 1 ELSE 2 END), es.updated_at DESC
+             LIMIT 1`,
+            [eId, eId, lines[0].component || '', lines[0].manufacturer || '']
+          );
+        }
+      }
+
       if (enqSrc) {
         const esModes = parseJsonSafe(enqSrc.field_modes, {});
         sm = { ...(sm || {}), ...esModes };
