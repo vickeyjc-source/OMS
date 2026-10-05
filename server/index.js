@@ -5735,6 +5735,11 @@ function applyPaidOverrides(audit, computed) {
 }
 
 app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
+  // Reset any unaudited items that were previously auto-populated so actuals stay empty until audited
+  try {
+    await runAsync("UPDATE order_cost_audit_items SET act_material = NULL, act_total = 0 WHERE is_audited = 0 OR is_audited IS NULL");
+  } catch(_) {}
+
   const u = req.session.user;
   const perms = getPerms(u);
   const allowedSections = await getAllowedSections(u);
@@ -5760,12 +5765,12 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     const paidInfo = paidByOrder[a.order_id] || { customer_paid_computed: 0, supplier_paid_computed: 0 };
     const appliedPaid = applyPaidOverrides(a, paidInfo);
 
+    const auditedItems = aItems.filter(i => Number(i.is_audited) === 1);
+    const auditedCount = auditedItems.length;
+    const isAllAudited = aItems.length > 0 ? (auditedCount === aItems.length) : (a.status === 'completed');
+
     let estTotal = aItems.reduce((s, i) => s + (Number(i.est_total) || 0), 0);
-    let actTotal = aItems.reduce((s, i) => s + (Number(i.act_total) || 0), 0);
-    // If actual total is 0 in audit items but supplier was paid in Finance:
-    if (actTotal <= 0 && appliedPaid.supplier_paid_total > 0) {
-      actTotal = appliedPaid.supplier_paid_total;
-    }
+    let actTotal = auditedItems.reduce((s, i) => s + (Number(i.act_total) || 0), 0);
 
     return {
       ...a,
@@ -5943,22 +5948,6 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
       ? it.supplier_subtotal
       : (it.finance_paid > 0 ? it.finance_paid : (parseFloat(it.est_material) || 0));
     it.suggested_material = baseMat;
-
-    if ((it.act_material === null || it.act_material === undefined || it.act_material === '') && baseMat > 0) {
-      it.act_material = baseMat;
-      const marginAmt = isMarginPct ? Math.round((baseMat * marginRate / 100) * 100) / 100 : marginRate;
-      const autoTotal = Math.round((baseMat + marginAmt) * 100) / 100;
-      it.act_margin = it.act_margin || marginAmt;
-      it.act_total = it.act_total || autoTotal;
-      try {
-        await runAsync(
-          "UPDATE order_cost_audit_items SET act_material=?, act_margin=COALESCE(act_margin, ?), act_total=COALESCE(act_total, ?) WHERE id=? AND (act_material IS NULL OR act_material = 0)",
-          [baseMat, marginAmt, autoTotal, it.id]
-        );
-      } catch(e) {
-        console.error('[AUDIT] Failed auto-populating act_material:', e.message);
-      }
-    }
   }
   audit.items = auditItems;
   const ord = await getAsync(
@@ -7243,16 +7232,6 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), fq.order_id, 'Supplier advance released to Procurement', req.session.user.name, '', now]); } catch(_) {}
 
-  try {
-    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [fq.supplier_order_id]);
-    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) === 0)) {
-      const mat = parseFloat(so.supplier_subtotal) > 0 ? parseFloat(so.supplier_subtotal) : parseFloat(so.confirmed_price);
-      if (mat > 0) {
-        await runAsync("UPDATE order_cost_audit_items SET act_material=?, act_total=COALESCE(act_total, ?) WHERE id=?", [mat, mat, auditItem.id]);
-      }
-    }
-  } catch(_) {}
-
   saveNow();
   res.json({ ok: true, status: nextQueueStatus, balance_due: fullBalance });
 }));
@@ -7383,16 +7362,6 @@ app.post('/api/finance/supplier-net-release/:so_id', auth, asyncRoute(async (req
      fullBalance <= 0 ? 'Supplier net payment released and fully settled' : `Supplier net payment released — ${fullBalance.toFixed(2)} remaining`,
      req.session.user.name, '', now]); } catch(_) {}
 
-  try {
-    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [so.id]);
-    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) === 0)) {
-      const mat = parseFloat(so.supplier_subtotal) > 0 ? parseFloat(so.supplier_subtotal) : parseFloat(so.confirmed_price);
-      if (mat > 0) {
-        await runAsync("UPDATE order_cost_audit_items SET act_material=?, act_total=COALESCE(act_total, ?) WHERE id=?", [mat, mat, auditItem.id]);
-      }
-    }
-  } catch(_) {}
-
   saveNow();
   res.json({ ok: true, status: nextStatus, balance_due: fullBalance });
 }));
@@ -7474,14 +7443,6 @@ app.post('/api/finance/supplier-recover/:so_id', auth, asyncRoute(async (req, re
     await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
       [uuid(), so.order_id, 'Supplier Overpayment Recovered', u.name, `Recovered ₹${recoverAmount.toFixed(2)} from supplier PO ${so.internal_po_no || so_id} (Ref: ${ref})`, now]
     );
-  } catch(_) {}
-
-  // Sync settled supplier amount into audit items if present
-  try {
-    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [so_id]);
-    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) > (parseFloat(so.confirmed_price) || 0))) {
-      await runAsync("UPDATE order_cost_audit_items SET act_material=? WHERE id=?", [parseFloat(so.confirmed_price) || 0, auditItem.id]);
-    }
   } catch(_) {}
 
   saveNow();

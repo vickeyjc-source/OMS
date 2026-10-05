@@ -274,54 +274,92 @@ function AuditItemCard({ item, onSaved }) {
     margin: srcModes.margin, // Strictly locked
   }));
 
-  const initialActMat = item.act_material !== null && item.act_material !== undefined && item.act_material !== ''
-    ? Number(item.act_material)
-    : (item.supplier_subtotal > 0
-        ? Number(item.supplier_subtotal)
-        : (item.finance_paid > 0 ? Number(item.finance_paid) : (Number(item.est_material) || 0)));
+  const isAlreadyAudited = Number(item.is_audited) === 1;
 
   const [actRates, setActRates] = useState(() => {
+    if (!isAlreadyAudited) {
+      return {
+        currency: srcRates.currency || 'INR',
+        exchange_rate: srcRates.exchange_rate || 1,
+        src_price_foreign: '',
+        sourced_price: '',
+        freight: '',
+        insurance: '',
+        transport: '',
+        packaging: '',
+        bcd: '',
+        sws: '',
+        cess: '',
+        clearing: '',
+        bank: '',
+        buffer: '',
+        margin: srcRates.margin, // Strictly locked to agreed Sourcing margin
+        quote_currency: srcRates.quote_currency || 'INR',
+        quote_price: '',
+        tax_rate: srcRates.tax_rate ?? 18,
+      };
+    }
     const r = savedAct?.rates || {};
-    const cur = savedAct?.currency || srcRates.currency;
-    const exRate = savedAct?.exchange_rate ?? srcRates.exchange_rate;
-    const srcUnitInr = initialActMat > 0 ? (initialActMat / qty) : srcRates.sourced_price;
-    const srcForeign = savedAct?.src_price_foreign ?? (cur !== 'INR' && exRate > 0 ? (srcUnitInr / exRate) : srcRates.src_price_foreign);
+    const cur = savedAct?.currency || srcRates.currency || 'INR';
+    const exRate = savedAct?.exchange_rate ?? srcRates.exchange_rate ?? 1;
+    const srcUnitInr = item.act_material !== null && item.act_material !== undefined && item.act_material !== ''
+      ? (Number(item.act_material) / qty)
+      : (r.sourced_price ?? '');
+    const srcForeign = savedAct?.src_price_foreign ?? r.src_price_foreign ?? '';
 
     return {
       currency: cur,
       exchange_rate: exRate,
       src_price_foreign: srcForeign,
       sourced_price: srcUnitInr,
-      freight: r.freight ?? (item.act_freight !== null && item.act_freight !== undefined ? item.act_freight : srcRates.freight),
-      insurance: r.insurance ?? (item.act_insurance !== null && item.act_insurance !== undefined ? item.act_insurance : srcRates.insurance),
-      transport: r.transport ?? (item.act_transport !== null && item.act_transport !== undefined ? item.act_transport : srcRates.transport),
-      packaging: r.packaging ?? (item.act_packaging !== null && item.act_packaging !== undefined ? item.act_packaging : srcRates.packaging),
-      bcd: r.bcd ?? (item.act_bcd !== null && item.act_bcd !== undefined ? item.act_bcd : srcRates.bcd),
-      sws: r.sws ?? (item.act_sws !== null && item.act_sws !== undefined ? item.act_sws : srcRates.sws),
-      cess: r.cess ?? (item.act_cess !== null && item.act_cess !== undefined ? item.act_cess : srcRates.cess),
-      clearing: r.clearing ?? (item.act_clearing !== null && item.act_clearing !== undefined ? item.act_clearing : srcRates.clearing),
-      bank: r.bank ?? (item.act_bank !== null && item.act_bank !== undefined ? item.act_bank : srcRates.bank),
-      buffer: r.buffer ?? (item.act_buffer !== null && item.act_buffer !== undefined ? item.act_buffer : srcRates.buffer),
-      margin: srcRates.margin, // Strictly locked
-      quote_currency: savedAct?.quote_currency || srcRates.quote_currency,
-      quote_price: savedAct?.quote_price ?? srcRates.quote_price,
-      tax_rate: savedAct?.tax_rate ?? srcRates.tax_rate,
+      freight: r.freight ?? (item.act_freight ?? ''),
+      insurance: r.insurance ?? (item.act_insurance ?? ''),
+      transport: r.transport ?? (item.act_transport ?? ''),
+      packaging: r.packaging ?? (item.act_packaging ?? ''),
+      bcd: r.bcd ?? (item.act_bcd ?? ''),
+      sws: r.sws ?? (item.act_sws ?? ''),
+      cess: r.cess ?? (item.act_cess ?? ''),
+      clearing: r.clearing ?? (item.act_clearing ?? ''),
+      bank: r.bank ?? (item.act_bank ?? ''),
+      buffer: r.buffer ?? (item.act_buffer ?? ''),
+      margin: srcRates.margin,
+      quote_currency: savedAct?.quote_currency || srcRates.quote_currency || 'INR',
+      quote_price: savedAct?.quote_price ?? r.quote_price ?? '',
+      tax_rate: savedAct?.tax_rate ?? r.tax_rate ?? (srcRates.tax_rate ?? 18),
     };
   });
 
   const [actExtraCharges, setActExtraCharges] = useState(() => {
+    if (!isAlreadyAudited) return [];
     try {
       const p = item.act_extra_charges_detail ? (typeof item.act_extra_charges_detail === 'string' ? JSON.parse(item.act_extra_charges_detail) : item.act_extra_charges_detail) : [];
       return Array.isArray(p) ? p : [];
     } catch (_) { return []; }
   });
 
-  const [notes, setNotes] = useState(item.notes || '');
+  const [notes, setNotes] = useState(isAlreadyAudited ? (item.notes || '') : '');
   const [saving, setSaving] = useState(false);
   const [isAuditedLocal, setIsAuditedLocal] = useState(Number(item.is_audited) === 1);
   useEffect(() => {
     setIsAuditedLocal(Number(item.is_audited) === 1);
   }, [item.is_audited]);
+
+  const hasEnteredActuals = Boolean(
+    isAuditedLocal ||
+    actRates.sourced_price ||
+    actRates.src_price_foreign ||
+    actRates.freight ||
+    actRates.insurance ||
+    actRates.transport ||
+    actRates.packaging ||
+    actRates.bcd ||
+    actRates.sws ||
+    actRates.cess ||
+    actRates.clearing ||
+    actRates.bank ||
+    actRates.buffer ||
+    actExtraCharges.some(c => Number(c?.amount) > 0)
+  );
 
   // Live calculation of Actual side
   const actCalc = useMemo(() => {
@@ -499,7 +537,11 @@ function AuditItemCard({ item, onSaved }) {
 
         {/* Right side status and action buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          {variance > 0.01 ? (
+          {!hasEnteredActuals && !isAuditedLocal ? (
+            <span style={{ fontSize: 11, color: 'var(--text3)', fontStyle: 'italic', padding: '3px 8px' }}>
+              Pending Actuals
+            </span>
+          ) : variance > 0.01 ? (
             <span style={{
               display: 'inline-flex', alignItems: 'center', gap: 4,
               background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)',
@@ -1052,13 +1094,23 @@ function AuditItemCard({ item, onSaved }) {
           <span style={{ color: 'var(--text3)' }}>vs</span>
           <div style={{ fontSize: 12 }}>
             <span style={{ color: 'var(--text3)' }}>Actual Spent: </span>
-            <span className="mono" style={{ fontWeight: 800, color: 'var(--green)' }}>{money(actTotal)}</span>
+            <span className="mono" style={{ fontWeight: 800, color: (hasEnteredActuals || isAuditedLocal) ? 'var(--green)' : 'var(--text3)' }}>
+              {(hasEnteredActuals || isAuditedLocal) ? money(actTotal) : 'Pending Manual Entry'}
+            </span>
           </div>
         </div>
 
         {/* Live Profit / Loss Badge */}
         <div>
-          {variance > 0.01 ? (
+          {!hasEnteredActuals && !isAuditedLocal ? (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              background: 'var(--surface3, rgba(255,255,255,0.06))', border: '1px solid var(--border)',
+              color: 'var(--text3)', padding: '4px 12px', borderRadius: 20, fontSize: 12, fontWeight: 600
+            }}>
+              <span>⏳</span> <span>Enter actual costs above to calculate budget outcome</span>
+            </div>
+          ) : variance > 0.01 ? (
             <div style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               background: 'rgba(16,185,129,0.15)', border: '1px solid rgba(16,185,129,0.4)',
@@ -1118,10 +1170,12 @@ function AuditDetailView({ orderId, initialOrder, initialAudit, onClose, onSaved
   };
 
   const totalEstimate = items.reduce((s, i) => s + (Number(i.est_total) || 0), 0);
-  const totalActual = items.reduce((s, i) => s + (Number(i.act_total) || 0), 0);
+  const auditedItems = items.filter(i => Number(i.is_audited) === 1);
+  const totalActual = auditedItems.reduce((s, i) => s + (Number(i.act_total) || 0), 0);
+  const hasAudited = auditedItems.length > 0;
   const customerPaid = Number(audit?.customer_paid_total) || 0;
   const budgetVariance = totalEstimate - totalActual;
-  const dealProfit = customerPaid - (totalActual > 0 ? totalActual : totalEstimate);
+  const dealProfit = customerPaid - totalActual;
 
   const orderData = audit?.order || initialOrder || {};
   const isCustIntl = orderData.customer_scope === 'international';
@@ -1193,17 +1247,17 @@ function AuditDetailView({ orderId, initialOrder, initialAudit, onClose, onSaved
           <div style={{ height: 14, width: 1, background: 'var(--border)' }} />
           <div style={{ fontSize: 12 }}>
             <span style={{ color: 'var(--text3)' }}>Actual Cost (Out): </span>
-            <span className="mono" style={{ fontWeight: 800, color: totalActual > 0 ? 'var(--purple, #a855f7)' : 'var(--text3)' }}>
-              {totalActual > 0 ? money(totalActual) : 'Pending Actuals'}
+            <span className="mono" style={{ fontWeight: 800, color: hasAudited ? 'var(--purple, #a855f7)' : 'var(--text3)' }}>
+              {hasAudited ? (isAllAudited ? money(totalActual) : `${money(totalActual)} (partial)`) : 'Pending Actuals'}
             </span>
           </div>
           <div style={{ height: 14, width: 1, background: 'var(--border)' }} />
           <div style={{ fontSize: 12 }}>
             <span style={{ color: 'var(--text3)' }}>Net Profit: </span>
-            <span className="mono" style={{ fontWeight: 800, color: dealProfit >= 0 ? '#10b981' : '#ef4444' }}>
-              {totalActual > 0 ? (dealProfit >= 0 ? `+${money(dealProfit)}` : `-${money(Math.abs(dealProfit))}`) : '—'}
+            <span className="mono" style={{ fontWeight: 800, color: hasAudited ? (dealProfit >= 0 ? '#10b981' : '#ef4444') : 'var(--text3)' }}>
+              {hasAudited ? (dealProfit >= 0 ? `+${money(dealProfit)}` : `-${money(Math.abs(dealProfit))}`) : '—'}
             </span>
-            {customerPaid > 0 && totalActual > 0 && (
+            {customerPaid > 0 && hasAudited && (
               <span style={{ fontSize: 10, color: dealProfit >= 0 ? '#10b981' : '#ef4444', fontWeight: 700, marginLeft: 4 }}>
                 ({((dealProfit / customerPaid) * 100).toFixed(1)}%)
               </span>
@@ -1213,18 +1267,22 @@ function AuditDetailView({ orderId, initialOrder, initialAudit, onClose, onSaved
           {/* Subtle Budget Saved Tag */}
           <div style={{
             fontSize: 10.5, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
-            background: totalActual === 0 ? 'var(--surface2)' : (budgetVariance >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'),
-            color: totalActual === 0 ? 'var(--text3)' : (budgetVariance >= 0 ? '#10b981' : '#ef4444'),
-            border: `1px solid ${totalActual === 0 ? 'var(--border)' : (budgetVariance >= 0 ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)')}`
+            background: !hasAudited ? 'var(--surface2)' : (budgetVariance >= 0 ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'),
+            color: !hasAudited ? 'var(--text3)' : (budgetVariance >= 0 ? '#10b981' : '#ef4444'),
+            border: `1px solid ${!hasAudited ? 'var(--border)' : (budgetVariance >= 0 ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)')}`
           }}>
-            {totalActual === 0 ? (
+            {!hasAudited ? (
               <span>Estimate Budget: {money(totalEstimate)}</span>
-            ) : budgetVariance > 0.01 ? (
-              <span>🟢 Saved {money(budgetVariance)} vs estimate</span>
-            ) : budgetVariance < -0.01 ? (
-              <span>🔴 Over budget by {money(Math.abs(budgetVariance))}</span>
+            ) : isAllAudited ? (
+              budgetVariance > 0.01 ? (
+                <span>🟢 Saved {money(budgetVariance)} vs estimate</span>
+              ) : budgetVariance < -0.01 ? (
+                <span>🔴 Over budget by {money(Math.abs(budgetVariance))}</span>
+              ) : (
+                <span>🔵 On Budget ({money(totalEstimate)})</span>
+              )
             ) : (
-              <span>🔵 On Budget ({money(totalEstimate)})</span>
+              <span>⏳ In Progress ({auditedCount}/{items.length} Saved)</span>
             )}
           </div>
         </div>
@@ -1303,8 +1361,11 @@ export default function AuditBinPage() {
   const totalAudits = audits.length;
   const totalCustomerPaid = audits.reduce((s, a) => s + (Number(a.customer_paid_total) || 0), 0);
   const totalEstimateBudget = audits.reduce((s, a) => s + (Number(a.est_total) || 0), 0);
-  const totalActualSpent = audits.reduce((s, a) => s + (Number(a.act_total) || 0), 0);
-  const totalDealProfit = totalCustomerPaid - totalActualSpent;
+  const completedAudits = audits.filter(a => a.is_all_audited);
+  const totalActualSpent = completedAudits.reduce((s, a) => s + (Number(a.act_total) || 0), 0);
+  const auditedCustomerPaid = completedAudits.reduce((s, a) => s + (Number(a.customer_paid_total) || 0), 0);
+  const auditedEstimateBudget = completedAudits.reduce((s, a) => s + (Number(a.est_total) || 0), 0);
+  const totalDealProfit = auditedCustomerPaid - totalActualSpent;
 
   // If orderId is in URL or selected, show full workspace
   if (orderId || selected) {
@@ -1335,12 +1396,17 @@ export default function AuditBinPage() {
             color: 'var(--accent)'
           },
           { label: 'Customer Paid (In)', val: fmtM(totalCustomerPaid), color: 'var(--green)' },
-          { label: 'Actual Cost (Out)', val: fmtM(totalActualSpent), color: 'var(--purple, #a855f7)' },
+          {
+            label: 'Actual Cost (Out)',
+            val: completedAudits.length > 0 ? fmtM(totalActualSpent) : 'Pending Audits',
+            sub: completedAudits.length > 0 ? `${completedAudits.length} order(s) audited` : 'No orders audited yet',
+            color: 'var(--purple, #a855f7)'
+          },
           {
             label: 'Net Deal Profit',
-            val: (totalActualSpent > 0 ? (totalDealProfit >= 0 ? `+${fmtM(totalDealProfit)}` : `-${fmtM(Math.abs(totalDealProfit))}`) : '—'),
-            sub: totalActualSpent > 0 ? (totalEstimateBudget >= totalActualSpent ? `🟢 Saved ${fmtM(totalEstimateBudget - totalActualSpent)} vs budget` : `🔴 Over budget by ${fmtM(totalActualSpent - totalEstimateBudget)}`) : null,
-            color: totalDealProfit >= 0 ? 'var(--green)' : 'var(--red)'
+            val: completedAudits.length > 0 ? (totalDealProfit >= 0 ? `+${fmtM(totalDealProfit)}` : `-${fmtM(Math.abs(totalDealProfit))}`) : '—',
+            sub: completedAudits.length > 0 ? (auditedEstimateBudget >= totalActualSpent ? `🟢 Saved ${fmtM(auditedEstimateBudget - totalActualSpent)} vs budget` : `🔴 Over budget by ${fmtM(totalActualSpent - auditedEstimateBudget)}`) : 'Pending completed audits',
+            color: completedAudits.length > 0 ? (totalDealProfit >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text3)'
           },
         ].map(s => (
           <div key={s.label} className="stat-card" style={{ borderLeft: `3px solid ${s.color}`, padding: '10px 14px' }}>
@@ -1445,8 +1511,10 @@ export default function AuditBinPage() {
             const est = Number(a.est_total) || 0;
             const act = Number(a.act_total) || 0;
             const variance = est - act;
-            const hasAct = act > 0;
-            const profit = (Number(a.customer_paid_total) || 0) - (hasAct ? act : est);
+            const isDone = Boolean(a.is_all_audited);
+            const hasPartial = (Number(a.audited_count) || 0) > 0 && !isDone;
+            const isPending = (Number(a.audited_count) || 0) === 0;
+            const profit = (Number(a.customer_paid_total) || 0) - act;
             return (
               <div key={a.id} style={{
                 display: 'grid', gridTemplateColumns: '1fr 150px 150px 150px 170px 100px',
@@ -1492,24 +1560,32 @@ export default function AuditBinPage() {
                   {fmtM(a.customer_paid_total)}
                 </div>
 
-                <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, color: hasAct ? 'var(--purple, #a855f7)' : 'var(--text3)' }}>
-                  {hasAct ? fmtM(act) : 'Pending Actuals'}
+                <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 600, color: isDone || hasPartial ? 'var(--purple, #a855f7)' : 'var(--text3)' }}>
+                  {isDone ? fmtM(act) : hasPartial ? `${fmtM(act)} (partial)` : <span style={{ fontStyle: 'italic', fontSize: 12 }}>Pending Actuals</span>}
                 </div>
 
-                <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 700, color: profit >= 0 ? '#10b981' : '#ef4444' }}>
-                  {hasAct ? (profit >= 0 ? `+${fmtM(profit)}` : `-${fmtM(Math.abs(profit))}`) : '—'}
+                <div style={{ fontFamily: 'monospace', fontSize: 13, fontWeight: 700, color: isDone ? (profit >= 0 ? '#10b981' : '#ef4444') : 'var(--text3)' }}>
+                  {isDone ? (profit >= 0 ? `+${fmtM(profit)}` : `-${fmtM(Math.abs(profit))}`) : '—'}
                 </div>
 
                 <div>
-                  {!hasAct ? (
+                  {isPending ? (
                     <span style={{ fontSize: 11, color: 'var(--text3)' }}>Est Budget: {fmtM(est)}</span>
-                  ) : variance >= 0 ? (
+                  ) : hasPartial ? (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#d97706', background: 'rgba(245,158,11,0.12)', padding: '2px 8px', borderRadius: 12 }}>
+                      ⏳ Partial ({a.audited_count}/{a.total_items_count})
+                    </span>
+                  ) : variance > 0.01 ? (
                     <span style={{ fontSize: 11, fontWeight: 700, color: '#10b981', background: 'rgba(16,185,129,0.12)', padding: '2px 8px', borderRadius: 12 }}>
                       🟢 Saved +{fmtM(variance)}
                     </span>
-                  ) : (
+                  ) : variance < -0.01 ? (
                     <span style={{ fontSize: 11, fontWeight: 700, color: '#ef4444', background: 'rgba(239,68,68,0.12)', padding: '2px 8px', borderRadius: 12 }}>
                       🔴 Over -{fmtM(Math.abs(variance))}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, fontWeight: 700, color: '#3b82f6', background: 'rgba(59,130,246,0.12)', padding: '2px 8px', borderRadius: 12 }}>
+                      🔵 Exact Match
                     </span>
                   )}
                 </div>
