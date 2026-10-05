@@ -147,15 +147,34 @@ async function assembleOrder(order) {
   let fqCharges = [];
   try {
     fqCharges = soIds.length
-      ? await allAsync('SELECT supplier_order_id, additional_charges, actual_amount, amount_change_note, paid_amount FROM finance_queue WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
+      ? await allAsync('SELECT supplier_order_id, status, release_pending, amount, additional_charges, actual_amount, amount_change_note, paid_amount FROM finance_queue WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
       : [];
   } catch(_) { fqCharges = []; }
   const fqBySo = {};
   fqCharges.forEach(r => { fqBySo[r.supplier_order_id] = r; });
   o.supplierOrders = sos.map(so => {
     const fq = fqBySo[so.id] || {};
+    const paidAmt = parseFloat(fq.paid_amount) || 0;
+    const confPrice = parseFloat(so.confirmed_price) || 0;
+    const isNetPaid = (so.payment_terms_type === 'net' || !so.payment_terms_type) &&
+      (parseFloat(so.net_total_paid) || 0) >= confPrice - 0.01 && confPrice > 0;
+    const isAdvPaid = ['advance', 'split'].includes(so.payment_terms_type) &&
+      (fq.status === 'paid' || (paidAmt >= confPrice - 0.01 && confPrice > 0));
+
+    let resolvedStatus = so.status;
+    let paymentBlocked = so.payment_blocked;
+    if ((isNetPaid || isAdvPaid) && !['in_transit', 'received', 'partially_received', 'closed', 'cancelled'].includes(resolvedStatus)) {
+      resolvedStatus = 'paid';
+      paymentBlocked = 0;
+    } else if (['advance', 'split'].includes(so.payment_terms_type) && paidAmt > 0 && (!fq.release_pending || fq.release_pending === 0) && ['draft', 'pending_payment'].includes(resolvedStatus)) {
+      resolvedStatus = 'confirmed';
+      paymentBlocked = 0;
+    }
+
     return {
       ...so,
+      status: resolvedStatus,
+      payment_blocked: paymentBlocked,
       finance_returned: returnedPoIds.has(so.id),
       // advance charges (finance_queue) — fall back to net charges already on the row
       advance_additional_charges: fq.additional_charges || null,
@@ -762,10 +781,17 @@ async function initDb() {
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_extra_charges NUMERIC DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_extra_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_field_modes TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_transport NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_packaging NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN act_buffer NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_transport NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_packaging NUMERIC DEFAULT 0"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_buffer NUMERIC DEFAULT 0"); } catch(_) {}
   // Finance's actual-paid ad-hoc charges, kept separate from Sourcing's own —
   // never blended into one guess.
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges NUMERIC DEFAULT 0"); } catch(_) {}
   try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN est_finance_charges_detail TEXT DEFAULT NULL"); } catch(_) {}
+  try { await pool.query("ALTER TABLE order_cost_audit_items ADD COLUMN is_audited INTEGER DEFAULT 0"); } catch(_) {}
   // Manual override for Customer Paid / Supplier Paid shown in Audit Bin — these
   // two figures are normally computed live by summing customer_payments and
   // finance_queue, but that sum can be missing/wrong (payment recorded outside

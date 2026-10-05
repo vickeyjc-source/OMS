@@ -23,7 +23,7 @@ const PO_STATUS = {
   // Legacy aliases
   sent:                 { label:'PO Issued',             color:'var(--accent)',          bg:'var(--accent-lt)',         icon:'📤', step:2 },
   partial:              { label:'Partially Received',    color:'var(--amber,#d97706)',  bg:'var(--amber-lt,#fffbeb)', icon:'⚠', step:6 },
-  paid:                 { label:'Paid / In Transit',     color:'var(--blue,#2563eb)',   bg:'var(--blue-lt,#eff6ff)',  icon:'🚚', step:5 },
+  paid:                 { label:'Paid',                  color:'var(--teal,#0d9488)',   bg:'var(--teal-lt,#f0fdfa)',  icon:'💳', step:4 },
 };
 
 // Progress steps for the tracker
@@ -64,7 +64,7 @@ function POProgressTracker({ status, paymentTermsType }) {
       {steps.map((s,i) => {
         const sCfg    = PO_STATUS[s]||PO_STATUS.draft;
         const isDone  = sCfg.step < curStep;
-        const isCur   = s===status || (s==='po_issued'&&status==='sent') || (s==='received'&&status==='partially_received') || (s==='in_transit'&&status==='paid');
+        const isCur   = s===status || (s==='po_issued'&&status==='sent') || (s==='received'&&status==='partially_received') || (s==='confirmed'&&status==='paid');
         const label   = PO_STEP_LABELS[s]||s;
         return (
           <React.Fragment key={s}>
@@ -1228,8 +1228,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
       toast.error('Supplier PI Number is required for advance/split payment terms');
       return;
     }
-    // AWB is mandatory when shipping details section is visible (confirmed or beyond)
-    if (['confirmed','in_transit','partially_received','received'].includes(form.status) && !form.tracking_no?.trim()) {
+    // AWB is mandatory when explicitly marking as in_transit / sending to hub
+    if (form.status === 'in_transit' && !form.tracking_no?.trim()) {
       toast.error('AWB / Tracking number is required');
       return;
     }
@@ -1546,8 +1546,8 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                       <input className="input" value={form.tracking_no}
                         onChange={e=>{
                           set('tracking_no',e.target.value);
-                          if (e.target.value.trim() && form.status==='confirmed') {
-                            set('status','in_transit');
+                          if (e.target.value.trim() && ['confirmed','paid'].includes(form.status)) {
+                            set('shipping_status','in-transit');
                           }
                         }}
                         placeholder="AWB / Tracking number (required)"
@@ -1618,13 +1618,13 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
               </button>
             )}
             {/* Send to Delivery Hub — only when confirmed/paid + shipping details filled + GRN not yet done */}
-            {!readOnly && ['confirmed','paid'].includes(po.status) && effectivePoStatus !== 'received' && form.tracking_no?.trim() && form.shipper_id?.trim() && (
+            {!readOnly && ['confirmed','paid'].includes(form.status || po.status) && (form.status || po.status) !== 'in_transit' && effectivePoStatus !== 'received' && form.tracking_no?.trim() && form.shipper_id?.trim() && (
               <button type="button" className="btn" disabled={saving}
                 style={{background:'var(--teal,#0d9488)',color:'#fff',borderColor:'var(--teal,#0d9488)',fontWeight:700,fontSize:12}}
                 onClick={async()=>{
                   setSaving(true);
                   try {
-                    await api.put('/supplier-orders/'+po.id,{...form,status:'in_transit'});
+                    await api.put('/supplier-orders/'+po.id,{...form,status:'in_transit',shipping_status:'in-transit'});
                     qc.invalidateQueries(['orders']);
                     toast.success('📦 PO sent to Delivery Hub! Go to Delivery Hub to record GRN when goods arrive.');
                     onSaved();
@@ -1634,8 +1634,16 @@ function ManagePOModal({ po, order, enquiry, suppliers, inventoryItems, shippers
                 📦 Send to Delivery Hub →
               </button>
             )}
+            {/* Save PO if confirmed/paid but shipping details not yet complete */}
+            {!readOnly && ['confirmed','paid'].includes(form.status || po.status) && (form.status || po.status) !== 'in_transit' && effectivePoStatus !== 'received' && !(form.tracking_no?.trim() && form.shipper_id?.trim()) && (
+              <button type="button" className="btn btn-primary" disabled={saving}
+                style={{fontSize:12, fontWeight:700}}
+                onClick={save}>
+                💾 Save PO
+              </button>
+            )}
             {/* Already in transit — show label only when not yet received */}
-            {['in_transit','paid'].includes(po.status) && effectivePoStatus !== 'received' && (
+            {po.status === 'in_transit' && effectivePoStatus !== 'received' && (
               <span style={{fontSize:11,padding:'4px 10px',borderRadius:'var(--r-sm)',
                 background:'var(--blue-lt,#eff6ff)',color:'var(--blue,#2563eb)',
                 fontWeight:700,border:'1px solid var(--blue,#2563eb)44'}}>
@@ -2836,7 +2844,7 @@ function OrderProcurementModal({ order: initialOrder, suppliers, inventoryItems,
       {showAlloc&&<AllocationModal order={order} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} enquiry={enquiry} poMode={poMode} readOnly={effectiveReadOnly || allocationLocked}
         onClose={()=>setShowAlloc(false)} onSaved={()=>{setShowAlloc(false);qc.invalidateQueries(['orders']);onSaved();}}/>}
       {managingPO&&<ManagePOModal po={managingPO} order={order} enquiry={enquiry} suppliers={suppliers} inventoryItems={inventoryItems} shippers={shippers} poMode={poMode}
-        readOnly={effectiveReadOnly}
+        readOnly={isOnHold || ['closed','cancelled'].includes(order.status) || ['received','closed','cancelled'].includes(managingPO.status)}
         poList={soList} poIndex={soList.findIndex(s=>s.id===managingPO.id)}
         onNavigate={(idx)=>setManagingPO(soList[idx])}
         onClose={()=>setManagingPO(null)} onSaved={()=>{setManagingPO(null);qc.invalidateQueries(['orders']);onSaved();}}/>}
@@ -3337,7 +3345,7 @@ export default function ProcurementBinPage() {
     { key:'awaiting_confirmation', label:'Awaiting Confirm',   color:'var(--amber,#d97706)', bg:'var(--amber-lt,#fffbeb)', icon:'⏳' },
     { key:'confirmed',             label:'Confirmed',          color:'var(--teal,#0d9488)',  bg:'var(--teal-lt,#f0fdfa)', icon:'✅' },
     { key:'in_transit',            label:'In Transit',         color:'var(--blue,#2563eb)',  bg:'var(--blue-lt,#eff6ff)', icon:'🚚' },
-    { key:'paid',                  label:'Paid/In Transit',    color:'var(--blue,#2563eb)',  bg:'var(--blue-lt,#eff6ff)', icon:'🚚' },
+    { key:'paid',                  label:'Paid',               color:'var(--teal,#0d9488)',  bg:'var(--teal-lt,#f0fdfa)', icon:'💳' },
     { key:'partially_received',    label:'Partial Rcvd',       color:'var(--amber,#d97706)', bg:'var(--amber-lt,#fffbeb)', icon:'⚠' },
     { key:'received',              label:'Received',           color:'var(--green)',          bg:'var(--green-lt)', icon:'📦' },
     { key:'cancelled',             label:'Cancelled',          color:'var(--red)',            bg:'var(--red-lt,#fef2f2)', icon:'❌' },
@@ -3529,7 +3537,9 @@ export default function ProcurementBinPage() {
                 {/* Actions */}
                 <div style={{display:'flex',gap:6,justifyContent:'flex-end'}} onClick={e=>e.stopPropagation()}>
                   {(() => {
-                    const rowReadOnly = READ_ONLY_STATUSES.includes(order.status);
+                    const hasPendingPOs = (order.supplierOrders||[]).length === 0 ||
+                      (order.supplierOrders||[]).some(so => !['in_transit', 'partially_received', 'received', 'closed', 'cancelled'].includes(so.status));
+                    const rowReadOnly = ['closed', 'cancelled'].includes(order.status) || (!hasPendingPOs && READ_ONLY_STATUSES.includes(order.status));
                     const rowBlocked = order.status==='sup_payment_update'||order.status==='payment_approval';
                     return (
                   <button className="btn btn-xs btn-primary"
@@ -3557,11 +3567,18 @@ export default function ProcurementBinPage() {
         onClose={()=>setPreviewOrder(null)}
         onSaved={()=>{ qc.invalidateQueries(['orders']); }}
       />}
-      {selected&&<OrderProcurementModal
-        order={selected} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} shippers={shippers}
-        readOnly={READ_ONLY_STATUSES.includes(selected.status)}
-        enquiry={findEnquiry(selected.enquiry_id, selected.enquiry_no)} poMode={poMode}
-        onClose={()=>setSelected(null)} onSaved={()=>{qc.invalidateQueries(['orders']);api.get('/orders/'+selected.id).then(r=>setSelected(r.data)).catch(()=>{});}}/>}
+      {selected&&(() => {
+        const selectedHasPendingPOs = (selected.supplierOrders||[]).length === 0 ||
+          (selected.supplierOrders||[]).some(so => !['in_transit', 'partially_received', 'received', 'closed', 'cancelled'].includes(so.status));
+        const selectedReadOnly = ['closed', 'cancelled'].includes(selected.status) || (!selectedHasPendingPOs && READ_ONLY_STATUSES.includes(selected.status));
+        return (
+          <OrderProcurementModal
+            order={selected} suppliers={suppliers} inventoryItems={inventoryItems} customers={customers} shippers={shippers}
+            readOnly={selectedReadOnly}
+            enquiry={findEnquiry(selected.enquiry_id, selected.enquiry_no)} poMode={poMode}
+            onClose={()=>setSelected(null)} onSaved={()=>{qc.invalidateQueries(['orders']);api.get('/orders/'+selected.id).then(r=>setSelected(r.data)).catch(()=>{});}}/>
+        );
+      })()}
     </div>
   );
 }

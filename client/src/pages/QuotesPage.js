@@ -389,15 +389,23 @@ function QuoteDetailModal({ quote, customers, enquiries, onClose, onRefresh }) {
                       </tr></thead>
                       <tbody>
                         {items.map((li, i) => {
+                          const isCancelled = Boolean(li.is_cancelled || li.item_status === 'cancelled');
                           const base = (li.quantity||0) * (li.quote_price||0);
                           const tax  = Number(li.tax_rate)||0;
                           const tot  = base + base*tax/100;
                           return (
-                            <tr key={li.id||i}>
+                            <tr key={li.id||i} style={{background: isCancelled ? '#fef2f2' : undefined, opacity: isCancelled ? 0.85 : 1}}>
                               <td style={{color:'var(--text3)',fontSize:11,textAlign:'center'}}>{i+1}</td>
-                              <td style={{fontWeight:600}}>{li.component}</td>
-                              <td style={{fontSize:12,color:'var(--text2)'}}>{li.manufacturer||'—'}</td>
-                              <td style={{fontFamily:'monospace',fontSize:11,color:'var(--text3)'}}>{li.ipn||'—'}</td>
+                              <td style={{fontWeight:600,textDecoration: isCancelled ? 'line-through' : 'none'}}>
+                                {li.component}
+                                {isCancelled && (
+                                  <span style={{marginLeft:6,background:'#fee2e2',color:'#b91c1c',border:'1px solid #fca5a5',fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:4,verticalAlign:'middle'}}>
+                                    🚫 Cancelled
+                                  </span>
+                                )}
+                              </td>
+                              <td style={{fontSize:12,color:'var(--text2)',textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.manufacturer||'—'}</td>
+                              <td style={{fontFamily:'monospace',fontSize:11,color:'var(--text3)',textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.ipn||'—'}</td>
                               <td style={{textAlign:'right',color:'var(--amber,#d97706)',fontFamily:'monospace'}}>
                                 {li.target_price ? fmtCur(li.target_price, li.target_currency) : '—'}
                               </td>

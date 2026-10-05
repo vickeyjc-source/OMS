@@ -82,6 +82,7 @@ const ITEM_STATUS = {
   checking: { label: 'Checking', color: '#92400e', bg: '#fffbeb', border: '#f59e0b', help: 'Checking means sourcing may still be possible later. It stays in Sourcing and is not included in the current quote.' },
   no_bid: { label: 'No Bid', color: '#991b1b', bg: '#fee2e2', border: '#fca5a5', help: 'No Bid means this item is cancelled for quoting and will not go to Quote Bin.' },
   quoted: { label: 'Quoted', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd', help: 'This item was already sent in an earlier split quote.' },
+  cancelled: { label: 'Cancelled', color: '#b91c1c', bg: '#fee2e2', border: '#f87171', help: 'This item was cancelled from the order.' },
 };
 
 // ── per-item cost calc ────────────────────────────────────────────────────────
@@ -1262,10 +1263,11 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
               const isQuoteReady  = isRevision ? isInRevisionQuote : itemStatus === 'ready';
               const isSkippedItem = itemStatus !== 'ready';
               const isNoBidItem = itemStatus === 'no_bid';
+              const isCancelledItem = itemStatus === 'cancelled';
               const isSubmittedNoBid = (enq.sourcing || []).some(s => s.enquiry_item_id === item.id && (s.item_status || 'ready') === 'no_bid');
-              const rowLocked = Boolean(row.sent_to_enquiry) || isSubmittedNoBid || (isRevision ? !isInRevisionQuote : itemStatus === 'quoted');
-              const fieldLocked = rowLocked || isNoBidItem;
-              const statusLocked = isReadOnly || Boolean(row.sent_to_enquiry) || isRevision || itemStatus === 'quoted' || isSubmittedNoBid;
+              const rowLocked = Boolean(row.sent_to_enquiry) || isSubmittedNoBid || isCancelledItem || (isRevision ? !isInRevisionQuote : itemStatus === 'quoted');
+              const fieldLocked = rowLocked || isNoBidItem || isCancelledItem;
+              const statusLocked = isReadOnly || Boolean(row.sent_to_enquiry) || isRevision || itemStatus === 'quoted' || isSubmittedNoBid || isCancelledItem;
 
               const calcDomesticQuote = (sp, mv, mm) => {
                 const s = Number(sp)||0, m = Number(mv)||0;

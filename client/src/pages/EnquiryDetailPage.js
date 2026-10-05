@@ -325,19 +325,30 @@ export default function EnquiryDetailPage() {
                   {originalItems.length === 0 && (
                     <tr><td colSpan={9} style={{textAlign:'center',color:'var(--text3)',padding:'24px',fontSize:13}}>No items</td></tr>
                   )}
-                  {originalItems.map((li, i) => (
-                    <tr key={li.id}>
-                      <td>{i+1}</td>
-                      <td className="bold">{li.component}</td>
-                      <td className="mono">{li.ipn||'—'}</td>
-                      <td>{li.manufacturer||'—'}</td>
-                      <td>{li.linecard_id ? lcName(li.linecard_id) : '—'}</td>
-                      <td>{qtyByRoot[li.id] ?? li.quantity}</td>
-                      <td className="mono">{li.target_price ? `${li.target_currency} ${li.target_price}` : '—'}</td>
-                      <td>{li.preferred_delivery_date||'—'}</td>
-                      <td>{li.date_code||'—'}</td>
-                    </tr>
-                  ))}
+                  {originalItems.map((li, i) => {
+                    const src = enq.sourcing?.find(s => s.enquiry_item_id === li.id);
+                    const isCancelled = src?.item_status === 'cancelled';
+                    return (
+                      <tr key={li.id} style={{background: isCancelled ? '#fef2f2' : undefined, opacity: isCancelled ? 0.85 : 1}}>
+                        <td>{i+1}</td>
+                        <td className="bold" style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>
+                          {li.component}
+                          {isCancelled && (
+                            <span style={{marginLeft:6,background:'#fee2e2',color:'#b91c1c',border:'1px solid #fca5a5',fontSize:10,fontWeight:700,padding:'1px 6px',borderRadius:4,verticalAlign:'middle'}}>
+                              🚫 Cancelled
+                            </span>
+                          )}
+                        </td>
+                        <td className="mono" style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.ipn||'—'}</td>
+                        <td style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>{li.manufacturer||'—'}</td>
+                        <td>{li.linecard_id ? lcName(li.linecard_id) : '—'}</td>
+                        <td>{qtyByRoot[li.id] ?? li.quantity}</td>
+                        <td className="mono">{li.target_price ? `${li.target_currency} ${li.target_price}` : '—'}</td>
+                        <td>{li.preferred_delivery_date||'—'}</td>
+                        <td>{li.date_code||'—'}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -381,10 +392,19 @@ export default function EnquiryDetailPage() {
                       const taxRate   = src?.tax_rate != null && src.tax_rate !== '' ? Number(src.tax_rate) : null;
                       const qTotalGst = taxRate != null ? qTotal * (1 + taxRate / 100) : null;
                       const isSentBack = src?.sent_to_enquiry;
+                      const isCancelled = src?.item_status === 'cancelled';
                       return (
-                        <tr key={item.id} style={{ background: isSentBack ? '#fef3c7' : undefined, borderLeft: isSentBack ? '4px solid #d97706' : undefined }}>
+                        <tr key={item.id} style={{
+                          background: isCancelled ? '#fef2f2' : (isSentBack ? '#fef3c7' : undefined),
+                          borderLeft: isCancelled ? '4px solid #ef4444' : (isSentBack ? '4px solid #d97706' : undefined),
+                          opacity: isCancelled ? 0.85 : 1
+                        }}>
                           <td>{i+1}</td>
-                          <td className="bold">{item.component}{isSentBack && <span style={{fontSize:10,color:'#d97706',fontWeight:700,marginLeft:6}}>🔄 Sent Back</span>}</td>
+                          <td className="bold" style={{textDecoration: isCancelled ? 'line-through' : 'none'}}>
+                            {item.component}
+                            {isCancelled && <span style={{fontSize:10,color:'#b91c1c',background:'#fee2e2',border:'1px solid #fca5a5',fontWeight:700,marginLeft:6,padding:'1px 6px',borderRadius:4,verticalAlign:'middle'}}>🚫 Cancelled</span>}
+                            {isSentBack && !isCancelled && <span style={{fontSize:10,color:'#d97706',fontWeight:700,marginLeft:6}}>🔄 Sent Back</span>}
+                          </td>
                           <td>{item.manufacturer||'—'}</td>
                           <td>{src?.supplier_id ? supName(src.supplier_id) : <span className="muted">—</span>}</td>
                           <td className="mono">

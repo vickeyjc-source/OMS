@@ -1434,8 +1434,9 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
   const refNo = type === 'customer' ? item.id : (item.internal_po_no||item.supplier_order_id||item.id);
 
   const isOnHold = Boolean(item.is_on_hold || item.order_status === 'hold' || item.status === 'hold');
+  const isPoPending = type === 'supplier-net' && Boolean(item.hasPendingPoReq);
 
-  const canSubmit = !isOnHold && !mutation.isPending && grandTotal > 0
+  const canSubmit = !isOnHold && !isPoPending && !mutation.isPending && grandTotal > 0
     && (type === 'customer'
       ? (isWalletValid && isCreditValid && isBankValid && isAllocationValid)
       : (!!form.payment_method && !!form.payment_ref && form.zoho_po_number?.trim() && form.supplier_ref?.trim()));
@@ -1482,6 +1483,23 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
                 <strong>Reason:</strong> {item.hold_reason || 'No note specified'}
                 {item.hold_by && <span> • <strong>By:</strong> {item.hold_by}</span>}
                 {item.hold_at && <span> • <strong>At:</strong> {fmtDate(item.hold_at)}</span>}
+              </div>
+            </div>
+          )}
+          {isPoPending && (
+            <div style={{
+              background: '#fef3c7',
+              border: '1.5px solid #d97706',
+              borderRadius: 8,
+              padding: '12px 16px',
+              marginBottom: 14,
+              color: '#92400e'
+            }}>
+              <div style={{fontWeight: 700, fontSize: 13, display: 'flex', alignItems: 'center', gap: 6}}>
+                <span>🔒</span> PO DETAILS REQUIRED — PAYMENT RECORDING LOCKED
+              </div>
+              <div style={{fontSize: 12, marginTop: 4, lineHeight: 1.4}}>
+                PO details are pending for this order. Complete PO details in the <b>PO Requests</b> tab before recording settlement.
               </div>
             </div>
           )}
@@ -1990,8 +2008,8 @@ function RecordPaymentModal({ item, type, onClose, onSaved }) {
         <div className="modal-footer">
           <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary"
-            disabled={!canSubmit || isOnHold}
-            title={isOnHold ? 'Order is on hold' : ''}
+            disabled={!canSubmit || isOnHold || isPoPending}
+            title={isOnHold ? 'Order is on hold' : isPoPending ? 'Complete PO details in PO Requests tab before recording settlement' : ''}
             onClick={handleSubmit}>
             {mutation.isPending
               ? 'Saving…'
@@ -2320,7 +2338,7 @@ function PORequestsTab({ requests, onRefresh }) {
         <FulfillPORequestModal
           request={fulfillModal}
           onClose={()=>setFulfillModal(null)}
-          onSaved={()=>{ setFulfillModal(null); qc.invalidateQueries(['po-requests']); onRefresh(); }}
+          onSaved={()=>{ setFulfillModal(null); qc.invalidateQueries(['po-requests']); qc.invalidateQueries(['finance-supplier']); qc.invalidateQueries(['orders']); onRefresh(); }}
         />
       )}
     </div>
@@ -2432,7 +2450,7 @@ function FulfillPORequestModal({ request, onClose, onSaved }) {
   );
 }
 
-function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', suppliers, customers, inventoryItems, onClose }) {
+function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', suppliers, customers, inventoryItems, poRequests=[], onClose }) {
   const { data: order, isLoading } = useQuery({
     queryKey: ['finance-breakdown-order', orderId],
     queryFn: () => api.get('/orders/' + orderId).then(r => r.data),
@@ -2517,6 +2535,10 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
     return {
       id: so.id,
       supplierOrderId: so.id,
+      supplierId: so.supplier_id,
+      status: so.status,
+      paymentTerms: so.payment_terms,
+      paymentTermsType: so.payment_terms_type,
       supplierName: supName(so.supplier_id),
       sourceTotal, supplierTaxRate, supplierTaxAmount, supplierPayable:sourceTotal+supplierTaxAmount,
       items: itemBreakdown,
@@ -2613,8 +2635,38 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                   </div>
                 </>
               ) : (
-                visibleSupplierSummaries.map(summary=>(
+                visibleSupplierSummaries.map(summary=>{
+                  const hasPendingReq = (poRequests || []).some(pr =>
+                    pr.status === 'pending' && (
+                      (pr.supplier_order_id && (pr.supplier_order_id === summary.id || pr.supplier_order_id === summary.supplierOrderId)) ||
+                      (pr.order_id === order.id && pr.supplier_id === summary.supplierId)
+                    )
+                  );
+                  const isNetTerms = summary.paymentTermsType === 'net' || String(summary.paymentTerms || '').toLowerCase().includes('net');
+                  const isPoIssueRequired = isNetTerms && hasPendingReq;
+
+                  return (
                   <React.Fragment key={summary.id}>
+                    {isPoIssueRequired && (
+                      <div style={{
+                        padding: '10px 14px',
+                        borderRadius: 'var(--r-sm, 6px)',
+                        background: 'var(--amber-lt, #fffbeb)',
+                        border: '1px solid var(--amber, #f59e0b)',
+                        color: 'var(--amber, #92400e)',
+                        fontSize: 12,
+                        fontWeight: 600,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        lineHeight: 1.4
+                      }}>
+                        <span style={{fontSize: 14}}>🔒</span>
+                        <span>
+                          <b>PO Issue Required:</b> PO details are pending. Complete PO details in &quot;PO Requests&quot; tab before recording settlement.
+                        </span>
+                      </div>
+                    )}
                     <div style={{padding:'12px 14px',border:'1px solid var(--border)',borderRadius:'var(--r-sm)',background:'var(--surface2)'}}>
                       <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',marginBottom:8}}>SUPPLIER PAYABLE</div>
                       <div style={{display:'grid',gap:6,fontSize:12}}>
@@ -2672,7 +2724,8 @@ function FinanceBreakdownModal({ orderId, mode='customer', supplierOrderId='', s
                       </table>
                     </div>
                   </React.Fragment>
-                ))
+                  );
+                })
               )}
             </div>
           )}
@@ -3772,6 +3825,11 @@ export default function FinancePage() {
                   const total   = parseFloat(r.confirmed_price)||0;
                   const paid    = parseFloat(r.net_total_paid)||0;
                   const balance = Math.max(0, total - paid);
+                  const hasPendingPoReq = pendingPORequests.some(pr =>
+                    (pr.supplier_order_id && pr.supplier_order_id === r.id) ||
+                    (pr.order_id === r.order_id && pr.supplier_id === r.supplier_id)
+                  );
+                  const isPoIssueRequired = hasPendingPoReq;
                   return (
                     <tr key={r.id} style={{background:isPartial?'var(--amber-lt,#fffbeb)':daysLeft!==null&&daysLeft<0?'var(--red-lt,#fef2f2)':daysLeft!==null&&daysLeft<10?'var(--amber-lt,#fffbeb)':'transparent',cursor:'pointer'}} onClick={()=>setBreakdownModal({ orderId: r.order_id, mode:'supplier', supplierOrderId: r.id })}>
                       <td>
@@ -3808,10 +3866,14 @@ export default function FinancePage() {
                           <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--green-lt,#dcfce7)',color:'var(--green,#16a34a)',fontWeight:800,border:'1px solid var(--green,#16a34a)'}}>
                             ✅ Payment Recorded
                           </span>
+                        ) : isPoIssueRequired ? (
+                          <span style={{fontSize:11,padding:'2px 8px',borderRadius:99,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#d97706)',fontWeight:800,border:'1px solid var(--amber,#d97706)',display:'inline-flex',alignItems:'center',gap:4}} title={hasPendingPoReq ? "PO details pending in PO Requests tab" : "PO is in draft. Issue PO in Procurement before payment."}>
+                            🔒 PO Issue Required
+                          </span>
                         ) : <StatusBadge s={r.status||'pending'}/>}
                       </td>
                       <td style={{textAlign:'right'}} onClick={e=>e.stopPropagation()}>
-                        <div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+                        <div style={{display:'flex',gap:6,justifyContent:'flex-end',alignItems:'center'}}>
                         {paid <= 0 && r.status === 'draft' && (
                           <button className="btn btn-xs"
                             onClick={()=>setReturnConfirm({type:'supplier-net',item:r})}
@@ -3829,11 +3891,26 @@ export default function FinancePage() {
                             style={{fontSize:11,background:'var(--green)',color:'#fff',borderColor:'var(--green)',fontWeight:700,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
                             🚀 Release
                           </button>
+                        ) : isPoIssueRequired ? (
+                          <span style={{
+                            fontSize: 11,
+                            padding: '3px 8px',
+                            borderRadius: 4,
+                            background: 'var(--amber-lt, #fffbeb)',
+                            color: 'var(--amber, #b45309)',
+                            fontWeight: 700,
+                            border: '1px solid var(--amber, #fde68a)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4
+                          }} title="PO must be issued in Procurement before recording settlement. Fulfill PO details in 'PO Requests' if requested.">
+                            🔒 PO Issue Pending
+                          </span>
                         ) : balance > 0 ? (
                           <button className="btn btn-xs btn-primary"
                             disabled={isHold}
                             title={isHold ? 'Order is on hold' : ''}
-                            onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id},type:'supplier-net'})}
+                            onClick={()=>setPayModal({item:{...r,supplier_order_id:r.id,hasPendingPoReq},type:'supplier-net'})}
                             style={{fontSize:11,opacity:isHold?0.5:1,cursor:isHold?'not-allowed':'pointer'}}>
                             {isPartial ? `💸 Pay Remaining (${fmtM(balance, r.confirmed_currency)})` : '💸 Record Settlement'}
                           </button>
@@ -3902,6 +3979,7 @@ export default function FinancePage() {
           suppliers={suppliers}
           customers={customers}
           inventoryItems={inventoryItems}
+          poRequests={poRequests}
           onClose={()=>setBreakdownModal(null)}
         />
       )}

@@ -92,6 +92,7 @@ function AppRoutes() {
         <Route path="procurement-bin" element={<RequireSection section="procurement-bin"><ProcurementBinPage /></RequireSection>} />
         <Route path="closed-bin" element={<RequireSection section="closed-bin"><ClosedBinPage /></RequireSection>} />
         <Route path="audit-bin" element={<RequireSection section="audit-bin"><AuditBinPage /></RequireSection>} />
+        <Route path="audit-bin/:orderId" element={<RequireSection section="audit-bin"><AuditBinPage /></RequireSection>} />
         <Route path="deleted-bin" element={<RequireSection section="deleted-bin" strictAdmin><DeletedBinPage /></RequireSection>} />
         <Route path="danger-zone" element={<RequireSection section="danger-zone" strictAdmin><DangerZonePage /></RequireSection>} />
         <Route path="finance" element={<RequireSection section="finance"><FinancePage /></RequireSection>} />

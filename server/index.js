@@ -431,7 +431,7 @@ async function createCostAudit(orderId) {
 
     for (const so of supplierOrders) {
       const itemIds = soItemRows.filter(r => r.supplier_order_id === so.id).map(r => r.item_id);
-      const items = itemIds.map(id => itemsById[id]).filter(Boolean);
+      const items = itemIds.map(id => itemsById[id]).filter(Boolean).filter(li => li.line_status !== 'cancelled');
       const customerTotal = items.reduce((s, li) => {
         const base = (Number(li.qty)||0) * (Number(li.unit_price)||0);
         return s + base + base * ((Number(li.tax_rate)||0)/100);
@@ -2640,6 +2640,8 @@ app.post('/api/quotes/:id/revise', auth, asyncRoute(async (req, res) => {
 function buildQuoteLineItem(item, sourcing, notePrices) {
   const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
   const src = srcRows.find(s => s.quote_price && ['ready','quoted'].includes(s.item_status || 'ready')) || srcRows[0] || {};
+  const itemStatus = src.item_status || 'ready';
+  const isCancelled = itemStatus === 'cancelled';
 
   // Use DB quote_price first; fallback to parsed notes
   let qp  = src.quote_price  || null;
@@ -2668,6 +2670,8 @@ function buildQuoteLineItem(item, sourcing, notePrices) {
     // fallback to enquiry_items.tax_rate if sourcing row has none
     tax_rate: (src.tax_rate != null && src.tax_rate !== '') ? Number(src.tax_rate)
              : (item.tax_rate != null ? Number(item.tax_rate) : 0),
+    item_status:  itemStatus,
+    is_cancelled: isCancelled,
   };
 }
 
@@ -2702,7 +2706,7 @@ app.get('/api/quotes/:id/lineitems', auth, asyncRoute(async (req, res) => {
   const lineItems = items.filter(item => {
     const srcRows = sourcing.filter(s => s.enquiry_item_id === item.id);
     if (srcRows.length === 0) return true;
-    return srcRows.some(s => ['ready','quoted'].includes(s.item_status || 'ready'));
+    return srcRows.some(s => ['ready','quoted','cancelled'].includes(s.item_status || 'ready'));
   }).map(item => buildQuoteLineItem(item, sourcing, notePrices));
 
   res.json({ enquiry_id: q.enquiry_id, items: lineItems, additional_charges: parseJsonSafe(q.additional_charges, []) });
@@ -3366,6 +3370,28 @@ app.post('/api/orders/:id/cancel', auth, asyncRoute(async (req, res) => {
     [oid]
   );
 
+  // 6b. Update Sourcing and Enquiry/Quote history for cancelled order
+  if (o.enquiry_id) {
+    try {
+      await runAsync(
+        "UPDATE enquiry_sourcing SET item_status='cancelled', notes=COALESCE(notes,'') || ' [Order ' || ? || ' cancelled]', updated_by=?, updated_at=? WHERE enquiry_id=?",
+        [oid, u.name, cancelAt, o.enquiry_id]
+      );
+      await runAsync(
+        'INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+        [uuid(), o.enquiry_id, `Order ${oid} cancelled: ${cancelReason}`, u.name, cancelAt]
+      );
+    } catch (_) {}
+  }
+  if (o.quote_id) {
+    try {
+      await runAsync(
+        'INSERT INTO quote_history VALUES(?,?,?,?,?)',
+        [uuid(), o.quote_id, JSON.stringify({ type: 'order_cancelled', order_id: oid, reason: cancelReason }), u.name, cancelAt]
+      );
+    } catch (_) {}
+  }
+
   // 7. Audit log in order_history
   const historySummary = [
     `Reason: ${cancelReason}`,
@@ -3823,6 +3849,16 @@ app.post('/api/orders/:id/settle', auth, asyncRoute(async (req, res) => {
     );
   }
 
+  // Sync audit item customer_total to active order items total after settlement
+  try {
+    const activeItemsRow = await getAsync(
+      "SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) AS total FROM order_items WHERE order_id = ? AND (line_status != 'cancelled' OR line_status IS NULL)",
+      [oid]
+    );
+    const newActiveCustTotal = parseFloat(activeItemsRow?.total) || 0;
+    await runAsync("UPDATE order_cost_audit_items SET customer_total=? WHERE order_id=?", [newActiveCustTotal, oid]);
+  } catch (_) {}
+
   saveNow();
   const updatedOrder = await getAsync('SELECT * FROM orders WHERE id=?', [oid]);
   res.json(stripSensitive(await assembleOrder(updatedOrder), u, allowedSections));
@@ -4107,6 +4143,58 @@ app.post('/api/orders/:id/items/:itemId/cancel', auth, asyncRoute(async (req, re
       );
     }
   }
+
+  // 2b. Propagate cancellation to Sourcing (enquiry_sourcing) and Enquiry/Quote history
+  if (o.enquiry_id) {
+    try {
+      const enqItems = await allAsync(
+        "SELECT id FROM enquiry_items WHERE enquiry_id=? AND (component=? OR id=? OR id=?)",
+        [o.enquiry_id, item.component, item.split_from_item_id || '', itemId]
+      );
+      const enqItemIds = enqItems.map(ei => ei.id);
+      if (enqItemIds.length > 0) {
+        await runAsync(
+          `UPDATE enquiry_sourcing SET item_status='cancelled',
+             notes=COALESCE(notes,'') || ' [Item cancelled in Order ' || ? || ': ' || ? || ']',
+             updated_by=?, updated_at=?
+           WHERE enquiry_id=? AND enquiry_item_id IN (${enqItemIds.map(()=>'?').join(',')})`,
+          [oid, cancelReason, u.name, cancelAt, o.enquiry_id, ...enqItemIds]
+        );
+      }
+      await runAsync(
+        'INSERT INTO enquiry_history VALUES(?,?,?,?,?)',
+        [uuid(), o.enquiry_id, `Item ${item.component} cancelled in Order ${oid}: ${cancelReason}`, u.name, cancelAt]
+      );
+    } catch (e) {
+      console.error('[item cancel] sourcing sync error:', e);
+    }
+  }
+  if (o.quote_id) {
+    try {
+      await runAsync(
+        'INSERT INTO quote_history VALUES(?,?,?,?,?)',
+        [uuid(), o.quote_id, JSON.stringify({ type: 'item_cancelled', component: item.component, order_id: oid, reason: cancelReason }), u.name, cancelAt]
+      );
+    } catch (_) {}
+  }
+
+  // 2c. If this order already has an Audit Bin record, update its estimate material & customer total
+  try {
+    const audit = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [oid]);
+    if (audit) {
+      if (soItem && soItem.so_id) {
+        const auditItem = await getAsync('SELECT id, est_material, est_total FROM order_cost_audit_items WHERE order_id=? AND supplier_order_id=?', [oid, soItem.so_id]);
+        if (auditItem) {
+          const diff = Math.max(0, (parseFloat(auditItem.est_material) || 0) - newConfirmedPrice);
+          const newEstTotal = Math.max(0, (parseFloat(auditItem.est_total) || 0) - diff);
+          await runAsync(
+            'UPDATE order_cost_audit_items SET est_material=?, est_total=?, customer_total=? WHERE id=?',
+            [newConfirmedPrice, newEstTotal, newActiveOrderTotal, auditItem.id]
+          );
+        }
+      }
+    }
+  } catch (_) {}
 
   // 3. Audit log in order_history
   await runAsync(
@@ -4745,6 +4833,37 @@ initDb().then(async () => {
     if (snlRes && snlRes.rowCount) console.log('[STARTUP] Auto-healed', snlRes.rowCount, 'supplier net logs to released');
   } catch(e) {
     console.warn('[STARTUP] Closed orders payment heal error:', e?.message || e);
+  }
+
+  // Auto-heal paid advance/split supplier orders
+  try {
+    const advPaidRes = await runAsync(`
+      UPDATE supplier_orders
+      SET status='paid', payment_blocked=0
+      WHERE payment_terms_type IN ('advance', 'split')
+        AND status NOT IN ('paid','cancelled','in_transit','received','partially_received')
+        AND id IN (
+          SELECT fq.supplier_order_id FROM finance_queue fq
+          WHERE (fq.status='paid' OR (fq.paid_amount IS NOT NULL AND fq.amount IS NOT NULL AND fq.amount > 0 AND fq.paid_amount >= (fq.amount - 0.01)))
+            AND (fq.release_pending IS NULL OR fq.release_pending=0)
+        )
+    `);
+    if (advPaidRes && advPaidRes.rowCount) console.log('[STARTUP] Auto-healed', advPaidRes.rowCount, 'advance/split supplier_orders to status=paid');
+
+    const advRelRes = await runAsync(`
+      UPDATE supplier_orders
+      SET status='confirmed', payment_blocked=0
+      WHERE payment_terms_type IN ('advance', 'split')
+        AND status IN ('draft', 'pending_payment')
+        AND id IN (
+          SELECT fq.supplier_order_id FROM finance_queue fq
+          WHERE fq.paid_amount IS NOT NULL AND fq.paid_amount > 0
+            AND (fq.release_pending IS NULL OR fq.release_pending=0)
+        )
+    `);
+    if (advRelRes && advRelRes.rowCount) console.log('[STARTUP] Auto-healed', advRelRes.rowCount, 'advance/split supplier_orders to status=confirmed');
+  } catch(e) {
+    console.warn('[STARTUP] Advance supplier_orders auto-heal error:', e?.message || e);
   }
   // Migrations handled by db.js initDb() via pool.query() — no migrate() calls here
   // customer_payments table created by db.js initDb() via pool.query()
@@ -5399,15 +5518,37 @@ async function paidTotalsForOrder(orderId, preloadedOrder = null) {
 
   // ── 1. CUSTOMER PAID ────────────────────────────────────────────────────────
   let customerPaid = 0;
+  let customerPaidGross = 0;
+  let customerRefundTotal = 0;
   try {
     const custRows = await allAsync(
-      "SELECT actual_amount, amount FROM customer_payments WHERE order_id=? AND (status IS NULL OR status NOT IN ('cancelled', 'refunded'))",
+      "SELECT actual_amount, amount, status, notes FROM customer_payments WHERE order_id=?",
       [orderId]
     );
-    customerPaid = (custRows || []).reduce(
-      (s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0),
-      0
+    for (const r of custRows || []) {
+      const val = parseFloat(r.actual_amount) || parseFloat(r.amount) || 0;
+      const isRefund = r.status === 'refunded' || val < 0 || (r.notes && r.notes.toLowerCase().includes('refund'));
+      if (isRefund) {
+        customerRefundTotal += Math.abs(val);
+      } else {
+        customerPaidGross += val;
+      }
+    }
+    customerPaid = customerPaidGross - customerRefundTotal;
+  } catch (_) {}
+
+  // If customer settlement has completed or order items were cancelled, ensure customer paid reflects active order total
+  try {
+    const activeCustRow = await getAsync(
+      `SELECT SUM(qty * unit_price * (1 + COALESCE(tax_rate, 0) / 100)) AS total
+       FROM order_items
+       WHERE order_id = ? AND (line_status != 'cancelled' OR line_status IS NULL)`,
+      [orderId]
     );
+    const activeCustTotal = parseFloat(activeCustRow?.total) || 0;
+    if (order && order.settlement_status === 'settled' && activeCustTotal >= 0 && customerPaid > (activeCustTotal + 0.01)) {
+      customerPaid = activeCustTotal;
+    }
   } catch (_) {}
 
   // If no customer_payments row was recorded, but the order is closed or marked paid,
@@ -5470,6 +5611,18 @@ async function paidTotalsForOrder(orderId, preloadedOrder = null) {
         const fqSum = (fqRows || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
 
         soAmount = advSum + netSum + fqSum;
+
+        // Deduct supplier credit note (e.g. from GRN shortage/rejection)
+        const cn = parseFloat(so.credit_note_amount) || 0;
+        soAmount = Math.max(0, soAmount - cn);
+
+        // If supplier order has been settled, cap at the active payable amount
+        if (so.settlement_status === 'settled') {
+          const maxPayable = (parseFloat(so.confirmed_price) || 0) + (parseFloat(so.supplier_tax_amount) || 0);
+          if (maxPayable > 0 && soAmount > maxPayable) {
+            soAmount = maxPayable;
+          }
+        }
 
         // d) If no per-payment logs were found, check if PO or order is closed/paid/received
         if (soAmount <= 0.001 && (isOrderClosed || so.status === 'paid' || so.status === 'received' || (parseFloat(so.net_total_paid) || 0) > 0)) {
@@ -5558,6 +5711,8 @@ async function paidTotalsForOrder(orderId, preloadedOrder = null) {
 
   return {
     customer_paid_computed: Math.round(customerPaid * 100) / 100,
+    customer_paid_gross: Math.round(customerPaidGross * 100) / 100,
+    customer_refund_total: Math.round(customerRefundTotal * 100) / 100,
     supplier_paid_computed: Math.round(supplierPaid * 100) / 100,
   };
 }
@@ -5571,6 +5726,8 @@ function applyPaidOverrides(audit, computed) {
     customer_paid_total: custOverride !== null && custOverride !== undefined ? parseFloat(custOverride) : computed.customer_paid_computed,
     supplier_paid_total: supOverride !== null && supOverride !== undefined ? parseFloat(supOverride) : computed.supplier_paid_computed,
     customer_paid_computed: computed.customer_paid_computed,
+    customer_paid_gross: computed.customer_paid_gross,
+    customer_refund_total: computed.customer_refund_total,
     supplier_paid_computed: computed.supplier_paid_computed,
     customer_paid_is_override: custOverride !== null && custOverride !== undefined,
     supplier_paid_is_override: supOverride !== null && supOverride !== undefined,
@@ -5598,12 +5755,30 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
   const orderById = {}; orders.forEach(o => { orderById[o.id] = o; });
   const paidByOrder = {};
   for (const oid of orderIds) paidByOrder[oid] = await paidTotalsForOrder(oid, orderById[oid]);
-  res.json(audits.map(a => ({
-    ...a,
-    order: orderById[a.order_id] || null,
-    items: items.filter(i => i.audit_id === a.id),
-    ...applyPaidOverrides(a, paidByOrder[a.order_id] || { customer_paid_computed: 0, supplier_paid_computed: 0 }),
-  })));
+  res.json(audits.map(a => {
+    const aItems = items.filter(i => i.audit_id === a.id);
+    const paidInfo = paidByOrder[a.order_id] || { customer_paid_computed: 0, supplier_paid_computed: 0 };
+    const appliedPaid = applyPaidOverrides(a, paidInfo);
+
+    let estTotal = aItems.reduce((s, i) => s + (Number(i.est_total) || 0), 0);
+    let actTotal = aItems.reduce((s, i) => s + (Number(i.act_total) || 0), 0);
+    // If actual total is 0 in audit items but supplier was paid in Finance:
+    if (actTotal <= 0 && appliedPaid.supplier_paid_total > 0) {
+      actTotal = appliedPaid.supplier_paid_total;
+    }
+
+    return {
+      ...a,
+      order: orderById[a.order_id] || null,
+      items: aItems,
+      est_total: estTotal,
+      act_total: actTotal,
+      audited_count: aItems.filter(i => Number(i.is_audited) === 1).length,
+      total_items_count: aItems.length,
+      is_all_audited: aItems.length > 0 ? (aItems.filter(i => Number(i.is_audited) === 1).length === aItems.length) : (a.status === 'completed'),
+      ...appliedPaid,
+    };
+  }));
 }));
 
 // PUT /api/audit-bin/:id/paid — set (or clear, with null) the manual override
@@ -5651,7 +5826,151 @@ app.post('/api/audit-bin/backfill', auth, asyncRoute(async (req, res) => {
 app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
   const audit = await getAsync('SELECT * FROM order_cost_audits WHERE order_id=?', [req.params.id]);
   if (!audit) return res.status(404).json({ error: 'No audit record for this order' });
-  audit.items = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
+  const auditItems = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [audit.id]);
+  for (const it of auditItems) {
+    let soPaid = 0;
+    if (it.supplier_order_id) {
+      const advLogs = await allAsync("SELECT actual_amount, amount FROM supplier_advance_payment_logs WHERE supplier_order_id=?", [it.supplier_order_id]);
+      const netLogs = await allAsync("SELECT actual_amount, amount FROM supplier_net_payment_logs WHERE supplier_order_id=?", [it.supplier_order_id]);
+      const fqRows = await allAsync(
+        `SELECT actual_amount, paid_amount, amount FROM finance_queue
+         WHERE supplier_order_id = ?
+           AND (status = 'paid' OR (paid_amount IS NOT NULL AND paid_amount > 0))
+           AND NOT EXISTS (SELECT 1 FROM supplier_advance_payment_logs l WHERE l.finance_queue_id = finance_queue.id)`,
+        [it.supplier_order_id]
+      );
+      soPaid = (advLogs || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0), 0)
+             + (netLogs || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.amount) || 0), 0)
+             + (fqRows || []).reduce((s, r) => s + (parseFloat(r.actual_amount) || parseFloat(r.paid_amount) || parseFloat(r.amount) || 0), 0);
+
+      const soRec = await getAsync("SELECT credit_note_amount, settlement_status, confirmed_price, supplier_tax_amount, supplier_subtotal, supplier_tax_rate FROM supplier_orders WHERE id=?", [it.supplier_order_id]);
+      if (soRec) {
+        it.supplier_subtotal = parseFloat(soRec.supplier_subtotal) || 0;
+        it.supplier_tax_rate = parseFloat(soRec.supplier_tax_rate) || 18;
+        it.settlement_status = soRec.settlement_status || 'none';
+        const cn = parseFloat(soRec.credit_note_amount) || 0;
+        soPaid = Math.max(0, soPaid - cn);
+        if (soRec.settlement_status === 'settled') {
+          const maxPayable = (parseFloat(soRec.confirmed_price) || 0) + (parseFloat(soRec.supplier_tax_amount) || 0);
+          if (maxPayable > 0 && soPaid > maxPayable) {
+            soPaid = maxPayable;
+          }
+        }
+      }
+    }
+    it.finance_paid = Math.round(soPaid * 100) / 100;
+    const lines = await allAsync('SELECT * FROM order_cost_audit_item_lines WHERE audit_item_id=?', [it.id]);
+    it.lines = lines || [];
+
+    // Extract Sourcing rates and modes
+    let sm = null;
+    let sr = null;
+    if (lines && lines.length > 0) {
+      try {
+        sm = typeof lines[0].field_modes === 'string' ? JSON.parse(lines[0].field_modes) : lines[0].field_modes;
+      } catch(_) {}
+      sr = {
+        freight: lines[0].freight_raw,
+        insurance: lines[0].insurance_raw,
+        bcd: lines[0].bcd_raw,
+        sws: lines[0].sws_raw,
+        cess: lines[0].cess_raw,
+        bank: lines[0].bank_raw,
+        clearing: lines[0].clearing_raw,
+        margin: lines[0].margin_raw,
+        currency: lines[0].sourced_currency || 'INR',
+      };
+    }
+    try {
+      const enqSrc = await getAsync(
+        `SELECT es.field_modes, es.margin_pct, es.freight_pct, es.insurance_pct, es.duty_pct, es.cess_pct,
+                es.bank_fixed_foreign, es.bank_fixed_inr, es.clearance_fixed_inr, es.margin_inr,
+                es.exchange_rate, es.src_price_foreign, es.sourced_currency, es.sourced_price,
+                es.quote_price, es.quote_currency, es.tax_rate, es.extra_charges
+         FROM enquiry_sourcing es
+         JOIN order_items oi ON (oi.id = es.enquiry_item_id OR oi.split_from_item_id = es.enquiry_item_id)
+         JOIN supplier_order_items soi ON soi.item_id = oi.id
+         WHERE soi.supplier_order_id = ?
+         LIMIT 1`,
+        [it.supplier_order_id]
+      );
+      if (enqSrc) {
+        const esModes = parseJsonSafe(enqSrc.field_modes, {});
+        sm = { ...(sm || {}), ...esModes };
+        sr = sr || {};
+        sr.freight = sr.freight ?? enqSrc.freight_pct;
+        sr.insurance = sr.insurance ?? enqSrc.insurance_pct;
+        sr.bcd = sr.bcd ?? enqSrc.duty_pct;
+        sr.sws = sr.sws ?? enqSrc.cess_pct;
+        sr.cess = sr.cess ?? enqSrc.bank_fixed_foreign;
+        sr.bank = sr.bank ?? enqSrc.bank_fixed_inr;
+        sr.clearing = sr.clearing ?? enqSrc.clearance_fixed_inr;
+        sr.margin = sr.margin ?? enqSrc.margin_pct;
+        sr.currency = sr.currency || enqSrc.sourced_currency || 'INR';
+        sr.exchange_rate = sr.exchange_rate ?? enqSrc.exchange_rate;
+        sr.src_price_foreign = sr.src_price_foreign ?? enqSrc.src_price_foreign;
+        sr.sourced_price = sr.sourced_price ?? enqSrc.sourced_price;
+        sr.quote_price = sr.quote_price ?? enqSrc.quote_price;
+        sr.quote_currency = sr.quote_currency || enqSrc.quote_currency || 'INR';
+        sr.tax_rate = sr.tax_rate ?? enqSrc.tax_rate;
+        if (enqSrc.extra_charges) {
+          try {
+            const parsedExtra = typeof enqSrc.extra_charges === 'string' ? JSON.parse(enqSrc.extra_charges) : enqSrc.extra_charges;
+            if (Array.isArray(parsedExtra) && parsedExtra.length) {
+              it.est_extra_charges_detail = it.est_extra_charges_detail || JSON.stringify(parsedExtra);
+            }
+          } catch (_) {}
+        }
+      }
+    } catch(_) {}
+    it.sourcing_modes = sm || {};
+    it.sourcing_rates = sr || {};
+
+    // If est_margin was stored as the raw rate (e.g. 4) instead of computed % amount (e.g. 13489.92),
+    // correct it so Sourcing Estimate matches the actual Quote / Sourcing margin
+    const marginRate = parseFloat(sr?.margin) || 0;
+    const isMarginPct = (sm?.margin || 'pct') === 'pct';
+    const computedEstMargin = isMarginPct ? Math.round((parseFloat(it.est_material) * marginRate / 100) * 100) / 100 : marginRate;
+    if (computedEstMargin > 0 && Math.abs(parseFloat(it.est_margin) - marginRate) < 0.01 && marginRate !== computedEstMargin) {
+      it.est_margin = computedEstMargin;
+      it.est_total = parseFloat(it.est_material) + computedEstMargin;
+      try {
+        await runAsync("UPDATE order_cost_audit_items SET est_margin=?, est_total=? WHERE id=?", [computedEstMargin, it.est_total, it.id]);
+      } catch(_) {}
+    }
+
+    const baseMat = it.supplier_subtotal > 0
+      ? it.supplier_subtotal
+      : (it.finance_paid > 0 ? it.finance_paid : (parseFloat(it.est_material) || 0));
+    it.suggested_material = baseMat;
+
+    if ((it.act_material === null || it.act_material === undefined || it.act_material === '') && baseMat > 0) {
+      it.act_material = baseMat;
+      const marginAmt = isMarginPct ? Math.round((baseMat * marginRate / 100) * 100) / 100 : marginRate;
+      const autoTotal = Math.round((baseMat + marginAmt) * 100) / 100;
+      it.act_margin = it.act_margin || marginAmt;
+      it.act_total = it.act_total || autoTotal;
+      try {
+        await runAsync(
+          "UPDATE order_cost_audit_items SET act_material=?, act_margin=COALESCE(act_margin, ?), act_total=COALESCE(act_total, ?) WHERE id=? AND (act_material IS NULL OR act_material = 0)",
+          [baseMat, marginAmt, autoTotal, it.id]
+        );
+      } catch(e) {
+        console.error('[AUDIT] Failed auto-populating act_material:', e.message);
+      }
+    }
+  }
+  audit.items = auditItems;
+  const ord = await getAsync(
+    "SELECT id, po_number, customer_id, customer_ref, status, closed_at, customer_payment_status, settlement_status, unsettled_amount FROM orders WHERE id=?",
+    [req.params.id]
+  );
+  if (ord && ord.customer_id) {
+    const cust = await getAsync("SELECT id, name, customer_scope, country FROM customers WHERE id=?", [ord.customer_id]);
+    ord.customer_name = cust?.name;
+    ord.customer_scope = cust?.customer_scope || (cust?.country && cust.country.toLowerCase() !== 'india' ? 'international' : 'domestic');
+  }
+  audit.order = ord;
   const paid = await paidTotalsForOrder(req.params.id);
   Object.assign(audit, applyPaidOverrides(audit, paid));
   res.json(audit);
@@ -5662,10 +5981,7 @@ app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
   const item = await getAsync('SELECT * FROM order_cost_audit_items WHERE id=?', [req.params.id]);
   if (!item) return res.status(404).json({ error: 'Audit item not found' });
 
-  // Simple mode: every field is a plain ₹ amount, manually entered — no
-  // percentage toggles, no chained CIF/import-cost math. The total is just
-  // the sum of whatever was typed in, plus any named Additional Charges.
-  const fields = ['act_material','act_freight','act_insurance','act_bcd','act_sws','act_cess','act_bank','act_clearing','act_margin'];
+  const fields = ['act_material','act_freight','act_insurance','act_transport','act_packaging','act_bcd','act_sws','act_cess','act_bank','act_clearing','act_margin','act_buffer'];
   const vals = fields.map(f => d[f] !== undefined ? (Number(d[f])||0) : (Number(item[f])||0));
 
   const actExtraCharges = Array.isArray(d.act_extra_charges_detail)
@@ -5674,21 +5990,29 @@ app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
   const actExtraChargesTotal = actExtraCharges.reduce((s,c) => s + (Number(c?.amount)||0), 0);
 
   const actTotal = vals.reduce((s,v) => s + (Number(v)||0), 0) + actExtraChargesTotal;
+  const actFieldModes = d.act_field_modes
+    ? (typeof d.act_field_modes === 'string' ? d.act_field_modes : JSON.stringify(d.act_field_modes))
+    : item.act_field_modes;
+
+  try { await runAsync("ALTER TABLE order_cost_audit_items ADD COLUMN is_audited INTEGER DEFAULT 0"); } catch(_) {}
 
   await runAsync(
     `UPDATE order_cost_audit_items SET
-       act_material=?, act_freight=?, act_insurance=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?,
-       act_extra_charges=?, act_extra_charges_detail=?,
-       act_total=?, notes=?, updated_by=?, updated_at=?
+       act_material=?, act_freight=?, act_insurance=?, act_transport=?, act_packaging=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?, act_buffer=?,
+       act_extra_charges=?, act_extra_charges_detail=?, act_field_modes=?,
+       act_total=?, notes=?, updated_by=?, updated_at=?, is_audited=1
      WHERE id=?`,
-    [...vals, actExtraChargesTotal, actExtraCharges.length ? JSON.stringify(actExtraCharges) : null,
+    [...vals, actExtraChargesTotal, actExtraCharges.length ? JSON.stringify(actExtraCharges) : null, actFieldModes,
      actTotal, d.notes ?? item.notes ?? '', req.session.user.name, nowStr(), req.params.id]
   );
 
-  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [item.audit_id]);
-  if (audit && audit.status !== 'submitted') {
-    await runAsync("UPDATE order_cost_audits SET status='submitted', submitted_at=?, submitted_by=? WHERE id=?",
-      [nowStr(), req.session.user.name, audit.id]);
+  const allItems = await allAsync('SELECT is_audited FROM order_cost_audit_items WHERE audit_id=?', [item.audit_id]);
+  const allAudited = allItems.length > 0 && allItems.every(i => Number(i.is_audited) === 1);
+  if (allAudited) {
+    await runAsync("UPDATE order_cost_audits SET status='completed', submitted_at=?, submitted_by=? WHERE id=?",
+      [nowStr(), req.session.user.name, item.audit_id]);
+  } else {
+    await runAsync("UPDATE order_cost_audits SET status='in_progress' WHERE id=?", [item.audit_id]);
   }
 
   saveNow();
@@ -6272,6 +6596,10 @@ app.post('/api/finance/customer-release/:order_id', auth, asyncRoute(async (req,
   if (!o) return res.status(404).json({ error: 'Order not found' });
   const now = nowStr();
   const items = await allAsync("SELECT unit_price, qty, tax_rate FROM order_items WHERE order_id=? AND (line_status != 'cancelled' OR line_status IS NULL)", [req.params.order_id]);
+  const total = (items || []).reduce((s, li) => {
+    const b = (Number(li.qty) || 0) * (Number(li.unit_price) || 0);
+    return s + b + b * ((Number(li.tax_rate) || 0) / 100);
+  }, 0);
   await runAsync("UPDATE customer_payments SET status='paid' WHERE order_id=? AND status='payment_recorded'", [req.params.order_id]);
   const paid = await getAsync(
     "SELECT COALESCE(SUM(amount),0) AS total FROM customer_payments WHERE order_id=? AND status='paid'",
@@ -6490,6 +6818,30 @@ app.get('/api/finance/supplier-queue', auth, asyncRoute(async (req, res) => {
         AND net_total_paid >= (confirmed_price - 0.01)`);
   } catch(e) {
     console.warn('[FINANCE] supplier-queue auto-heal error:', e?.message || e);
+  }
+
+  // Auto-heal in PostgreSQL/SQLite: mark fully paid Advance/Split POs as status='paid', and released advances as status='confirmed'
+  try {
+    await runAsync(`UPDATE supplier_orders
+      SET status='paid', payment_blocked=0
+      WHERE payment_terms_type IN ('advance', 'split')
+        AND status NOT IN ('paid','cancelled','in_transit','received','partially_received')
+        AND id IN (
+          SELECT fq.supplier_order_id FROM finance_queue fq
+          WHERE (fq.status='paid' OR (fq.paid_amount IS NOT NULL AND fq.amount IS NOT NULL AND fq.amount > 0 AND fq.paid_amount >= (fq.amount - 0.01)))
+            AND (fq.release_pending IS NULL OR fq.release_pending=0)
+        )`);
+    await runAsync(`UPDATE supplier_orders
+      SET status='confirmed', payment_blocked=0
+      WHERE payment_terms_type IN ('advance', 'split')
+        AND status IN ('draft', 'pending_payment')
+        AND id IN (
+          SELECT fq.supplier_order_id FROM finance_queue fq
+          WHERE fq.paid_amount IS NOT NULL AND fq.paid_amount > 0
+            AND (fq.release_pending IS NULL OR fq.release_pending=0)
+        )`);
+  } catch(e) {
+    console.warn('[FINANCE] supplier-queue advance auto-heal error:', e?.message || e);
   }
 
   const netRows = await allAsync(`SELECT so.*,
@@ -6867,6 +7219,12 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
   if (wasBlocked) {
     await runAsync("UPDATE supplier_orders SET payment_blocked=0 WHERE id=?", [fq.supplier_order_id]);
   }
+  // When released, update supplier order status if it was in draft/pending_payment or fully paid
+  if (fullBalance <= 0.009) {
+    await runAsync("UPDATE supplier_orders SET status='paid', payment_blocked=0 WHERE id=? AND status NOT IN ('in_transit','received','partially_received','closed','cancelled')", [fq.supplier_order_id]);
+  } else if (['draft', 'pending_payment'].includes(so.status)) {
+    await runAsync("UPDATE supplier_orders SET status='confirmed', payment_blocked=0 WHERE id=?", [fq.supplier_order_id]);
+  }
   try { await runAsync("ALTER TABLE finance_queue ADD COLUMN release_pending INTEGER DEFAULT 0"); } catch(_) {}
   await runAsync('UPDATE finance_queue SET status=?, release_pending=0, paid_at=COALESCE(paid_at, ?), notes=? WHERE id=?',
     [nextQueueStatus, now, fullBalance > 0 ? 'Advance released; balance pending' : 'Payment released and fully paid', fq.id]);
@@ -6884,6 +7242,17 @@ app.post('/api/finance/supplier-release/:fq_id', auth, asyncRoute(async (req, re
   }
   try { await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
     [uuid(), fq.order_id, 'Supplier advance released to Procurement', req.session.user.name, '', now]); } catch(_) {}
+
+  try {
+    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [fq.supplier_order_id]);
+    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) === 0)) {
+      const mat = parseFloat(so.supplier_subtotal) > 0 ? parseFloat(so.supplier_subtotal) : parseFloat(so.confirmed_price);
+      if (mat > 0) {
+        await runAsync("UPDATE order_cost_audit_items SET act_material=?, act_total=COALESCE(act_total, ?) WHERE id=?", [mat, mat, auditItem.id]);
+      }
+    }
+  } catch(_) {}
+
   saveNow();
   res.json({ ok: true, status: nextQueueStatus, balance_due: fullBalance });
 }));
@@ -6898,6 +7267,11 @@ app.put('/api/finance/supplier-net-pay/:so_id', auth, asyncRoute(async (req, res
     if (o && (o.is_on_hold === 1 || o.status === 'hold')) {
       return res.status(400).json({ error: 'Cannot process payment: Linked order is currently on hold.' });
     }
+  }
+
+  const pendingReq = await getAsync("SELECT id FROM po_requests WHERE (supplier_order_id=? OR (order_id=? AND supplier_id=?)) AND status='pending'", [so.id, so.order_id, so.supplier_id]);
+  if (pendingReq) {
+    return res.status(400).json({ error: 'Cannot record settlement: PO details are pending in PO Requests tab. Please fulfill the PO request first.' });
   }
 
   const zohoPo    = (d.zoho_po_number || '').trim();
@@ -7008,6 +7382,17 @@ app.post('/api/finance/supplier-net-release/:so_id', auth, asyncRoute(async (req
     [uuid(), so.order_id,
      fullBalance <= 0 ? 'Supplier net payment released and fully settled' : `Supplier net payment released — ${fullBalance.toFixed(2)} remaining`,
      req.session.user.name, '', now]); } catch(_) {}
+
+  try {
+    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [so.id]);
+    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) === 0)) {
+      const mat = parseFloat(so.supplier_subtotal) > 0 ? parseFloat(so.supplier_subtotal) : parseFloat(so.confirmed_price);
+      if (mat > 0) {
+        await runAsync("UPDATE order_cost_audit_items SET act_material=?, act_total=COALESCE(act_total, ?) WHERE id=?", [mat, mat, auditItem.id]);
+      }
+    }
+  } catch(_) {}
+
   saveNow();
   res.json({ ok: true, status: nextStatus, balance_due: fullBalance });
 }));
@@ -7089,6 +7474,14 @@ app.post('/api/finance/supplier-recover/:so_id', auth, asyncRoute(async (req, re
     await runAsync('INSERT INTO order_history VALUES(?,?,?,?,?,?)',
       [uuid(), so.order_id, 'Supplier Overpayment Recovered', u.name, `Recovered ₹${recoverAmount.toFixed(2)} from supplier PO ${so.internal_po_no || so_id} (Ref: ${ref})`, now]
     );
+  } catch(_) {}
+
+  // Sync settled supplier amount into audit items if present
+  try {
+    const auditItem = await getAsync("SELECT id, act_material FROM order_cost_audit_items WHERE supplier_order_id=?", [so_id]);
+    if (auditItem && (!auditItem.act_material || parseFloat(auditItem.act_material) > (parseFloat(so.confirmed_price) || 0))) {
+      await runAsync("UPDATE order_cost_audit_items SET act_material=? WHERE id=?", [parseFloat(so.confirmed_price) || 0, auditItem.id]);
+    }
   } catch(_) {}
 
   saveNow();

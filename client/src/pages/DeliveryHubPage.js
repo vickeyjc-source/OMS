@@ -995,6 +995,7 @@ export default function DeliveryHubPage() {
   const { data: shippers  = [] }            = useQuery({ queryKey:['shippers'],  queryFn:()=>api.get('/shippers').then(r=>r.data).catch(()=>[]) });
 
   const custName = id => customers.find(c=>c.id===id)?.name || id;
+  const supName  = id => suppliers.find(s=>s.id===id)?.name || id;
 
   // Auto-open order from URL param ?order=<id> (e.g. navigated from Procurement Send to Hub)
   useEffect(() => {
@@ -1179,6 +1180,8 @@ export default function DeliveryHubPage() {
               const rcvd = grnQtyByItem[li.id] || 0;
               if (rcvd >= (li.qty||0)) return false;
               const so = soList.find(s => (s.items||[]).includes(li.id));
+              const isDispatched = so && (so.status === 'in_transit' || so.status === 'received' || so.status === 'partially_received' || so.shipping_status === 'in-transit' || Boolean(so.tracking_no?.trim() && so.shipper_id?.trim()));
+              if (!isDispatched) return false;
               return !(so && so.credit_note_no);
             });
             if (shortItems.length) {
@@ -1189,6 +1192,17 @@ export default function DeliveryHubPage() {
             if (atHubItems.length) {
               return { icon:'📦', label:'Next: Ship Now', color:'var(--teal,#0d9488)', bg:'var(--teal-lt,#f0fdfa)',
                 detail: `Ready to dispatch: ${atHubItems.map(li=>li.component).join(', ')}` };
+            }
+            const unDispatchedItems = allItems.filter(li => {
+              const rcvd = grnQtyByItem[li.id] || 0;
+              if (rcvd >= (li.qty||0)) return false;
+              const so = soList.find(s => (s.items||[]).includes(li.id));
+              const isDispatched = so && (so.status === 'in_transit' || so.status === 'received' || so.status === 'partially_received' || so.shipping_status === 'in-transit' || Boolean(so.tracking_no?.trim() && so.shipper_id?.trim()));
+              return !isDispatched && !(so && so.credit_note_no);
+            });
+            if (unDispatchedItems.length) {
+              return { icon:'⏳', label:'Awaiting Supplier Dispatch', color:'var(--amber,#d97706)', bg:'var(--amber-lt,#fffbeb)',
+                detail: `Awaiting shipment from supplier: ${unDispatchedItems.map(li=>li.component).join(', ')}` };
             }
             if (!hasCustomerShipmentInFlight && soList.length && allItems.every(li=>['shipped','delivered'].includes(li.line_status))) {
               return null; // fully shipped, no open shipment left to confirm — nothing pending on this order
@@ -1343,47 +1357,75 @@ export default function DeliveryHubPage() {
                 {order.delivery_address && (
                   <div style={{gridColumn:'span 2'}}><div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>SHIP TO</div><div style={{fontWeight:600,maxWidth:260,fontSize:11}}>{order.delivery_address}</div></div>
                 )}
-                {(order.supplierOrders||[]).map(so => (
-                  <React.Fragment key={so.id}>
-                    {so.promised_delivery_date && (
-                      <div>
-                        <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
-                          📅 PROMISE DATE{(order.supplierOrders||[]).length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
-                        </div>
-                        <div style={{fontWeight:700,color:'var(--text)'}}>{so.promised_delivery_date}</div>
-                      </div>
-                    )}
-                    <div>
-                      <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
-                        🚚 ACTUAL DELIVERY{(order.supplierOrders||[]).length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
-                      </div>
-                      {editDelivery?.soId===so.id && editDelivery?.field==='actual_delivery_date' ? (
-                        <span style={{display:'inline-flex',alignItems:'center',gap:4}}>
-                          <input type="date" className="input"
-                            style={{height:24,padding:'0 4px',fontSize:11,width:130}}
-                            value={editDelivery.value}
-                            onChange={e=>setEditDelivery(d=>({...d,value:e.target.value}))}
-                            onKeyDown={e=>{if(e.key==='Enter')saveDeliveryDate();if(e.key==='Escape')setEditDelivery(null);}}
-                            autoFocus/>
-                          <button className="btn btn-sm btn-primary" disabled={savingDelivery} onClick={saveDeliveryDate}
-                            style={{fontSize:10,padding:'1px 7px',height:24,fontWeight:700}}>{savingDelivery?'…':'✓'}</button>
-                          <button className="btn btn-sm" onClick={()=>setEditDelivery(null)}
-                            style={{fontSize:10,padding:'1px 5px',height:24}}>✕</button>
-                        </span>
-                      ) : (
-                        <div style={{display:'flex',alignItems:'center',gap:5}}>
-                          <span style={{fontWeight:700,color:so.actual_delivery_date?'var(--green)':'var(--text3)'}}>
-                            {so.actual_delivery_date||'—'}
-                          </span>
-                          <span
-                            onClick={()=>setEditDelivery({soId:so.id,field:'actual_delivery_date',value:so.actual_delivery_date||''})}
-                            style={{cursor:'pointer',fontSize:11,color:'var(--accent)',opacity:.75}}
-                            title="Set actual delivery date">✎</span>
+                {(() => {
+                  const isHubPo = (so) => {
+                    const HUB_PO_STATUSES = ['in_transit', 'partially_received', 'received'];
+                    const HUB_LINE_STATUSES = ['delivered_hub', 'ready_to_ship', 'grn_partial', 'grn_rejected', 'partial_shipped', 'shipped'];
+                    if (HUB_PO_STATUSES.includes(so.status)) return true;
+                    if (so.shipping_status === 'in-transit') return true;
+                    if (Boolean(so.tracking_no?.trim() && so.shipper_id?.trim())) return true;
+                    const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
+                    if (soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status))) return true;
+                    if (soItems.some(li => (grnQtyByItem[li.id]||0) > 0)) return true;
+                    return false;
+                  };
+                  const hubSos = (order.supplierOrders||[]).filter(isHubPo);
+                  const unSentSos = (order.supplierOrders||[]).filter(so => !isHubPo(so));
+
+                  return (
+                    <>
+                      {hubSos.map(so => (
+                        <React.Fragment key={so.id}>
+                          {so.promised_delivery_date && (
+                            <div>
+                              <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
+                                📅 PROMISE DATE{hubSos.length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
+                              </div>
+                              <div style={{fontWeight:700,color:'var(--text)'}}>{so.promised_delivery_date}</div>
+                            </div>
+                          )}
+                          <div>
+                            <div style={{fontSize:10,fontWeight:700,color:'var(--text3)'}}>
+                              🚚 ACTUAL DELIVERY{hubSos.length>1 && <span style={{color:'var(--accent)'}}> ({so.internal_po_no||so.id})</span>}
+                            </div>
+                            {editDelivery?.soId===so.id && editDelivery?.field==='actual_delivery_date' ? (
+                              <span style={{display:'inline-flex',alignItems:'center',gap:4}}>
+                                <input type="date" className="input"
+                                  style={{height:24,padding:'0 4px',fontSize:11,width:130}}
+                                  value={editDelivery.value}
+                                  onChange={e=>setEditDelivery(d=>({...d,value:e.target.value}))}
+                                  onKeyDown={e=>{if(e.key==='Enter')saveDeliveryDate();if(e.key==='Escape')setEditDelivery(null);}}
+                                  autoFocus/>
+                                <button className="btn btn-sm btn-primary" disabled={savingDelivery} onClick={saveDeliveryDate}
+                                  style={{fontSize:10,padding:'1px 7px',height:24,fontWeight:700}}>{savingDelivery?'…':'✓'}</button>
+                                <button className="btn btn-sm" onClick={()=>setEditDelivery(null)}
+                                  style={{fontSize:10,padding:'1px 5px',height:24}}>✕</button>
+                              </span>
+                            ) : (
+                              <div style={{display:'flex',alignItems:'center',gap:5}}>
+                                <span style={{fontWeight:700,color:so.actual_delivery_date?'var(--green)':'var(--text3)'}}>
+                                  {so.actual_delivery_date||'—'}
+                                </span>
+                                <span
+                                  onClick={()=>setEditDelivery({soId:so.id,field:'actual_delivery_date',value:so.actual_delivery_date||''})}
+                                  style={{cursor:'pointer',fontSize:11,color:'var(--accent)',opacity:.75}}
+                                  title="Set actual delivery date">✎</span>
+                              </div>
+                            )}
+                          </div>
+                        </React.Fragment>
+                      ))}
+                      {unSentSos.length > 0 && (
+                        <div>
+                          <div style={{fontSize:10,fontWeight:700,color:'var(--amber,#d97706)'}}>🛒 IN PROCUREMENT</div>
+                          <div style={{fontWeight:600,fontSize:11,color:'var(--amber,#d97706)'}} title={unSentSos.map(s => `${supName(s.supplier_id)} (${s.internal_po_no||s.id})`).join(', ')}>
+                            {unSentSos.length} PO{unSentSos.length>1?'s':''} not dispatched ({unSentSos.map(s=>supName(s.supplier_id)).join(', ')})
+                          </div>
                         </div>
                       )}
-                    </div>
-                  </React.Fragment>
-                ))}
+                    </>
+                  );
+                })()}
               </div>
 
               {/* Shipments list for in-transit orders */}
@@ -1435,16 +1477,16 @@ export default function DeliveryHubPage() {
                 },{});
                 const HUB_PO_STATUSES = ['in_transit', 'partially_received', 'received'];
                 const HUB_LINE_STATUSES = ['delivered_hub', 'ready_to_ship', 'grn_partial', 'grn_rejected', 'partial_shipped', 'shipped'];
-                // An order only ever reaches Delivery Hub once at least one PO/line
-                // is hub-side — but that doesn't mean every PO on it is. A PO that's
-                // still stuck pre-GRN (e.g. never received) must stay visible here
-                // too, since it's exactly the one blocking "Mark Received by
-                // Customer" — hiding it made the blocker invisible in this view.
+                // Only POs that have actually been dispatched / sent to hub or reached hub statuses
+                // are displayed in Delivery Hub. POs still in procurement / un-dispatched must NOT appear here.
                 const visibleSoList = soList.filter(so => {
                   if (HUB_PO_STATUSES.includes(so.status)) return true;
+                  if (so.shipping_status === 'in-transit') return true;
+                  if (Boolean(so.tracking_no?.trim() && so.shipper_id?.trim())) return true;
                   const soItems = (so.items||[]).map(id=>allItems.find(li=>li.id===id)).filter(Boolean);
                   if (soItems.some(li => HUB_LINE_STATUSES.includes(li.line_status))) return true;
-                  return soItems.some(li => (grnQtyByItem[li.id]||0) < (li.qty||0));
+                  if (soItems.some(li => (grnQtyByItem[li.id]||0) > 0)) return true;
+                  return false;
                 });
                 const LINE_ICON = {
                   delivered_hub:   {ic:'📦',l:'At Hub',        c:'var(--teal,#0d9488)'},
@@ -1454,7 +1496,7 @@ export default function DeliveryHubPage() {
                   partial_shipped: {ic:'🔄',l:'Bal. Pending',   c:'var(--purple,#7c3aed)'},
                   shipped:         {ic:'🚚',l:'Shipped Out',    c:'var(--text3)'},
                   procurement:     {ic:'🛒',l:'Procurement',    c:'var(--text3)'},
-                  negotiating:     {ic:'🚚',l:'In Transit',     c:'var(--accent)'},
+                  negotiating:     {ic:'🛒',l:'Procurement',    c:'var(--text3)'},
                   in_transit:      {ic:'🚚',l:'In Transit',     c:'var(--accent)'},
                 };
 
@@ -1476,9 +1518,10 @@ export default function DeliveryHubPage() {
                       const totBalShip  = Math.max(0, totRcvd - totShipped); // received but not yet shipped to customer
                       const supName     = suppliers.find(s=>s.id===so.supplier_id)?.name||'—';
                       const poStatus    = so.status;
-                      const headerBg    = poStatus==='received'?'var(--green-lt)':totPending>0?'#f5f3ff':'var(--surface2)';
-                      const headerBord  = poStatus==='received'?'var(--green)':totPending>0?'#c4b5fd':'var(--border)';
-                      const headerCol   = poStatus==='received'?'var(--green)':totPending>0?'var(--purple,#7c3aed)':'var(--text2)';
+                      const isDispatched = so.status === 'in_transit' || so.status === 'received' || so.status === 'partially_received' || so.shipping_status === 'in-transit' || Boolean(so.tracking_no?.trim() && so.shipper_id?.trim());
+                      const headerBg    = poStatus==='received'?'var(--green-lt)':!isDispatched?'var(--surface2)':totPending>0?'#f5f3ff':'var(--surface2)';
+                      const headerBord  = poStatus==='received'?'var(--green)':!isDispatched?'var(--border)':totPending>0?'#c4b5fd':'var(--border)';
+                      const headerCol   = poStatus==='received'?'var(--green)':!isDispatched?'var(--text3)':totPending>0?'var(--purple,#7c3aed)':'var(--text2)';
                       const sectionKey  = `${order.id}:${so.id}`;
                       const sectionOpen = isHubSectionOpen(sectionKey);
                       return (
@@ -1487,7 +1530,7 @@ export default function DeliveryHubPage() {
                           <div style={{padding:'7px 12px',background:headerBg,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:6}}>
                             <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                               <span style={{fontWeight:700,fontSize:12,color:headerCol}}>
-                                {poStatus==='received'?'✅':'⏳'} {supName}
+                                {poStatus==='received'?'✅':!isDispatched?'⏳':'🚚'} {supName}
                               </span>
                               <span className="mono" style={{fontSize:11,color:'var(--text3)'}}>
                                 {so.internal_po_no||so.id}
@@ -1505,10 +1548,15 @@ export default function DeliveryHubPage() {
                               {so.credit_note_no && <span style={{fontSize:10,padding:'2px 7px',borderRadius:999,background:'var(--amber-lt,#fffbeb)',color:'var(--amber,#92400e)',fontWeight:700,border:'1px solid #f59e0b44'}}>📄 CN {so.credit_note_no}</span>}
                               {/* Per-supplier action buttons */}
                               {(()=>{
-                                const needsGRN = totPending > 0 || soItems.some(li=>['delivered_hub','grn_partial','partial_shipped'].includes(li.line_status));
+                                const needsGRN = isDispatched && (totPending > 0 || soItems.some(li=>['delivered_hub','grn_partial','partial_shipped'].includes(li.line_status)));
                                 const canShip  = totBalShip > 0;
                                 return (
-                                  <div style={{display:'flex',gap:4,marginLeft:4}}>
+                                  <div style={{display:'flex',gap:4,marginLeft:4,alignItems:'center'}}>
+                                    {!isDispatched && totRcvd === 0 && (
+                                      <span style={{fontSize:10,padding:'2px 8px',borderRadius:4,background:'var(--surface2)',color:'var(--text3)',fontWeight:600,border:'1px solid var(--border)'}}>
+                                        ⏳ Awaiting Supplier Dispatch
+                                      </span>
+                                    )}
                                     {needsGRN && (
                                       <button className="btn btn-xs btn-primary"
                                         style={{fontSize:10,padding:'2px 8px'}}
