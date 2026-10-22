@@ -388,21 +388,26 @@ function parseJsonSafe(raw, fallback) {
   try { const p = typeof raw === 'string' ? JSON.parse(raw) : raw; return Array.isArray(p) ? p : fallback; }
   catch(_) { return fallback; }
 }
-async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourcing) {
+async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourcing, targetSupId) {
   if (!li) return null;
+  const supId = targetSupId || li.supplier_id;
   // 1. If split_from_item_id
   if (li.split_from_item_id) {
-    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id);
+    const s = (allEnqSourcing || []).find(r => (r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id) && (!supId || r.supplier_id === supId));
     if (s) return s;
+    const sAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id);
+    if (sAny) return sAny;
     try {
-      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1', [li.split_from_item_id]);
+      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ' + (supId ? 'AND supplier_id=? ' : '') + 'ORDER BY updated_at DESC LIMIT 1', supId ? [li.split_from_item_id, supId] : [li.split_from_item_id]);
       if (dbS) return dbS;
     } catch (_) {}
   }
 
   // 2. Direct match on enquiry_item_id if li.id is an enquiry_item_id
-  const direct = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id);
+  const direct = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id && (!supId || r.supplier_id === supId));
   if (direct) return direct;
+  const directAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id);
+  if (directAny) return directAny;
 
   const compClean = (li.component || '').trim().toLowerCase();
   const mfrClean = (li.manufacturer || '').trim().toLowerCase();
@@ -417,10 +422,12 @@ async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourc
   }
 
   if (matchedEnqItem) {
-    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id);
+    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id && (!supId || r.supplier_id === supId));
     if (s) return s;
+    const sAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id);
+    if (sAny) return sAny;
     try {
-      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY updated_at DESC LIMIT 1', [matchedEnqItem.id]);
+      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ' + (supId ? 'AND supplier_id=? ' : '') + 'ORDER BY updated_at DESC LIMIT 1', supId ? [matchedEnqItem.id, supId] : [matchedEnqItem.id]);
       if (dbS) return dbS;
     } catch (_) {}
   }
@@ -433,9 +440,10 @@ async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourc
          JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
          WHERE (es.enquiry_id=? OR ei.enquiry_id=?)
            AND LOWER(TRIM(ei.component)) = ?
+           ` + (supId ? 'AND es.supplier_id = ? ' : '') + `
          ORDER BY (CASE WHEN LOWER(TRIM(COALESCE(ei.manufacturer,'')))=? THEN 1 ELSE 2 END), es.updated_at DESC
          LIMIT 1`,
-        [enqId, enqId, compClean, mfrClean]
+        supId ? [enqId, enqId, compClean, supId, mfrClean] : [enqId, enqId, compClean, mfrClean]
       );
       if (dbJoin) return dbJoin;
     } catch (_) {}
@@ -456,17 +464,58 @@ async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourc
   }
 
   // 6. Sourcing row where supplier matches and enquiry matches
-  if (enqId && li.supplier_id) {
+  if (enqId && (supId || li.supplier_id)) {
     try {
       const dbSup = await getAsync(
         `SELECT * FROM enquiry_sourcing WHERE enquiry_id=? AND supplier_id=? ORDER BY updated_at DESC LIMIT 1`,
-        [enqId, li.supplier_id]
+        [enqId, supId || li.supplier_id]
       );
       if (dbSup) return dbSup;
     } catch (_) {}
   }
 
   return null;
+}
+
+function computeLandedBreakdown(src, qty, unitPrice, scope) {
+  const q = Number(qty) || 1;
+  const isIntl = scope === 'international';
+  const modesObj = parseJsonSafe(src?.field_modes, {});
+  const m = {
+    freight: 'amt', insurance: 'amt', transport: 'amt', packaging: 'amt',
+    bcd: 'amt', sws: 'amt', cess: 'amt', clearing: 'amt', bank: 'amt', margin: 'pct', buffer: 'amt',
+    ...(isIntl ? { insurance: 'pct', bcd: 'pct', sws: 'pct', cess: 'pct' } : {}),
+    ...modesObj
+  };
+  const unit = Number(unitPrice) || Number(src?.sourced_price) || (Number(src?.src_price_foreign) * Number(src?.exchange_rate)) || 0;
+  const materialValue = unit * q;
+  const raw = v => Number(v || 0);
+  const applyMode = (mode, rawVal, base) => mode === 'pct' ? (base * rawVal / 100) : rawVal;
+
+  const freightINR   = applyMode(m.freight,   raw(src?.freight_pct),   materialValue);
+  const insuranceINR = isIntl ? applyMode(m.insurance, raw(src?.insurance_pct), materialValue) : 0;
+  const transportINR = applyMode(m.transport, raw(src?._transport || src?.transport_raw), materialValue);
+  const packagingINR = applyMode(m.packaging, raw(src?._packaging || src?.packaging_raw), materialValue);
+  const cifValue     = materialValue + freightINR + insuranceINR;
+
+  let bcdAmount = 0, swsAmount = 0, cessAmount = 0, clearingINR = 0;
+  if (isIntl) {
+    bcdAmount   = applyMode(m.bcd,      raw(src?.duty_pct), cifValue);
+    swsAmount   = applyMode(m.sws,      raw(src?.cess_pct), m.sws === 'pct' ? bcdAmount : 1);
+    cessAmount  = applyMode(m.cess,     raw(src?.bank_fixed_foreign ?? (src?.bank_fixed_usd || 0)), cifValue);
+    clearingINR = applyMode(m.clearing, raw(src?.clearance_fixed_inr), cifValue);
+  }
+  const importCost = cifValue + bcdAmount + swsAmount + cessAmount;
+  const bankINR    = applyMode(m.bank, raw(src?.bank_fixed_inr), importCost);
+  const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankINR;
+  const marginAmt  = m.margin === 'pct' ? applyMode(m.margin, raw(src?.margin_pct), landedBeforeMargin) : raw(src?.margin_pct) * q;
+
+  return {
+    unitPrice: unit, materialValue, freightINR, insuranceINR, cifValue,
+    bcdAmount, swsAmount, cessAmount, importCost,
+    clearingINR, bankINR, landedBeforeMargin, marginAmt,
+    modesObj
+  };
 }
 
 async function createCostAudit(orderId) {
@@ -521,9 +570,9 @@ async function createCostAudit(orderId) {
       ? await allAsync('SELECT supplier_order_id, item_id FROM supplier_order_items WHERE supplier_order_id IN (' + soIds.map(()=>'?').join(',') + ')', soIds)
       : [];
 
-    // 1. Backfill lines for any existing audit items that currently have no lines
+    // 1. Backfill lines for any existing audit items that currently have no lines, and re-sync open audits
     for (const ai of existingAuditItems) {
-      const lines = existingLines.filter(l => l.audit_item_id === ai.id);
+      let lines = existingLines.filter(l => l.audit_item_id === ai.id);
       if (lines.length === 0) {
         let matchedItems = [];
         if (ai.supplier_order_id) {
@@ -538,29 +587,96 @@ async function createCostAudit(orderId) {
           matchedItems = orderItems.filter(li => !coveredComps.has((li.component || '').trim().toLowerCase()));
         }
         for (const li of matchedItems) {
-          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
+          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || li.supplier_id);
           const isIntl = src
             ? ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0)
             : (li.currency && li.currency !== 'INR');
           const lineScope = isIntl ? 'international' : 'domestic';
-          const modesObj = parseJsonSafe(src?.field_modes, {});
-          const unitPrice = parseFloat(src?.sourced_price) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0;
-          const cifValue = (Number(ai.est_material)||0) + (Number(ai.est_freight)||0) + (Number(ai.est_insurance)||0);
-          const cessLine = Number(src?.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src?.bank_fixed_usd)||0)/100) : 0)||0;
+          const unitPrice = parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0;
+          const landed = computeLandedBreakdown(src, Number(li.qty)||1, unitPrice, lineScope);
 
+          const newLine = {
+            id: uuid(), audit_item_id: ai.id, component: li.component||'', manufacturer: li.manufacturer||'', qty: Number(li.qty)||1,
+            supplier_id: ai.supplier_id||src?.supplier_id||'', scope: lineScope, unit_price: unitPrice, sourced_currency: src?.sourced_currency||'INR',
+            field_modes: JSON.stringify(landed.modesObj),
+            freight_raw: src?.freight_pct, insurance_raw: src?.insurance_pct, bcd_raw: src?.duty_pct, sws_raw: src?.cess_pct, cess_raw: src?.bank_fixed_foreign ?? src?.bank_fixed_usd, bank_raw: src?.bank_fixed_inr, clearing_raw: src?.clearance_fixed_inr, margin_raw: src?.margin_pct,
+            freight_inr: landed.freightINR, insurance_inr: landed.insuranceINR, bcd_inr: landed.bcdAmount, sws_inr: landed.swsAmount, cess_inr: landed.cessAmount, bank_inr: landed.bankINR, clearing_inr: landed.clearingINR, margin_inr: landed.marginAmt
+          };
           await runAsync(
             `INSERT INTO order_cost_audit_item_lines
                (id, audit_item_id, component, manufacturer, qty, supplier_id, scope, unit_price, sourced_currency, field_modes,
                 freight_raw, insurance_raw, bcd_raw, sws_raw, cess_raw, bank_raw, clearing_raw, margin_raw,
                 freight_inr, insurance_inr, bcd_inr, sws_inr, cess_inr, bank_inr, clearing_inr, margin_inr)
              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [uuid(), ai.id, li.component||'', li.manufacturer||'', Number(li.qty)||1, ai.supplier_id||src?.supplier_id||'', lineScope, unitPrice, src?.sourced_currency||'INR',
-             Object.keys(modesObj).length ? JSON.stringify(modesObj) : null,
-             src?.freight_pct, src?.insurance_pct, src?.duty_pct, src?.cess_pct, src?.bank_fixed_foreign, src?.bank_fixed_inr, src?.clearance_fixed_inr, src?.margin_pct,
-             Number(src?.freight_inr)||0, Number(src?.insurance_inr)||0, Number(src?.duty_inr)||0, Number(src?.cess_inr)||0,
-             cessLine, Number(src?.bank_inr)||0, Number(src?.clearance_inr)||0, Number(src?.margin_inr)||0]
+            [newLine.id, newLine.audit_item_id, newLine.component, newLine.manufacturer, newLine.qty, newLine.supplier_id, newLine.scope, newLine.unit_price, newLine.sourced_currency,
+             newLine.field_modes, newLine.freight_raw, newLine.insurance_raw, newLine.bcd_raw, newLine.sws_raw, newLine.cess_raw, newLine.bank_raw, newLine.clearing_raw, newLine.margin_raw,
+             newLine.freight_inr, newLine.insurance_inr, newLine.bcd_inr, newLine.sws_inr, newLine.cess_inr, newLine.bank_inr, newLine.clearing_inr, newLine.margin_inr]
           );
-          existingLines.push({ audit_item_id: ai.id, component: li.component, manufacturer: li.manufacturer });
+          existingLines.push(newLine);
+          lines.push(newLine);
+        }
+      } else if (!audit.closed_at) {
+        // Prune any lines for cancelled order items
+        const activeComps = new Set(orderItems.map(x => (x.component || '').trim().toLowerCase()));
+        const remainingLines = [];
+        for (const l of lines) {
+          if (!activeComps.has((l.component || '').trim().toLowerCase())) {
+            await runAsync('DELETE FROM audit_document_lines WHERE audit_item_line_id=?', [l.id]);
+            await runAsync('DELETE FROM order_cost_audit_item_lines WHERE id=?', [l.id]);
+          } else {
+            remainingLines.push(l);
+          }
+        }
+        lines = remainingLines;
+        if (lines.length === 0) {
+          await runAsync('DELETE FROM order_cost_audit_items WHERE id=?', [ai.id]);
+          continue;
+        }
+
+        // Re-sync existing open audit lines with accurate landed cost breakdown from Sourcing
+        let totMat = 0, totFrt = 0, totIns = 0, totBcd = 0, totSws = 0, totCess = 0, totBank = 0, totClr = 0, totMar = 0;
+        for (const l of lines) {
+          const li = orderItems.find(x => (x.component || '').trim().toLowerCase() === (l.component || '').trim().toLowerCase()) || { component: l.component, manufacturer: l.manufacturer, qty: l.qty };
+          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || l.supplier_id);
+          if (src) {
+            const isIntl = ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0);
+            const lineScope = isIntl ? 'international' : 'domestic';
+            const unitPrice = parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(l.unit_price) || 0;
+            const landed = computeLandedBreakdown(src, Number(l.qty)||1, unitPrice, lineScope);
+            await runAsync(
+              `UPDATE order_cost_audit_item_lines SET
+                 scope=?, field_modes=?, freight_raw=?, insurance_raw=?, bcd_raw=?, sws_raw=?, cess_raw=?, bank_raw=?, clearing_raw=?, margin_raw=?,
+                 freight_inr=?, insurance_inr=?, bcd_inr=?, sws_inr=?, cess_inr=?, bank_inr=?, clearing_inr=?, margin_inr=?, unit_price=?
+               WHERE id=?`,
+              [lineScope, JSON.stringify(landed.modesObj), src.freight_pct, src.insurance_pct, src.duty_pct, src.cess_pct, src.bank_fixed_foreign ?? src.bank_fixed_usd, src.bank_fixed_inr, src.clearance_fixed_inr, src.margin_pct,
+               landed.freightINR, landed.insuranceINR, landed.bcdAmount, landed.swsAmount, landed.cessAmount, landed.bankINR, landed.clearingINR, landed.marginAmt, unitPrice, l.id]
+            );
+            l.scope = lineScope;
+            l.freight_inr = landed.freightINR; l.insurance_inr = landed.insuranceINR; l.bcd_inr = landed.bcdAmount; l.sws_inr = landed.swsAmount;
+            l.cess_inr = landed.cessAmount; l.bank_inr = landed.bankINR; l.clearing_inr = landed.clearingINR; l.margin_inr = landed.marginAmt;
+            l.field_modes = JSON.stringify(landed.modesObj); l.unit_price = unitPrice;
+            totMat += landed.materialValue;
+            totFrt += landed.freightINR; totIns += landed.insuranceINR; totBcd += landed.bcdAmount; totSws += landed.swsAmount;
+            totCess += landed.cessAmount; totBank += landed.bankINR; totClr += landed.clearingINR; totMar += landed.marginAmt;
+          } else {
+            totMat += (Number(l.unit_price) || 0) * (Number(l.qty) || 1);
+            totFrt += Number(l.freight_inr) || 0; totIns += Number(l.insurance_inr) || 0; totBcd += Number(l.bcd_inr) || 0; totSws += Number(l.sws_inr) || 0;
+            totCess += Number(l.cess_inr) || 0; totBank += Number(l.bank_inr) || 0; totClr += Number(l.clearing_inr) || 0; totMar += Number(l.margin_inr) || 0;
+          }
+        }
+        if (lines.length > 0) {
+          const custTot = lines.reduce((s, l) => {
+            const oi = orderItems.find(x => (x.component || '').trim().toLowerCase() === (l.component || '').trim().toLowerCase());
+            const b = (Number(oi?.qty)||1) * (Number(oi?.unit_price)||0);
+            return s + b + (b * (Number(oi?.tax_rate)||0)/100);
+          }, 0);
+          const estTot = totMat + totFrt + totIns + totBcd + totSws + totCess + totBank + totClr + totMar + (Number(ai.est_extra_charges)||0) + (Number(ai.est_finance_charges)||0);
+          await runAsync(
+            `UPDATE order_cost_audit_items SET
+               customer_total=?, est_material=?, est_freight=?, est_insurance=?, est_bcd=?, est_sws=?, est_cess=?, est_bank=?, est_clearing=?, est_margin=?, est_total=?
+             WHERE id=?`,
+            [custTot, totMat, totFrt, totIns, totBcd, totSws, totCess, totBank, totClr, totMar, Math.round(estTot*100)/100, ai.id]
+          );
         }
       }
     }
@@ -658,40 +774,32 @@ async function createCostAudit(orderId) {
         const lineScope = isIntl ? 'international' : 'domestic';
         if (isIntl) scope = 'international';
 
-        if (src) {
-          totals.freight   += Number(src.freight_inr) || 0;
-          totals.insurance += Number(src.insurance_inr) || 0;
-          totals.bcd       += Number(src.duty_inr) || 0;
-          totals.sws       += Number(src.cess_inr) || 0;
-          totals.bank      += Number(src.bank_inr) || 0;
-          totals.clearing  += Number(src.clearance_inr) || 0;
-          totals.margin    += Number(src.margin_inr) || 0;
-          const srcExtra = parseJsonSafe(src.extra_charges, []);
-          if (Array.isArray(srcExtra)) estExtraChargesDetail.push(...srcExtra);
-        }
-
         const unitMat = materialPerUnit > 0
           ? materialPerUnit
           : (parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(li.procurement_price) || parseFloat(li.unit_price) || 0);
+
+        const landed = computeLandedBreakdown(src, Number(li.qty)||0, unitMat, lineScope);
+
+        totals.freight   += landed.freightINR;
+        totals.insurance += landed.insuranceINR;
+        totals.bcd       += landed.bcdAmount;
+        totals.sws       += landed.swsAmount;
+        totals.cess      += landed.cessAmount;
+        totals.bank      += landed.bankINR;
+        totals.clearing  += landed.clearingINR;
+        totals.margin    += landed.marginAmt;
+        const srcExtra = parseJsonSafe(src?.extra_charges, []);
+        if (Array.isArray(srcExtra)) estExtraChargesDetail.push(...srcExtra);
 
         lineSnapshots.push({
           li, src, scope: lineScope,
           qty: Number(li.qty)||0,
           unit_price: unitMat,
+          landed,
         });
       }
 
       const estExtraChargesTotal = estExtraChargesDetail.reduce((s,c) => s + (Number(c?.amount)||0), 0);
-      const cifValue = totals.material + totals.freight + totals.insurance;
-      let cessTotal = 0;
-      for (const li of items) {
-        const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing);
-        if (!src) continue;
-        const modesObj = parseJsonSafe(src.field_modes, {});
-        const cessRaw = Number(src.bank_fixed_usd) || 0;
-        cessTotal += modesObj.cess === 'pct' ? (cifValue * cessRaw / 100) : cessRaw;
-      }
-      totals.cess = cessTotal;
 
       let financeChargesTotal = 0;
       let financeCharges = [];
@@ -730,13 +838,11 @@ async function createCostAudit(orderId) {
         [auditItemId, auditId, orderId, so ? so.id : '', effectiveSupplierId, supplierName, scope, customerTotal,
          totals.material, totals.freight, totals.insurance, totals.bcd, totals.sws, totals.cess, totals.bank, totals.clearing, totals.margin,
          estExtraChargesTotal, estExtraChargesDetail.length ? JSON.stringify(estExtraChargesDetail) : null,
-         financeChargesTotal, financeCharges.length ? JSON.stringify(financeCharges) : null, estTotal]
+         financeChargesTotal, financeCharges.length ? JSON.stringify(financeCharges) : null, Math.round(estTotal * 100) / 100]
       );
 
       for (const snap of lineSnapshots) {
-        const { li, src, scope: lineScope, qty, unit_price } = snap;
-        const modesObj = parseJsonSafe(src?.field_modes, {});
-        const cessLine = Number(src?.bank_fixed_usd && modesObj.cess==='pct' ? (cifValue*(Number(src?.bank_fixed_usd)||0)/100) : 0)||0;
+        const { li, src, scope: lineScope, qty, unit_price, landed } = snap;
         await runAsync(
           `INSERT INTO order_cost_audit_item_lines
              (id, audit_item_id, component, manufacturer, qty, supplier_id, scope, unit_price, sourced_currency, field_modes,
@@ -744,10 +850,9 @@ async function createCostAudit(orderId) {
               freight_inr, insurance_inr, bcd_inr, sws_inr, cess_inr, bank_inr, clearing_inr, margin_inr)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [uuid(), auditItemId, li.component||'', li.manufacturer||'', qty, effectiveSupplierId||src?.supplier_id||'', lineScope, unit_price, src?.sourced_currency||'INR',
-           Object.keys(modesObj).length ? JSON.stringify(modesObj) : null,
-           src?.freight_pct, src?.insurance_pct, src?.duty_pct, src?.cess_pct, src?.bank_fixed_foreign, src?.bank_fixed_inr, src?.clearance_fixed_inr, src?.margin_pct,
-           Number(src?.freight_inr)||0, Number(src?.insurance_inr)||0, Number(src?.duty_inr)||0, Number(src?.cess_inr)||0,
-           cessLine, Number(src?.bank_inr)||0, Number(src?.clearance_inr)||0, Number(src?.margin_inr)||0]
+           JSON.stringify(landed.modesObj),
+           src?.freight_pct, src?.insurance_pct, src?.duty_pct, src?.cess_pct, src?.bank_fixed_foreign ?? src?.bank_fixed_usd, src?.bank_fixed_inr, src?.clearance_fixed_inr, src?.margin_pct,
+           landed.freightINR, landed.insuranceINR, landed.bcdAmount, landed.swsAmount, landed.cessAmount, landed.bankINR, landed.clearingINR, landed.marginAmt]
         );
       }
     }
@@ -4386,20 +4491,7 @@ app.post('/api/orders/:id/items/:itemId/cancel', auth, asyncRoute(async (req, re
 
   // 2c. If this order already has an Audit Bin record, update its estimate material & customer total
   try {
-    const audit = await getAsync('SELECT id FROM order_cost_audits WHERE order_id=?', [oid]);
-    if (audit) {
-      if (soItem && soItem.so_id) {
-        const auditItem = await getAsync('SELECT id, est_material, est_total FROM order_cost_audit_items WHERE order_id=? AND supplier_order_id=?', [oid, soItem.so_id]);
-        if (auditItem) {
-          const diff = Math.max(0, (parseFloat(auditItem.est_material) || 0) - newConfirmedPrice);
-          const newEstTotal = Math.max(0, (parseFloat(auditItem.est_total) || 0) - diff);
-          await runAsync(
-            'UPDATE order_cost_audit_items SET est_material=?, est_total=?, customer_total=? WHERE id=?',
-            [newConfirmedPrice, newEstTotal, newActiveOrderTotal, auditItem.id]
-          );
-        }
-      }
-    }
+    await createCostAudit(oid);
   } catch (_) {}
 
   // 3. Audit log in order_history
@@ -4465,7 +4557,7 @@ const DELETABLE_MODULES = {
   approvals: { label:'All Approvals',     tables:['approval_actions','approval_requests','approval_workflows'] },
   finance:   { label:'All Finance Data',  tables:['customer_payments','supplier_net_payment_logs','finance_queue','po_requests'] },
   inventory: { label:'All Inventory',     tables:['stock_inventory'] },
-  audit:     { label:'All Audit Bin Data', tables:['order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits'] },
+  audit:     { label:'All Audit Bin Data', tables:['audit_history','audit_document_lines','audit_documents','order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits'] },
 };
 
 // Modules surfaced in the Recycle Bin grid. "users" is handled by per-record
@@ -4593,6 +4685,7 @@ app.delete('/api/admin/delete-all', adminOnly, asyncRoute(async (req, res) => {
   if (req.session?.user?.role !== 'admin') return res.status(403).json({ error:'Only admin role can do this' });
   if (req.body?.confirm_text !== 'DELETE ALL DATA') return res.status(400).json({ error:'Confirmation text mismatch' });
   const tables = ['shipment_items','shipments','grn_records',
+    'audit_history','audit_document_lines','audit_documents',
     'order_cost_audit_item_lines','order_cost_audit_items','order_cost_audits',
     'order_history','order_documents','customer_shipping','supplier_order_items',
     'supplier_orders','order_items','orders','enquiry_merges','enquiry_history','enquiry_sourcing',
@@ -4938,6 +5031,35 @@ startListening(PORT, MAX_PORT_TRIES);
 // THEN CONNECT TO DB
 initDb().then(async () => {
   console.log('[STARTUP] DB ready — registering routes...');
+  // Audit Bin v2 — BOE / local-invoice actuals, review & submit, history (idempotent)
+  try {
+    await runAsync(`CREATE TABLE IF NOT EXISTS audit_documents (
+      id TEXT PRIMARY KEY, audit_id TEXT NOT NULL, order_id TEXT, doc_type TEXT NOT NULL,
+      supplier_id TEXT, supplier_name TEXT, doc_no TEXT DEFAULT '', doc_date TEXT DEFAULT '', file_id TEXT,
+      act_json TEXT, ex_json TEXT,
+      est_total DOUBLE PRECISION DEFAULT 0, act_total DOUBLE PRECISION DEFAULT 0, confirmed_heads INTEGER DEFAULT 0, total_heads INTEGER DEFAULT 0,
+      created_by TEXT, created_by_name TEXT, created_at TEXT, updated_by TEXT, updated_by_name TEXT, updated_at TEXT)`);
+    await runAsync(`CREATE TABLE IF NOT EXISTS audit_document_lines (
+      id TEXT PRIMARY KEY, document_id TEXT NOT NULL, audit_id TEXT, audit_item_line_id TEXT NOT NULL,
+      est_total DOUBLE PRECISION DEFAULT 0, act_total DOUBLE PRECISION DEFAULT 0)`);
+    await runAsync(`CREATE TABLE IF NOT EXISTS audit_history (
+      id TEXT PRIMARY KEY, audit_id TEXT NOT NULL, order_id TEXT, at TEXT, by_id TEXT, by_name TEXT, by_email TEXT, action TEXT, details TEXT)`);
+    await runAsync('CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_doc_line ON audit_document_lines(audit_item_line_id)');
+    await runAsync('CREATE INDEX IF NOT EXISTS ix_audit_docs_audit ON audit_documents(audit_id)');
+    await runAsync('CREATE INDEX IF NOT EXISTS ix_audit_hist_audit ON audit_history(audit_id)');
+    for (const col of ['closed_at TEXT','closed_by TEXT','closed_by_name TEXT','closed_by_email TEXT','review_remarks TEXT',
+        'final_revenue_ex_gst DOUBLE PRECISION','final_revenue_incl_gst DOUBLE PRECISION','final_est_cost DOUBLE PRECISION',
+        'final_act_cost DOUBLE PRECISION','final_est_profit DOUBLE PRECISION','final_net_profit DOUBLE PRECISION','reopen_count INTEGER DEFAULT 0',
+        'order_currency TEXT','fx_rate_to_inr DOUBLE PRECISION','fx_rate_source TEXT']) {
+      await runAsync(`ALTER TABLE order_cost_audits ADD COLUMN IF NOT EXISTS ${col}`);
+    }
+    await runAsync('ALTER TABLE audit_history ADD COLUMN IF NOT EXISTS by_email TEXT').catch(() => {});
+    // first-time history line for audits that already exist
+    const haveHist = new Set((await allAsync('SELECT DISTINCT audit_id FROM audit_history')).map(r => r.audit_id));
+    const noHist = (await allAsync('SELECT id, order_id, created_at FROM order_cost_audits')).filter(a => !haveHist.has(a.id));
+    for (const a of noHist) await runAsync('INSERT INTO audit_history (id,audit_id,order_id,at,by_id,by_name,by_email,action,details) VALUES (?,?,?,?,?,?,?,?,?)',
+      [uuid(), a.id, a.order_id, a.created_at || nowFull(), '', 'System', '', 'created this audit — Sourcing estimate frozen', '[]']);
+  } catch (e) { console.error('[STARTUP] audit v2 schema:', e.message); }
   // Backfill: mark enquiries as closed if their linked order is closed
   try {
     const r = await runAsync(`UPDATE enquiries SET status='closed', updated_at=NOW() WHERE id IN (SELECT enquiry_id FROM orders WHERE status='closed' AND enquiry_id IS NOT NULL) AND status != 'closed'`);
@@ -5963,9 +6085,9 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
     const incompleteAudits = await allAsync(
       `SELECT a.order_id FROM order_cost_audits a
        JOIN orders o ON o.id = a.order_id
-       WHERE (
+       WHERE (o.status != 'cancelled' OR o.status IS NULL) AND (
          SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id AND (oi.line_status != 'cancelled' OR oi.line_status IS NULL)
-       ) > (
+       ) != (
          SELECT COUNT(DISTINCT l.component) FROM order_cost_audit_item_lines l JOIN order_cost_audit_items ai ON ai.id = l.audit_item_id WHERE ai.audit_id = a.id
        )`
     );
@@ -5979,14 +6101,33 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
   const allowedSections = await getAllowedSections(u);
   const canSeeAll = perms.canSeeAll || hasAllowedSection(u, allowedSections, ['audit-bin', ...ORDER_FULL_ACCESS_SECTIONS]);
   const audits = canSeeAll
-    ? await allAsync('SELECT * FROM order_cost_audits ORDER BY created_at DESC')
+    ? await allAsync(`
+        SELECT a.*, COALESCE(NULLIF(a.closed_by_email, ''), u2.email, '') as closed_by_email 
+        FROM order_cost_audits a 
+        JOIN orders o ON o.id=a.order_id 
+        LEFT JOIN users u2 ON (u2.id = a.closed_by OR u2.name = a.closed_by_name)
+        WHERE (o.status != 'cancelled' OR o.status IS NULL) 
+        ORDER BY a.created_at DESC`)
     : await allAsync(
-        `SELECT a.* FROM order_cost_audits a JOIN orders o ON o.id=a.order_id
-         WHERE o.created_by=? ORDER BY a.created_at DESC`, [u.id]);
+        `SELECT a.*, COALESCE(NULLIF(a.closed_by_email, ''), u2.email, '') as closed_by_email 
+         FROM order_cost_audits a 
+         JOIN orders o ON o.id=a.order_id
+         LEFT JOIN users u2 ON (u2.id = a.closed_by OR u2.name = a.closed_by_name)
+         WHERE o.created_by=? AND (o.status != 'cancelled' OR o.status IS NULL) 
+         ORDER BY a.created_at DESC`, [u.id]);
   const auditIds = audits.map(a => a.id);
   const items = auditIds.length
     ? await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id IN (' + auditIds.map(()=>'?').join(',') + ')', auditIds)
     : [];
+  for (const it of items) {
+    const estSum = (Number(it.est_material)||0) + (Number(it.est_freight)||0) + (Number(it.est_insurance)||0)
+      + (Number(it.est_bcd)||0) + (Number(it.est_sws)||0) + (Number(it.est_cess)||0)
+      + (Number(it.est_bank)||0) + (Number(it.est_clearing)||0) + (Number(it.est_margin)||0)
+      + (Number(it.est_extra_charges)||0) + (Number(it.est_finance_charges)||0);
+    if (estSum > 0) {
+      it.est_total = Math.round(estSum * 100) / 100;
+    }
+  }
   const orderIds = [...new Set(audits.map(a => a.order_id))];
   const orders = orderIds.length
     ? await allAsync('SELECT id, po_number, customer_id, customer_ref, status, closed_at, customer_payment_status FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
@@ -6201,10 +6342,24 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
     const computedEstMargin = isMarginPct ? Math.round((parseFloat(it.est_material) * marginRate / 100) * 100) / 100 : marginRate;
     if (computedEstMargin > 0 && Math.abs(parseFloat(it.est_margin) - marginRate) < 0.01 && marginRate !== computedEstMargin) {
       it.est_margin = computedEstMargin;
-      it.est_total = parseFloat(it.est_material) + computedEstMargin;
       try {
-        await runAsync("UPDATE order_cost_audit_items SET est_margin=?, est_total=? WHERE id=?", [computedEstMargin, it.est_total, it.id]);
+        await runAsync("UPDATE order_cost_audit_items SET est_margin=? WHERE id=?", [computedEstMargin, it.id]);
       } catch(_) {}
+    }
+
+    // Stable, consistent est_total: sum of all estimate components (never wiped out)
+    const estSum = (Number(it.est_material)||0) + (Number(it.est_freight)||0) + (Number(it.est_insurance)||0)
+      + (Number(it.est_bcd)||0) + (Number(it.est_sws)||0) + (Number(it.est_cess)||0)
+      + (Number(it.est_bank)||0) + (Number(it.est_clearing)||0) + (Number(it.est_margin)||0)
+      + (Number(it.est_extra_charges)||0) + (Number(it.est_finance_charges)||0);
+    if (estSum > 0) {
+      const roundedEst = Math.round(estSum * 100) / 100;
+      if (Math.abs((Number(it.est_total) || 0) - roundedEst) > 0.01) {
+        try {
+          await runAsync("UPDATE order_cost_audit_items SET est_total=? WHERE id=?", [roundedEst, it.id]);
+        } catch(_) {}
+      }
+      it.est_total = roundedEst;
     }
 
     const baseMat = it.supplier_subtotal > 0
@@ -6277,6 +6432,421 @@ app.put('/api/audit-items/:id', auth, asyncRoute(async (req, res) => {
   const updated = await getAsync('SELECT * FROM order_cost_audit_items WHERE id=?', [req.params.id]);
   res.json({ ok: true, item: updated });
 }));
+
+// ── AUDIT BIN v2 — BOE / local-invoice actuals, review & submit, history ─────
+// An order's audit (order_cost_audits) already holds a frozen Sourcing estimate per
+// supplier PO (…_items) and per MPN (…_item_lines). This block adds the ACTUAL side:
+//   audit_documents       one row per BOE (imported MPNs) or local invoice (local MPNs)
+//   audit_document_lines  which MPNs each document covers (one MPN → one document)
+//   audit_history         immutable who/what/when trail (written only by the server)
+// All totals are recomputed server-side from the entries — the client never sends totals.
+const AUDIT_HEADS = {
+  boe:   { LH: ['mat','bcd','sws','cess'], SH: ['frt','ins','clr','bank'] },
+  local: { LH: ['mat'],                    SH: ['frt','bank'] },
+};
+const AUDIT_ALL_LH = ['mat','bcd','sws','cess'];
+const AUDIT_ALL_SH = ['frt','ins','clr','bank'];
+const AUDIT_LBL = { mat:'Material', bcd:'BCD', sws:'SWS', cess:'CESS', frt:'Freight', ins:'Insurance', clr:'Clearing', bank:'Bank charges' };
+const AUDIT_VAR_LIMIT_PCT = 5;           // remarks are mandatory beyond ±5% cost variance (or profit below plan)
+const aNum  = v => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
+const aSum  = arr => arr.reduce((s, x) => s + x, 0);
+const aInr  = n => (n < 0 ? '-' : '') + '₹' + Math.abs(Math.round(n)).toLocaleString('en-IN');
+const aSgn  = n => (Math.abs(n) < 0.5 ? '₹0' : (n > 0 ? '+' : '-') + '₹' + Math.abs(Math.round(n)).toLocaleString('en-IN'));
+function aObj(raw) { if (!raw) return {}; try { const p = typeof raw === 'string' ? JSON.parse(raw) : raw; return p && typeof p === 'object' && !Array.isArray(p) ? p : {}; } catch (_) { return {}; } }
+const aDocTypeFor = scope => scope === 'international' ? 'boe' : 'local';
+
+function auditLineEst(l) {
+  return { mat: aNum(l.unit_price) * aNum(l.qty), bcd: aNum(l.bcd_inr), sws: aNum(l.sws_inr), cess: aNum(l.cess_inr),
+           frt: aNum(l.freight_inr), ins: aNum(l.insurance_inr), clr: aNum(l.clearing_inr), bank: aNum(l.bank_inr) };
+}
+const auditLineEstTotal = l => aSum(Object.values(auditLineEst(l)));
+
+// Per-document numbers. Heads that do not apply to the document type stay at their estimate on both sides.
+function auditComputeDoc(doc, docLineRows, lineById) {
+  const type = doc.doc_type, H = AUDIT_HEADS[type] || AUDIT_HEADS.local;
+  const act = aObj(doc.act_json), ex = parseJsonSafe(doc.ex_json, []);
+  const L = docLineRows.map(r => lineById[r.audit_item_line_id]).filter(Boolean);
+  const est = L.map(auditLineEst);
+  const cif = est.map(e => e.mat + e.frt + e.ins), cifTot = aSum(cif);
+  const cifSh = i => cifTot ? cif[i] / cifTot : (L.length ? 1 / L.length : 0);
+  const shEstTot = h => aSum(est.map(e => e[h]));
+  const shr = (h, i) => { const t = shEstTot(h); return t ? est[i][h] / t : cifSh(i); };
+  const exEst = aSum(ex.filter(r => !r.added).map(r => aNum(r.est)));
+  const exAct = aSum(ex.map(r => (r.a !== null && r.a !== undefined) ? aNum(r.a) : aNum(r.est)));
+  const keysLH = []; L.forEach(l => H.LH.forEach(h => keysLH.push(l.id + ':' + h)));
+  const keys = [...keysLH, ...H.SH];
+  const estRows = ex.filter(r => !r.added);
+  const confirmed = keys.filter(k => k in act).length + estRows.filter(r => r.a !== null && r.a !== undefined).length;
+  const total = keys.length + estRows.length;
+  const perLine = L.map((l, i) => {
+    const heads = {}; let le = 0;
+    AUDIT_ALL_LH.forEach(h => { const e = est[i][h]; le += e; heads[h] = H.LH.includes(h) && (l.id + ':' + h) in act ? aNum(act[l.id + ':' + h]) : e; });
+    AUDIT_ALL_SH.forEach(h => { const e = est[i][h]; le += e; heads[h] = H.SH.includes(h) && h in act ? aNum(act[h]) * shr(h, i) : e; });
+    // a shared head that is still "assumed" stays at this line's own estimate
+    heads.ext = exAct * cifSh(i);
+    le += exEst * cifSh(i);
+    return { line: l, le, la: aSum(Object.values(heads)), heads, cifSh: cifSh(i) };
+  });
+  return { type, L, perLine, keys, confirmed, total, exEst, exAct,
+           le: aSum(perLine.map(p => p.le)), la: aSum(perLine.map(p => p.la)) };
+}
+
+async function auditCompute(auditId) {
+  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [auditId]);
+  if (!audit) return null;
+  const items = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [auditId]);
+  const itemIds = items.map(i => i.id);
+  const lines = itemIds.length
+    ? await allAsync(`SELECT * FROM order_cost_audit_item_lines WHERE audit_item_id IN (${itemIds.map(() => '?').join(',')}) ORDER BY component, id`, itemIds) : [];
+  const docs = await allAsync('SELECT * FROM audit_documents WHERE audit_id=? ORDER BY created_at, id', [auditId]);
+  const docIds = docs.map(d => d.id);
+  const dls = docIds.length
+    ? await allAsync(`SELECT * FROM audit_document_lines WHERE document_id IN (${docIds.map(() => '?').join(',')})`, docIds) : [];
+  const itemById = {}; items.forEach(i => { itemById[i.id] = i; });
+  const lineById = {}; lines.forEach(l => { lineById[l.id] = l; });
+  const docOfLine = {}; dls.forEach(r => { docOfLine[r.audit_item_line_id] = r.document_id; });
+  const calc = {}; docs.forEach(d => { calc[d.id] = auditComputeDoc(d, dls.filter(r => r.document_id === d.id), lineById); });
+
+  // Item-level extras and Finance charges (read-only, counted on both sides)
+  const itemInfo = {};
+  items.forEach(it => {
+    const detail = parseJsonSafe(it.est_extra_charges_detail, []).map((c, idx) => ({ n: c?.name || c?.label || 'Charge', est: aNum(c?.amount), src_idx: idx }));
+    const estExtras = detail.length ? aSum(detail.map(c => c.est)) : aNum(it.est_extra_charges);
+    const carrier = docs.find(d => parseJsonSafe(d.ex_json, []).some(r => !r.added && r.src_item === it.id));
+    const finDetail = parseJsonSafe(it.est_finance_charges_detail, []);
+    itemInfo[it.id] = { detail, estExtras, carriedBy: carrier ? carrier.id : null, fin: aNum(it.est_finance_charges), finDetail };
+  });
+
+  let EC = 0, AC = 0;
+  lines.forEach(l => { if (!docOfLine[l.id]) { const t = auditLineEstTotal(l); EC += t; AC += t; } });
+  docs.forEach(d => { EC += calc[d.id].le; AC += calc[d.id].la; });
+  items.forEach(it => { const i = itemInfo[it.id]; if (!i.carriedBy) { EC += i.estExtras; AC += i.estExtras; } EC += i.fin; AC += i.fin; });
+
+  const items2 = await allAsync("SELECT qty, unit_price, tax_rate, currency FROM order_items WHERE order_id=? AND (line_status IS NULL OR line_status <> 'cancelled')", [audit.order_id]);
+  // Order currency: the customer is billed in the lines' currency; every cost in the audit is INR.
+  const ccys = [...new Set(items2.map(r => String(r.currency || 'INR').toUpperCase()))];
+  const ccy = ccys.length === 1 ? ccys[0] : 'INR';
+  let fxRate = 1, fxSource = 'identity', fxMissing = false;
+  if (ccy !== 'INR') {
+    const saved = aNum(audit.fx_rate_to_inr);
+    if (saved > 0 && String(audit.order_currency || '').toUpperCase() === ccy) { fxRate = saved; fxSource = audit.fx_rate_source || 'manual'; }
+    else {
+      fxMissing = true; fxSource = 'not confirmed';
+      try { const lk = await getAsync("SELECT rate FROM fx_rates WHERE from_currency=? AND to_currency='INR' ORDER BY rate_date DESC, fetched_at DESC LIMIT 1", [ccy]); if (lk && aNum(lk.rate) > 0) { fxRate = aNum(lk.rate); fxSource = 'last known rate (not confirmed)'; } } catch (_) {}
+    }
+  }
+  let revEx = 0, revIncl = 0;
+  items2.forEach(r => { const b = aNum(r.qty) * aNum(r.unit_price) * fxRate; revEx += b; revIncl += b + b * aNum(r.tax_rate) / 100; });
+
+  const pending = [];
+  if (ccys.length > 1) pending.push('Order lines are in mixed currencies (' + ccys.join(', ') + ') — profit cannot be converted; ask an admin');
+  lines.forEach(l => { if (!docOfLine[l.id]) pending.push(`${l.component} — no ${aDocTypeFor(l.scope) === 'boe' ? 'BOE' : 'local invoice'} added yet`); });
+  docs.forEach(d => { const c = calc[d.id]; if (c.confirmed < c.total) pending.push(`${d.doc_type === 'boe' ? 'BOE' : 'Local invoice'} ${d.doc_no || '(no number)'} — ${c.total - c.confirmed} head(s) still assumed`); });
+  const EP = revEx - EC, NP = revEx - AC;
+  const costVarPct = EC ? (AC - EC) / EC * 100 : 0;
+  return { audit, items, lines, docs, dls, itemById, lineById, docOfLine, calc, itemInfo,
+    fx: { currency: ccy, rate: fxRate, source: fxSource, missing: fxMissing },
+    totals: { revenue_ex_gst: revEx, revenue_incl_gst: revIncl, est_cost: EC, act_cost: AC, cost_variance: AC - EC, cost_variance_pct: costVarPct,
+              est_profit: EP, net_profit: NP, profit_variance: NP - EP, est_margin_pct: revEx ? EP / revEx * 100 : 0, net_margin_pct: revEx ? NP / revEx * 100 : 0,
+              order_currency: ccy, fx_rate_to_inr: fxRate, net_profit_ccy: NP / fxRate, est_profit_ccy: EP / fxRate, revenue_ccy: revEx / fxRate },
+    readiness: { ready: !pending.length && lines.length > 0, pending,
+                 remarks_required: Math.abs(costVarPct) > AUDIT_VAR_LIMIT_PCT || (NP - EP) < -0.5, variance_limit_pct: AUDIT_VAR_LIMIT_PCT } };
+}
+
+// Write derived numbers back: per-document/line totals, and roll the actuals up into the existing
+// order_cost_audit_items.act_* columns so Finance / paid-vs-profit / older screens keep working.
+async function auditPersist(auditId, byName) {
+  const ctx = await auditCompute(auditId);
+  if (!ctx) return null;
+  for (const d of ctx.docs) {
+    const c = ctx.calc[d.id];
+    await runAsync('UPDATE audit_documents SET est_total=?, act_total=?, confirmed_heads=?, total_heads=? WHERE id=?', [c.le, c.la, c.confirmed, c.total, d.id]);
+    for (const p of c.perLine) await runAsync('UPDATE audit_document_lines SET est_total=?, act_total=? WHERE document_id=? AND audit_item_line_id=?', [p.le, p.la, d.id, p.line.id]);
+  }
+  for (const it of ctx.items) {
+    const parts = []; ctx.docs.forEach(d => ctx.calc[d.id].perLine.forEach(p => { if (p.line.audit_item_id === it.id) parts.push({ d, p }); }));
+    if (!parts.length) continue;                                  // untouched legacy/manual entry stays as is
+    const H = h => aSum(parts.map(x => x.p.heads[h] || 0));
+    const extra = H('ext');
+    const detail = []; const seen = {};
+    parts.forEach(({ d, p }) => { if (seen[d.id]) return; seen[d.id] = 1;
+      const share = aSum(parts.filter(x => x.d.id === d.id).map(x => x.p.cifSh));
+      parseJsonSafe(d.ex_json, []).forEach(r => { const amt = ((r.a !== null && r.a !== undefined) ? aNum(r.a) : aNum(r.est)) * share; if (amt || r.n) detail.push({ name: r.n, amount: Math.round(amt * 100) / 100 }); }); });
+    const margin = aNum(it.est_margin);
+    const total = H('mat') + H('frt') + H('ins') + H('bcd') + H('sws') + H('cess') + H('bank') + H('clr') + extra + margin + aNum(it.est_finance_charges);
+    await runAsync(
+      `UPDATE order_cost_audit_items SET act_material=?, act_freight=?, act_insurance=?, act_bcd=?, act_sws=?, act_cess=?, act_bank=?, act_clearing=?, act_margin=?,
+         act_extra_charges=?, act_extra_charges_detail=?, act_total=?, updated_by=?, updated_at=? WHERE id=?`,
+      [H('mat'), H('frt'), H('ins'), H('bcd'), H('sws'), H('cess'), H('bank'), H('clr'), margin, extra, detail.length ? JSON.stringify(detail) : null, total, byName || '', nowStr(), it.id]);
+  }
+  return ctx;
+}
+
+async function auditLog(audit, req, action, details) {
+  const u = req.session.user;
+  await runAsync('INSERT INTO audit_history (id, audit_id, order_id, at, by_id, by_name, by_email, action, details) VALUES (?,?,?,?,?,?,?,?,?)',
+    [uuid(), audit.id, audit.order_id, new Date().toISOString().replace('T', ' ').slice(0, 23), u.id, u.name, u.email || '', action, JSON.stringify(details || [])]);
+}
+
+// ── field-level diff text for the History panel ──
+function auditKeyLabel(k, lineById) { const [a, b] = k.split(':'); return b ? `${AUDIT_LBL[b]} — ${lineById[a]?.component || a}` : AUDIT_LBL[k]; }
+function auditEstFor(k, L) { if (k.includes(':')) { const [id, h] = k.split(':'); const l = L.find(x => x.id === id); return l ? auditLineEst(l)[h] : 0; } return aSum(L.map(l => auditLineEst(l)[k])); }
+const auditExSt = r => r ? ((r.a !== null && r.a !== undefined) ? aInr(aNum(r.a)) : 'assumed ' + aInr(aNum(r.est))) : '—';
+function auditExMap(ex) { const m = {}; let i = 0; ex.forEach(r => { m[r.added ? 'a:' + r.n : 'e:' + (i++)] = r; }); return m; }
+function auditDiff(o, n, L, lineById) {
+  const det = [];
+  if ((o.doc_no || '') !== (n.doc_no || '')) det.push(`Document number: ${o.doc_no || '—'} → ${n.doc_no || '—'}`);
+  if ((o.doc_date || '') !== (n.doc_date || '')) det.push(`Document date: ${o.doc_date || '—'} → ${n.doc_date || '—'}`);
+  const st = (act, k) => k in act ? aInr(aNum(act[k])) : 'assumed ' + aInr(auditEstFor(k, L));
+  const keys = new Set([...Object.keys(o.act), ...Object.keys(n.act)]);
+  keys.forEach(k => { if (o.act[k] === n.act[k]) return;
+    if (!(k in o.act) && (k in n.act) && Math.abs(aNum(n.act[k]) - auditEstFor(k, L)) < 0.5) det.push(`${auditKeyLabel(k, lineById)}: confirmed as per estimate (${aInr(aNum(n.act[k]))})`);
+    else det.push(`${auditKeyLabel(k, lineById)}: ${st(o.act, k)} → ${st(n.act, k)}`); });
+  const A = auditExMap(o.ex), B = auditExMap(n.ex);
+  new Set([...Object.keys(A), ...Object.keys(B)]).forEach(k => { const a = A[k], b = B[k], nm = (b || a).n || '(unnamed)';
+    if (!a) det.push(`Added charge “${nm}”: ${auditExSt(b)}`); else if (!b) det.push(`Removed charge “${nm}” (was ${auditExSt(a)})`); else if (a.a !== b.a) { if ((a.a === null || a.a === undefined) && Math.abs(aNum(b.a) - aNum(b.est)) < 0.5) det.push(`Charge “${nm}”: confirmed as per estimate (${aInr(aNum(b.a))})`); else det.push(`Charge “${nm}”: ${auditExSt(a)} → ${auditExSt(b)}`); } });
+  return det;
+}
+function auditNewDetails(n, L, lineById, c) {
+  const det = [];
+  Object.keys(n.act).forEach(k => { const e = auditEstFor(k, L); if (Math.abs(aNum(n.act[k]) - e) >= 0.5) det.push(`${auditKeyLabel(k, lineById)}: estimate ${aInr(e)} → actual ${aInr(aNum(n.act[k]))}`); });
+  n.ex.forEach(r => { if (r.added) det.push(`Added charge “${r.n}”: ${aInr(aNum(r.a))}`); else if (r.a !== null && r.a !== undefined && Math.abs(aNum(r.a) - aNum(r.est)) >= 0.5) det.push(`Charge “${r.n}”: estimate ${aInr(aNum(r.est))} → actual ${aInr(aNum(r.a))}`); });
+  det.push(`${c.confirmed} of ${c.total} heads confirmed, ${c.total - c.confirmed} still assumed`);
+  return det;
+}
+
+// ── access ──
+async function auditAccess(req, audit) {
+  const u = req.session.user, perms = getPerms(u), allowed = await getAllowedSections(u);
+  const full = perms.canSeeAll || hasAllowedSection(u, allowed, ['audit-bin', ...ORDER_FULL_ACCESS_SECTIONS]);
+  if (full) return { read: true, write: true };
+  const o = await getAsync('SELECT created_by FROM orders WHERE id=?', [audit.order_id]);
+  return { read: !!o && o.created_by === u.id, write: false };
+}
+async function auditGuard(req, res, auditId, needWrite) {
+  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [auditId]);
+  if (!audit) { res.status(404).json({ error: 'Audit record not found' }); return null; }
+  const acc = await auditAccess(req, audit);
+  if (!acc.read || (needWrite && !acc.write)) { res.status(403).json({ error: 'Not allowed' }); return null; }
+  if (needWrite && audit.closed_at) { res.status(409).json({ error: 'This audit is closed. Reopen it to make changes.' }); return null; }
+  return audit;
+}
+
+// ── workspace (everything the Audit Bin screen needs) ──
+async function auditWorkspace(auditId) {
+  const ctx = await auditCompute(auditId);
+  const { audit } = ctx;
+  const order = await getAsync('SELECT id, po_number, customer_id, customer_ref, status, closed_at FROM orders WHERE id=?', [audit.order_id]);
+  const customer = order?.customer_id ? await getAsync('SELECT name FROM customers WHERE id=?', [order.customer_id]) : null;
+  const history = await allAsync(`
+    SELECT h.*, COALESCE(NULLIF(h.by_email, ''), u.email, '') as by_email 
+    FROM audit_history h 
+    LEFT JOIN users u ON (u.id = h.by_id OR u.name = h.by_name) 
+    WHERE h.audit_id=? 
+    ORDER BY h.at DESC, h.id DESC`, [auditId]);
+  const fileIds = [...new Set(ctx.docs.map(d => d.file_id).filter(Boolean))];
+  const files = {}; for (const fid of fileIds) { const f = await getAsync('SELECT * FROM app_files WHERE id=?', [fid]); if (f) files[fid] = fileDto(f); }
+  const supplierName = it => it.supplier_name || '';
+  let suggested = null;
+  if (ctx.fx.currency !== 'INR' && ctx.fx.missing) {
+    try { const r = await getFxRate(ctx.fx.currency, 'INR', null); if (r && aNum(r.rate) > 0) suggested = { rate: aNum(r.rate), date: r.rate_date, source: r.source, stale: !!r.stale }; } catch (_) {}
+  }
+  return {
+    audit: { id: audit.id, order_id: audit.order_id, status: audit.status, created_at: audit.created_at,
+             closed: !!audit.closed_at, closed_at: audit.closed_at || null, closed_by_name: audit.closed_by_name || null,
+             closed_by_email: audit.closed_by_email || null,
+             review_remarks: audit.review_remarks || '', reopen_count: aNum(audit.reopen_count) },
+    order: order ? { ...order, customer_name: customer?.name || '' } : null,
+    totals: ctx.totals, readiness: ctx.readiness, currency: { code: ctx.fx.currency, rate: ctx.fx.rate, source: ctx.fx.source, missing: ctx.fx.missing, suggested },
+    items: ctx.items.map(it => { const i = ctx.itemInfo[it.id];
+      return { id: it.id, supplier_order_id: it.supplier_order_id, supplier_id: it.supplier_id, supplier_name: supplierName(it), scope: it.scope,
+               est_extras: i.detail, est_extras_carried_by: i.carriedBy, finance_charges: { total: i.fin, detail: i.finDetail } }; }),
+    lines: ctx.lines.map(l => ({ id: l.id, item_id: l.audit_item_id, mpn: l.component, manufacturer: l.manufacturer, qty: aNum(l.qty),
+      scope: l.scope, doc_type_needed: aDocTypeFor(l.scope), est: auditLineEst(l),
+      sourcing: { currency: l.sourced_currency, field_modes: aObj(l.field_modes), raw: { freight: l.freight_raw, insurance: l.insurance_raw, bcd: l.bcd_raw, sws: l.sws_raw, cess: l.cess_raw, bank: l.bank_raw, clearing: l.clearing_raw, margin: l.margin_raw }, unit_price: aNum(l.unit_price) },
+      document_id: ctx.docOfLine[l.id] || null })),
+    documents: ctx.docs.map(d => { const c = ctx.calc[d.id];
+      return { id: d.id, doc_type: d.doc_type, supplier_id: d.supplier_id, supplier_name: d.supplier_name, doc_no: d.doc_no || '', doc_date: d.doc_date || '',
+        file: d.file_id ? (files[d.file_id] || { id: d.file_id }) : null, line_ids: c.L.map(l => l.id),
+        entries: { act: aObj(d.act_json), ex: parseJsonSafe(d.ex_json, []) },
+        est_total: c.le, act_total: c.la, confirmed_heads: c.confirmed, total_heads: c.total,
+        per_line: c.perLine.map(p => ({ line_id: p.line.id, est: p.le, act: p.la })),
+        created_by_name: d.created_by_name, created_at: d.created_at, updated_by_name: d.updated_by_name, updated_at: d.updated_at }; }),
+    history: history.map(h => ({ id: h.id, at: h.at, by_id: h.by_id, by_name: h.by_name, by_email: h.by_email || '', action: h.action, details: parseJsonSafe(h.details, []) })),
+  };
+}
+
+// Build a validated document record from a request body (create or edit).
+async function auditBuildDoc(audit, body, existingId) {
+  const bad = (msg, status = 400) => { const e = new Error(msg); e.status = status; throw e; };
+  const ctx = await auditCompute(audit.id);
+  const type = body.doc_type;
+  if (!['boe', 'local'].includes(type)) bad('doc_type must be "boe" or "local"');
+  const ids = [...new Set((body.line_ids || []).map(String))];
+  if (!ids.length) bad('Select at least one item');
+  const L = ids.map(id => ctx.lineById[id]); if (L.some(x => !x)) bad('One or more items do not belong to this audit');
+  const suppliers = new Set(L.map(l => ctx.itemById[l.audit_item_id].supplier_id || ''));
+  if (suppliers.size > 1) bad('One BOE / invoice can cover one supplier only');
+  L.forEach(l => { if (aDocTypeFor(l.scope) !== type) bad(`${l.component} is a ${l.scope === 'international' ? 'imported' : 'local'} item — use ${l.scope === 'international' ? 'a BOE' : 'a local invoice'}`); });
+  L.forEach(l => { const o = ctx.docOfLine[l.id]; if (o && o !== existingId) bad(`${l.component} is already on another document`, 409); });
+  const H = AUDIT_HEADS[type];
+  const allowed = new Set([...L.flatMap(l => H.LH.map(h => l.id + ':' + h)), ...H.SH]);
+  const act = {};
+  Object.entries(body.act || {}).forEach(([k, v]) => {
+    if (v === null || v === '' || v === undefined) return;                 // blank = still "assumed"
+    if (!allowed.has(k)) bad(`Unknown cost head: ${k}`);
+    const x = Number(v); if (!Number.isFinite(x)) bad(`Invalid amount for ${k}`);
+    act[k] = Math.round(x * 100) / 100;
+  });
+  // estimated extra-charge rows come from the Sourcing snapshot — rebuild them here, keep only the user's amounts
+  const sent = Array.isArray(body.ex) ? body.ex : [];
+  const ex = [];
+  [...new Set(L.map(l => l.audit_item_id))].forEach(itemId => {
+    const info = ctx.itemInfo[itemId];
+    if (info.carriedBy && info.carriedBy !== existingId) return;           // another document already carries this PO's extras
+    info.detail.forEach(c => {
+      const prior = sent.find(r => !r.added && r.src_item === itemId && r.src_idx === c.src_idx);
+      const a = prior && prior.a !== null && prior.a !== undefined && prior.a !== '' && Number.isFinite(Number(prior.a)) ? Math.round(Number(prior.a) * 100) / 100 : null;
+      ex.push({ n: c.n, est: c.est, a, added: false, src_item: itemId, src_idx: c.src_idx });
+    });
+  });
+  sent.filter(r => r.added).forEach(r => {
+    const n = String(r.n || '').trim().slice(0, 120), a = (r.a === null || r.a === undefined || r.a === '') ? 0 : Number(r.a);
+    if (!Number.isFinite(a)) bad(`Invalid amount for charge “${n}”`);
+    if (!n && !a) return; if (!n) bad('Give each additional charge a name');
+    ex.push({ n, est: 0, a: Math.round(a * 100) / 100, added: true });
+  });
+  const first = ctx.itemById[L[0].audit_item_id];
+  return { type, L, act, ex, ctx,
+    doc_no: String(body.doc_no || '').trim().slice(0, 60), doc_date: /^\d{4}-\d{2}-\d{2}$/.test(String(body.doc_date || '')) ? body.doc_date : '',
+    file_id: body.file_id ? String(body.file_id) : null, supplier_id: first.supplier_id || '', supplier_name: first.supplier_name || '' };
+}
+async function auditAfterWrite(audit, req) {
+  await auditPersist(audit.id, req.session.user.name);
+  const a = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [audit.id]);
+  if (!a.closed_at && a.status !== 'submitted') await runAsync("UPDATE order_cost_audits SET status='submitted', submitted_at=?, submitted_by=? WHERE id=?", [nowStr(), req.session.user.name, audit.id]);
+  saveNow();
+}
+const auditFail = (res, e) => res.status(e.status || 500).json({ error: e.message || 'Audit update failed' });
+
+app.get('/api/audit-bin/:id/workspace', auth, asyncRoute(async (req, res) => {
+  const audit = await auditGuard(req, res, req.params.id, false); if (!audit) return;
+  if (!audit.closed_at) {
+    try { await createCostAudit(audit.order_id); } catch (e) { console.warn('createCostAudit sync error:', e.message); }
+  }
+  res.json(await auditWorkspace(audit.id));
+}));
+app.get('/api/audit-bin/:id/history', auth, asyncRoute(async (req, res) => {
+  const audit = await auditGuard(req, res, req.params.id, false); if (!audit) return;
+  const rows = await allAsync(`
+    SELECT h.*, COALESCE(NULLIF(h.by_email, ''), u.email, '') as by_email 
+    FROM audit_history h 
+    LEFT JOIN users u ON (u.id = h.by_id OR u.name = h.by_name) 
+    WHERE h.audit_id=? 
+    ORDER BY h.at DESC, h.id DESC`, [audit.id]);
+  res.json(rows.map(h => ({ id: h.id, at: h.at, by_id: h.by_id, by_name: h.by_name, by_email: h.by_email || '', action: h.action, details: parseJsonSafe(h.details, []) })));
+}));
+
+app.post('/api/audit-bin/:id/documents', auth, asyncRoute(async (req, res) => {
+  const audit = await auditGuard(req, res, req.params.id, true); if (!audit) return;
+  let b; try { b = await auditBuildDoc(audit, req.body || {}, null); } catch (e) { return auditFail(res, e); }
+  const id = uuid(), u = req.session.user, now = nowFull();
+  try {
+    await runAsync(`INSERT INTO audit_documents (id, audit_id, order_id, doc_type, supplier_id, supplier_name, doc_no, doc_date, file_id, act_json, ex_json,
+        created_by, created_by_name, created_at, updated_by, updated_by_name, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [id, audit.id, audit.order_id, b.type, b.supplier_id, b.supplier_name, b.doc_no, b.doc_date, b.file_id, JSON.stringify(b.act), JSON.stringify(b.ex), u.id, u.name, now, u.id, u.name, now]);
+    for (const l of b.L) await runAsync('INSERT INTO audit_document_lines (id, document_id, audit_id, audit_item_line_id, est_total, act_total) VALUES (?,?,?,?,0,0)', [uuid(), id, audit.id, l.id]);
+  } catch (e) {
+    await runAsync('DELETE FROM audit_document_lines WHERE document_id=?', [id]).catch(() => {}); await runAsync('DELETE FROM audit_documents WHERE id=?', [id]).catch(() => {});
+    return res.status(409).json({ error: 'Could not save — an item may already be on another document' });
+  }
+  await auditAfterWrite(audit, req);
+  const ctx = await auditCompute(audit.id), lineById = ctx.lineById;
+  await auditLog(audit, req, `added ${b.type === 'boe' ? 'BOE' : 'Local invoice'} ${b.doc_no || '(no number)'} — ${b.supplier_name}: ${b.L.map(l => l.component).join(', ')}`,
+    auditNewDetails({ act: b.act, ex: b.ex }, b.L, lineById, ctx.calc[id]));
+  saveNow();
+  res.status(201).json(await auditWorkspace(audit.id));
+}));
+
+app.put('/api/audit-documents/:docId', auth, asyncRoute(async (req, res) => {
+  const doc = await getAsync('SELECT * FROM audit_documents WHERE id=?', [req.params.docId]);
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+  const audit = await auditGuard(req, res, doc.audit_id, true); if (!audit) return;
+  let b; try { b = await auditBuildDoc(audit, { doc_type: doc.doc_type, ...(req.body || {}) }, doc.id); } catch (e) { return auditFail(res, e); }
+  const oldLines = (await allAsync('SELECT audit_item_line_id FROM audit_document_lines WHERE document_id=?', [doc.id])).map(r => r.audit_item_line_id);
+  const old = { doc_no: doc.doc_no, doc_date: doc.doc_date, act: aObj(doc.act_json), ex: parseJsonSafe(doc.ex_json, []) };
+  const u = req.session.user;
+  await runAsync(`UPDATE audit_documents SET supplier_id=?, supplier_name=?, doc_no=?, doc_date=?, file_id=?, act_json=?, ex_json=?, updated_by=?, updated_by_name=?, updated_at=? WHERE id=?`,
+    [b.supplier_id, b.supplier_name, b.doc_no, b.doc_date, b.file_id, JSON.stringify(b.act), JSON.stringify(b.ex), u.id, u.name, nowFull(), doc.id]);
+  const newIds = b.L.map(l => l.id);
+  const removed = oldLines.filter(x => !newIds.includes(x)), added = newIds.filter(x => !oldLines.includes(x));
+  for (const lid of removed) await runAsync('DELETE FROM audit_document_lines WHERE document_id=? AND audit_item_line_id=?', [doc.id, lid]);
+  for (const lid of added) await runAsync('INSERT INTO audit_document_lines (id, document_id, audit_id, audit_item_line_id, est_total, act_total) VALUES (?,?,?,?,0,0)', [uuid(), doc.id, audit.id, lid]);
+  await auditAfterWrite(audit, req);
+  const ctx = await auditCompute(audit.id);
+  const det = auditDiff(old, { doc_no: b.doc_no, doc_date: b.doc_date, act: b.act, ex: b.ex }, b.L.concat(removed.map(i => ctx.lineById[i]).filter(Boolean)), ctx.lineById);
+  removed.forEach(i => det.unshift(`Removed item: ${ctx.lineById[i]?.component || i}`)); added.forEach(i => det.unshift(`Added item: ${ctx.lineById[i]?.component || i}`));
+  const label = `${doc.doc_type === 'boe' ? 'BOE' : 'Local invoice'} ${b.doc_no || '(no number)'}`;
+  await auditLog(audit, req, det.length ? `edited ${label}` : `re-saved ${label}`, det.length ? det : ['No values changed']);
+  saveNow();
+  res.json(await auditWorkspace(audit.id));
+}));
+
+app.delete('/api/audit-documents/:docId', auth, asyncRoute(async (req, res) => {
+  const doc = await getAsync('SELECT * FROM audit_documents WHERE id=?', [req.params.docId]);
+  if (!doc) return res.status(404).json({ error: 'Document not found' });
+  const audit = await auditGuard(req, res, doc.audit_id, true); if (!audit) return;
+  const ctx = await auditCompute(audit.id);
+  const names = ctx.dls.filter(r => r.document_id === doc.id).map(r => ctx.lineById[r.audit_item_line_id]?.component).filter(Boolean);
+  await runAsync('DELETE FROM audit_document_lines WHERE document_id=?', [doc.id]);
+  await runAsync('DELETE FROM audit_documents WHERE id=?', [doc.id]);
+  await auditPersist(audit.id, req.session.user.name);
+  await auditLog(audit, req, `removed ${doc.doc_type === 'boe' ? 'BOE' : 'Local invoice'} ${doc.doc_no || '(no number)'}`, [`${doc.supplier_name}: ${names.join(', ')} went back to “awaiting”`]);
+  saveNow();
+  res.json(await auditWorkspace(audit.id));
+}));
+
+app.post('/api/audit-bin/:id/submit', auth, asyncRoute(async (req, res) => {
+  const audit = await auditGuard(req, res, req.params.id, true); if (!audit) return;
+  // Order currency → INR rate: confirmed here and frozen with the audit
+  const pre = await auditCompute(audit.id);
+  const orderCcy = pre.fx.currency, bodyRate = aNum(req.body?.fx_rate);
+  if (orderCcy !== 'INR') {
+    const useRate = bodyRate > 0 ? bodyRate : (pre.fx.missing ? 0 : pre.fx.rate);
+    if (!(useRate > 0)) return res.status(400).json({ error: `Enter the ${orderCcy} → INR rate to close this audit` });
+    await runAsync('UPDATE order_cost_audits SET order_currency=?, fx_rate_to_inr=?, fx_rate_source=? WHERE id=?', [orderCcy, useRate, bodyRate > 0 ? 'manual' : (audit.fx_rate_source || 'manual'), audit.id]);
+  } else {
+    await runAsync('UPDATE order_cost_audits SET order_currency=?, fx_rate_to_inr=1, fx_rate_source=? WHERE id=?', ['INR', 'identity', audit.id]);
+  }
+  const ctx = await auditPersist(audit.id, req.session.user.name);
+  const remarks = String(req.body?.remarks || '').trim();
+  if (!ctx.readiness.ready) return res.status(400).json({ error: 'Every item must be on a BOE / invoice and every head confirmed', pending: ctx.readiness.pending });
+  if (ctx.readiness.remarks_required && remarks.length < 3) return res.status(400).json({ error: `Remarks are required (cost variance beyond ±${AUDIT_VAR_LIMIT_PCT}% or profit below plan)` });
+  const t = ctx.totals, u = req.session.user;
+  await runAsync(`UPDATE order_cost_audits SET closed_at=?, closed_by=?, closed_by_name=?, closed_by_email=?, review_remarks=?, final_revenue_ex_gst=?, final_revenue_incl_gst=?,
+      final_est_cost=?, final_act_cost=?, final_est_profit=?, final_net_profit=?, status='submitted' WHERE id=?`,
+    [nowFull(), u.id, u.name, u.email || '', remarks, t.revenue_ex_gst, t.revenue_incl_gst, t.est_cost, t.act_cost, t.est_profit, t.net_profit, audit.id]);
+  await auditLog(audit, req, 'submitted and closed the audit', [
+    `Cost ${aInr(t.act_cost)} vs estimate ${aInr(t.est_cost)} (${aSgn(t.cost_variance)}, ${t.cost_variance_pct > 0 ? '+' : ''}${t.cost_variance_pct.toFixed(1)}%)`,
+    `Net profit ${aInr(t.net_profit)} vs estimated ${aInr(t.est_profit)} (${aSgn(t.profit_variance)})`,
+    ...(orderCcy !== 'INR' ? [`Order currency ${orderCcy}: 1 ${orderCcy} = ₹${Number(ctx.fx.rate).toFixed(4)} · net profit ${orderCcy} ${Math.round(t.net_profit_ccy).toLocaleString('en-US')}`] : []),
+    ...(remarks ? ['Remarks: ' + remarks] : [])]);
+  saveNow();
+  res.json(await auditWorkspace(audit.id));
+}));
+
+app.post('/api/audit-bin/:id/reopen', auth, adminOnly, asyncRoute(async (req, res) => {
+  const audit = await getAsync('SELECT * FROM order_cost_audits WHERE id=?', [req.params.id]);
+  if (!audit) return res.status(404).json({ error: 'Audit record not found' });
+  if (!audit.closed_at) return res.status(409).json({ error: 'Audit is not closed' });
+  await runAsync('UPDATE order_cost_audits SET closed_at=NULL, closed_by=NULL, closed_by_name=NULL, closed_by_email=NULL, reopen_count=COALESCE(reopen_count,0)+1 WHERE id=?', [audit.id]);
+  const reason = String(req.body?.reason || '').trim();
+  await auditLog(audit, req, 'reopened the audit', ['Entries unlocked for editing', ...(reason ? ['Reason: ' + reason] : [])]);
+  saveNow();
+  res.json(await auditWorkspace(audit.id));
+}));
+// ── end AUDIT BIN v2 ──
+
 
 // ── APP SETTINGS ─────────────────────────────────────────────────────────────
 app.get('/api/settings', auth, asyncRoute(async (req, res) => {

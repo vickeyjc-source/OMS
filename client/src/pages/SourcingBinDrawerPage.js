@@ -931,13 +931,30 @@ function SourcingModal({ enq, suppliers, customers, users, quotes, onClose, onSa
         const resolved = isInvHolder ? { ...r, notes: [r.notes, invNote].filter(Boolean).join(' | ') } : r;
         const supType = isInvHolder ? ((invHit?.target_currency || 'INR') !== 'INR' ? 'international' : 'domestic') : (suppliers.find(s => s.id === resolved.supplier_id)?.type || 'domestic');
         const normalized = supType === 'international' ? resolved : { ...resolved, insurance_pct: '0', duty_pct: '0', cess_pct: '0', bank_fixed_foreign: '0', bank_fixed_inr: '0', clearance_fixed_inr: '0' };
-        const calc = calcRow({ ...normalized, _supType: supType }, item || { quantity: 1 });
+        const landed = calcLanded({ ...normalized, _supType: supType }, item || { quantity: 1 }, normalized._fieldModes || {});
         const bankFixedUsd = supType === 'international' ? ((normalized.bank_fixed_foreign !== '' && normalized.bank_fixed_foreign != null) ? normalized.bank_fixed_foreign : (normalized.bank_fixed_usd ?? null)) : '0';
         const fieldModes = normalized._fieldModes ? JSON.stringify(normalized._fieldModes) : null;
         const extraCharges = Array.isArray(normalized._extraCharges) && normalized._extraCharges.length
           ? JSON.stringify(normalized._extraCharges.filter(c => c && (c.name || Number(c.amount) > 0)))
           : null;
-        return { ...normalized, id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()), bank_fixed_usd: bankFixedUsd, quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null, quote_currency: qrow?.quote_currency || 'INR', tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null, field_modes: fieldModes, extra_charges: extraCharges, sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null, freight_inr: calc.freight || null, insurance_inr: calc.insurance || null, duty_inr: calc.duty || null, cess_inr: calc.cess || null, bank_inr: calc.bank || null, clearance_inr: calc.clearance || null, margin_inr: calc.margin || null };
+        return {
+          ...normalized,
+          id: r.id || ('src_' + r.enquiry_item_id + '_' + Date.now()),
+          bank_fixed_usd: bankFixedUsd,
+          quote_price: (qrow?.quote_price !== '' && qrow?.quote_price != null) ? qrow.quote_price : null,
+          quote_currency: qrow?.quote_currency || 'INR',
+          tax_rate: (qrow?.tax_rate !== '' && qrow?.tax_rate != null) ? Number(qrow.tax_rate) : null,
+          field_modes: fieldModes,
+          extra_charges: extraCharges,
+          sourcing_revision_notes: srcRevNotes[r.enquiry_item_id] || null,
+          freight_inr: landed.freightINR != null ? landed.freightINR : null,
+          insurance_inr: landed.insuranceINR != null ? landed.insuranceINR : null,
+          duty_inr: landed.bcdAmount != null ? landed.bcdAmount : null,
+          cess_inr: landed.swsAmount != null ? landed.swsAmount : null,
+          bank_inr: landed.bankINR != null ? landed.bankINR : null,
+          clearance_inr: landed.clearingINR != null ? landed.clearingINR : null,
+          margin_inr: landed.marginAmt != null ? landed.marginAmt : null
+        };
       });
       const hasCheckingItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'checking');
       const hasNoBidItemsBeforeQuote = rowsToSave.some(r => (r.item_status || 'ready') === 'no_bid');
