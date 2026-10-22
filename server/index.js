@@ -395,26 +395,35 @@ function parseJsonSafe(raw, fallback) {
 async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourcing, targetSupId) {
   if (!li) return null;
   const supId = targetSupId || li.supplier_id;
-  // 1. If split_from_item_id
-  if (li.split_from_item_id) {
-    const s = (allEnqSourcing || []).find(r => (r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id) && (!supId || r.supplier_id === supId));
-    if (s) return s;
-    const sAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id);
-    if (sAny) return sAny;
-    try {
-      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ' + (supId ? 'AND supplier_id=? ' : '') + 'ORDER BY updated_at DESC LIMIT 1', supId ? [li.split_from_item_id, supId] : [li.split_from_item_id]);
-      if (dbS) return dbS;
-    } catch (_) {}
-  }
-
-  // 2. Direct match on enquiry_item_id if li.id is an enquiry_item_id
-  const direct = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id && (!supId || r.supplier_id === supId));
-  if (direct) return direct;
-  const directAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === li.id);
-  if (directAny) return directAny;
-
   const compClean = (li.component || '').trim().toLowerCase();
   const mfrClean = (li.manufacturer || '').trim().toLowerCase();
+
+  const pickBest = (candidates) => {
+    if (!candidates || !candidates.length) return null;
+    if (supId) {
+      const supQuoted = candidates.find(r => r.supplier_id === supId && (r.sent_to_enquiry === 1 || r.item_status === 'quoted'));
+      if (supQuoted) return supQuoted;
+      const supAny = candidates.find(r => r.supplier_id === supId);
+      if (supAny) return supAny;
+    }
+    const anyQuoted = candidates.find(r => r.sent_to_enquiry === 1 || r.item_status === 'quoted');
+    if (anyQuoted) return anyQuoted;
+    const withPrice = candidates.find(r => Number(r.sourced_price) > 0 || Number(r.src_price_foreign) > 0);
+    if (withPrice) return withPrice;
+    return candidates[0];
+  };
+
+  // 1. If split_from_item_id
+  if (li.split_from_item_id) {
+    const matched = (allEnqSourcing || []).filter(r => r.enquiry_item_id === li.split_from_item_id || r.enquiry_item_id === li.id);
+    const chosen = pickBest(matched);
+    if (chosen) return chosen;
+  }
+
+  // 2. Direct match on enquiry_item_id
+  const direct = (allEnqSourcing || []).filter(r => r.enquiry_item_id === li.id);
+  const chosenDirect = pickBest(direct);
+  if (chosenDirect) return chosenDirect;
 
   // 3. Match via enquiryItems component & manufacturer
   let matchedEnqItem = (enquiryItems || []).find(ei =>
@@ -426,55 +435,67 @@ async function findSourcingForItem(li, enqId, quoteId, enquiryItems, allEnqSourc
   }
 
   if (matchedEnqItem) {
-    const s = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id && (!supId || r.supplier_id === supId));
-    if (s) return s;
-    const sAny = (allEnqSourcing || []).find(r => r.enquiry_item_id === matchedEnqItem.id);
-    if (sAny) return sAny;
+    const matched = (allEnqSourcing || []).filter(r => r.enquiry_item_id === matchedEnqItem.id);
+    const chosen = pickBest(matched);
+    if (chosen) return chosen;
     try {
-      const dbS = await getAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ' + (supId ? 'AND supplier_id=? ' : '') + 'ORDER BY updated_at DESC LIMIT 1', supId ? [matchedEnqItem.id, supId] : [matchedEnqItem.id]);
-      if (dbS) return dbS;
+      const dbS = await allAsync(
+        'SELECT * FROM enquiry_sourcing WHERE enquiry_item_id=? ORDER BY (CASE WHEN item_status=\'quoted\' OR sent_to_enquiry=1 THEN 0 ELSE 1 END), updated_at DESC',
+        [matchedEnqItem.id]
+      );
+      const chosenDb = pickBest(dbS);
+      if (chosenDb) return chosenDb;
     } catch (_) {}
   }
 
   // 4. DB search joining enquiry_items
   if (enqId && compClean) {
     try {
-      const dbJoin = await getAsync(
+      const dbJoin = await allAsync(
         `SELECT es.* FROM enquiry_sourcing es
          JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
          WHERE (es.enquiry_id=? OR ei.enquiry_id=?)
            AND LOWER(TRIM(ei.component)) = ?
-           ` + (supId ? 'AND es.supplier_id = ? ' : '') + `
-         ORDER BY (CASE WHEN LOWER(TRIM(COALESCE(ei.manufacturer,'')))=? THEN 1 ELSE 2 END), es.updated_at DESC
-         LIMIT 1`,
-        supId ? [enqId, enqId, compClean, supId, mfrClean] : [enqId, enqId, compClean, mfrClean]
+         ORDER BY (CASE WHEN LOWER(TRIM(COALESCE(ei.manufacturer,'')))=? THEN 0 ELSE 1 END),
+                  (CASE WHEN es.item_status='quoted' OR es.sent_to_enquiry=1 THEN 0 ELSE 1 END),
+                  es.updated_at DESC`,
+        [enqId, enqId, compClean, mfrClean]
       );
-      if (dbJoin) return dbJoin;
+      const chosenJoin = pickBest(dbJoin);
+      if (chosenJoin) return chosenJoin;
     } catch (_) {}
   }
 
-  // 5. Check quote_items if quoteId
+  // 5. Quote items search
   if (quoteId && compClean) {
     try {
-      const dbQuote = await getAsync(
+      const dbQuote = await allAsync(
         `SELECT es.* FROM enquiry_sourcing es
          JOIN quote_items qi ON qi.enquiry_item_id = es.enquiry_item_id
-         WHERE qi.quote_id=? AND LOWER(TRIM(qi.component))=?
-         ORDER BY es.updated_at DESC LIMIT 1`,
-        [quoteId, compClean]
+         WHERE (qi.quote_id=? OR qi.quote_id=(SELECT id FROM quotes WHERE quote_no=? LIMIT 1))
+           AND LOWER(TRIM(qi.component))=?
+         ORDER BY (CASE WHEN es.item_status='quoted' OR es.sent_to_enquiry=1 THEN 0 ELSE 1 END), es.updated_at DESC`,
+        [quoteId, quoteId, compClean]
       );
-      if (dbQuote) return dbQuote;
+      const chosenQuote = pickBest(dbQuote);
+      if (chosenQuote) return chosenQuote;
     } catch (_) {}
   }
 
-  // 6. Sourcing row where supplier matches and enquiry matches
-  if (enqId && (supId || li.supplier_id)) {
+  // 6. Direct match in allEnqSourcing by component if joined
+  const anyByComp = (allEnqSourcing || []).filter(r => (r.enq_item_comp || '').trim().toLowerCase() === compClean);
+  const chosenByComp = pickBest(anyByComp);
+  if (chosenByComp) return chosenByComp;
+
+  // 7. Sourcing row where supplier matches and enquiry matches
+  if (enqId && supId) {
     try {
-      const dbSup = await getAsync(
-        `SELECT * FROM enquiry_sourcing WHERE enquiry_id=? AND supplier_id=? ORDER BY updated_at DESC LIMIT 1`,
-        [enqId, supId || li.supplier_id]
+      const dbSup = await allAsync(
+        `SELECT * FROM enquiry_sourcing WHERE enquiry_id=? AND supplier_id=? ORDER BY (CASE WHEN item_status='quoted' OR sent_to_enquiry=1 THEN 0 ELSE 1 END), updated_at DESC`,
+        [enqId, supId]
       );
-      if (dbSup) return dbSup;
+      const chosenSup = pickBest(dbSup);
+      if (chosenSup) return chosenSup;
     } catch (_) {}
   }
 
@@ -507,7 +528,7 @@ function computeLandedBreakdown(src, qty, unitPrice, scope) {
   const materialValue = unit * q;
   const raw = v => Number(v || 0);
   const applyMode = (mode, rawVal, base) => mode === 'pct' ? (base * rawVal / 100) : rawVal;
-  const hasStored = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+  const hasStored = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0;
 
   let freightINR = 0;
   if (hasStored(src?.freight_inr)) {
@@ -603,21 +624,57 @@ async function createCostAudit(orderId) {
     orderItems.forEach(li => { itemsById[li.id] = li; });
 
     let enqId = order.enquiry_id;
-    if (!enqId && order.quote_id) {
-      const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=?', [order.quote_id]);
+    if (!enqId && (order.quote_id || order.quote_no)) {
+      const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=? OR quote_no=?', [order.quote_id || '', order.quote_no || '']);
       if (q?.enquiry_id) enqId = q.enquiry_id;
     }
     if (!enqId && order.enquiry_no) {
-      const e = await getAsync('SELECT id FROM enquiries WHERE enquiry_no=?', [order.enquiry_no]);
+      const e = await getAsync('SELECT id FROM enquiries WHERE id=? OR sourcing_no=?', [order.enquiry_no, order.enquiry_no]);
       if (e?.id) enqId = e.id;
+      else enqId = order.enquiry_no;
+    }
+    if (!enqId && order.id) {
+      try {
+        const oi = await getAsync('SELECT enquiry_id FROM quotes WHERE id=(SELECT quote_id FROM orders WHERE id=?)', [order.id]);
+        if (oi?.enquiry_id) enqId = oi.enquiry_id;
+      } catch (_) {}
     }
 
-    const enquiryItems = enqId
-      ? await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [enqId])
+    let enquiryItems = enqId
+      ? await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=? OR enquiry_id=?', [enqId, order.enquiry_no || enqId])
       : [];
-    const allEnqSourcing = enqId
-      ? await allAsync('SELECT * FROM enquiry_sourcing WHERE enquiry_id=? ORDER BY updated_at DESC', [enqId])
+    let allEnqSourcing = enqId
+      ? await allAsync(
+          `SELECT * FROM enquiry_sourcing WHERE enquiry_id=? OR enquiry_id=?
+           ORDER BY (CASE WHEN item_status='quoted' OR sent_to_enquiry=1 THEN 0 ELSE 1 END), updated_at DESC`,
+          [enqId, order.enquiry_no || enqId]
+        )
       : [];
+
+    // Fallback: If allEnqSourcing is empty or no enqId, find sourcing rows matching order item components directly
+    if (allEnqSourcing.length === 0 && orderItems.length > 0) {
+      const comps = orderItems.map(x => (x.component || '').trim().toLowerCase()).filter(Boolean);
+      if (comps.length > 0) {
+        try {
+          const placeholders = comps.map(() => '?').join(',');
+          const matchedByComp = await allAsync(
+            `SELECT es.*, ei.quantity as enq_item_qty, ei.component as enq_item_comp, ei.manufacturer as enq_item_mfr
+             FROM enquiry_sourcing es
+             JOIN enquiry_items ei ON ei.id = es.enquiry_item_id
+             WHERE LOWER(TRIM(ei.component)) IN (${placeholders})
+             ORDER BY (CASE WHEN es.item_status='quoted' OR es.sent_to_enquiry=1 THEN 0 ELSE 1 END), es.updated_at DESC`,
+            comps
+          );
+          if (matchedByComp && matchedByComp.length > 0) {
+            allEnqSourcing = matchedByComp;
+            if (!enqId && matchedByComp[0].enquiry_id) enqId = matchedByComp[0].enquiry_id;
+            if (enquiryItems.length === 0 && enqId) {
+              enquiryItems = await allAsync('SELECT * FROM enquiry_items WHERE enquiry_id=?', [enqId]);
+            }
+          }
+        } catch (_) {}
+      }
+    }
 
     const existingAuditItems = await allAsync('SELECT * FROM order_cost_audit_items WHERE audit_id=?', [auditId]);
     const existingAiIds = existingAuditItems.map(i => i.id);
@@ -6348,15 +6405,16 @@ app.get('/api/orders/:id/audit', auth, asyncRoute(async (req, res) => {
         );
       }
       if (!enqSrc && lines && lines.length > 0) {
-        const ord = await getAsync('SELECT enquiry_id, quote_id, enquiry_no FROM orders WHERE id=?', [req.params.id]);
+        const ord = await getAsync('SELECT enquiry_id, quote_id, enquiry_no, quote_no FROM orders WHERE id=?', [req.params.id]);
         let eId = ord?.enquiry_id;
-        if (!eId && ord?.quote_id) {
-          const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=?', [ord.quote_id]);
+        if (!eId && (ord?.quote_id || ord?.quote_no)) {
+          const q = await getAsync('SELECT enquiry_id FROM quotes WHERE id=? OR quote_no=?', [ord.quote_id || '', ord.quote_no || '']);
           if (q?.enquiry_id) eId = q.enquiry_id;
         }
         if (!eId && ord?.enquiry_no) {
-          const e = await getAsync('SELECT id FROM enquiries WHERE enquiry_no=?', [ord.enquiry_no]);
+          const e = await getAsync('SELECT id FROM enquiries WHERE id=? OR sourcing_no=?', [ord.enquiry_no, ord.enquiry_no]);
           if (e?.id) eId = e.id;
+          else eId = ord.enquiry_no;
         }
         if (eId) {
           enqSrc = await getAsync(
