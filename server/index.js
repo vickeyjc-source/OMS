@@ -717,10 +717,13 @@ async function createCostAudit(orderId) {
         }
 
         // Re-sync existing open audit lines with accurate landed cost breakdown from Sourcing
-        let totMat = 0, totFrt = 0, totIns =           const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || l.supplier_id);
+        let totMat = 0, totFrt = 0, totIns = 0, totBcd = 0, totSws = 0, totCess = 0, totBank = 0, totClr = 0, totMar = 0;
+        for (const l of lines) {
+          const li = orderItems.find(x => (x.component || "").trim().toLowerCase() === (l.component || "").trim().toLowerCase()) || { component: l.component, manufacturer: l.manufacturer, qty: l.qty };
+          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || l.supplier_id);
           if (src) {
-            const isIntl = ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0);
-            const lineScope = isIntl ? 'international' : 'domestic';
+            const isIntl = ((src.sourced_currency && src.sourced_currency !== "INR") || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0);
+            const lineScope = isIntl ? "international" : "domestic";
             const unitPrice = parseFloat(src?.sourced_price) || (parseFloat(src?.src_price_foreign) * (parseFloat(src?.exchange_rate)||1)) || parseFloat(l.unit_price) || 0;
             const landed = computeLandedBreakdown(src, Number(l.qty)||1, unitPrice, lineScope);
             await runAsync(
@@ -731,7 +734,6 @@ async function createCostAudit(orderId) {
               [lineScope, JSON.stringify(landed.modesObj), src.freight_pct, src.insurance_pct, src.duty_pct, src.cess_pct, src.bank_fixed_foreign ?? src.bank_fixed_usd, src.bank_fixed_inr, src.clearance_fixed_inr, src.margin_pct,
                landed.freightINR, landed.insuranceINR, landed.bcdAmount, landed.swsAmount, landed.cessAmount, landed.bankINR, landed.clearingINR, landed.marginAmt, unitPrice, l.id]
             );
-            // Also fix stale stored _inr values in enquiry_sourcing itself
             if (src.id) {
               try {
                 await runAsync(
@@ -744,9 +746,6 @@ async function createCostAudit(orderId) {
             l.freight_inr = landed.freightINR; l.insurance_inr = landed.insuranceINR; l.bcd_inr = landed.bcdAmount; l.sws_inr = landed.swsAmount;
             l.cess_inr = landed.cessAmount; l.bank_inr = landed.bankINR; l.clearing_inr = landed.clearingINR; l.margin_inr = landed.marginAmt;
             l.field_modes = JSON.stringify(landed.modesObj); l.unit_price = unitPrice;
-            totMat += landed.materialValue;
-            totFrt += landed.freightINR; totIns += landed.insuranceINR; totBcd += landed.bcdAmount; totSws += landed.swsAmount;
-            totCess += landed.cessAmount; totBank += landed.bankINR; totClr += landed.clearingINR; totMar += landed.marginAmt;e = unitPrice;
             totMat += landed.materialValue;
             totFrt += landed.freightINR; totIns += landed.insuranceINR; totBcd += landed.bcdAmount; totSws += landed.swsAmount;
             totCess += landed.cessAmount; totBank += landed.bankINR; totClr += landed.clearingINR; totMar += landed.marginAmt;
