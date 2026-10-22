@@ -276,31 +276,112 @@ function Step2({ ws, draft, setDraft, auditId, saving, onCancel, onBack, onSave 
   const aT = keys.reduce((s, k) => s + A(k), 0) + draft.ex.reduce((s, r) => s + exAct(r), 0);
   const cif = (f) => L.reduce((s, l) => s + f(l.id + ':mat'), 0) + f('frt') + f('ins');
 
-  const row = (k, label, sub) => {
+  const row = (k, opts = {}) => {
     const e = estOf(k), actVal = A(k);
     const diff = actVal - e;
+    const { isItemStart, mpn, qty, headName, sub, label } = opts;
+    const isNewItem = isItemStart && multi;
+
     return (
-      <tr key={k}>
-        <td className="l">{label}{sub ? <span className="h">{sub}</span> : null}</td>
-        <td className="est hs">{rs(e)}</td>
-        <td><input type="text" inputMode="decimal" className="ab-in" value={draft.act[k] !== undefined && draft.act[k] !== null ? draft.act[k] : inr(e)}
-          onFocus={ev => ev.target.select()} onChange={ev => setAct(k, ev.target.value)}/></td>
-        <td className={'vr ' + cl(diff)}>{sg(diff)}</td>
+      <tr key={k} style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
+        <td
+          className="l"
+          style={{
+            verticalAlign: 'middle',
+            ...(isNewItem
+              ? {
+                  background: 'var(--ab-sub, #f0f3f8)',
+                  borderLeft: '3px solid var(--ab-navy, #1e3a8a)',
+                }
+              : (multi && mpn ? { paddingLeft: 22 } : {})),
+          }}
+        >
+          {isNewItem && mpn ? (
+            <div style={{ marginBottom: 4 }}>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 11.5,
+                  fontFamily: 'monospace',
+                  fontWeight: 800,
+                  padding: '2px 8px',
+                  borderRadius: 5,
+                  background: 'var(--ab-card, #fff)',
+                  color: 'var(--ab-navy, #1e3a8a)',
+                  border: '1px solid var(--ab-line, #cbd5e1)',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                }}
+              >
+                <span>📦 {mpn}</span>
+                {qty ? <span style={{ fontWeight: 500, fontSize: 10.5, color: 'var(--ab-mut, #6b7686)' }}>({qty} pcs)</span> : null}
+              </span>
+            </div>
+          ) : null}
+
+          <div style={{ fontWeight: isNewItem ? 700 : 500, color: 'var(--text, #111827)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            {multi && mpn && !isNewItem && <span style={{ fontSize: 11, color: 'var(--ab-mut, #6b7686)', userSelect: 'none' }}>↳</span>}
+            <span>{headName || label}</span>
+          </div>
+          {sub ? <span className="h" style={{ marginTop: 2 }}>{sub}</span> : null}
+        </td>
+        <td className="est hs" style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>{rs(e)}</td>
+        <td style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
+          <input
+            type="text"
+            inputMode="decimal"
+            className="ab-in"
+            value={draft.act[k] !== undefined && draft.act[k] !== null ? draft.act[k] : inr(e)}
+            onFocus={ev => ev.target.select()}
+            onChange={ev => setAct(k, ev.target.value)}
+          />
+        </td>
+        <td className={'vr ' + cl(diff)} style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
+          {sg(diff)}
+        </td>
       </tr>
     );
   };
 
   const rows = [];
-  L.forEach(l => rows.push(row(l.id + ':mat', (multi ? l.mpn + ' · ' : '') + LB.mat, l.qty + ' pcs')));
-  rows.push(row('frt', LB.frt, multi ? 'whole document' : ''));
+  L.forEach(l => {
+    rows.push(row(l.id + ':mat', {
+      isItemStart: true,
+      mpn: multi ? l.mpn : null,
+      qty: l.qty,
+      headName: LB.mat,
+      sub: l.qty + ' pcs',
+      label: LB.mat,
+    }));
+  });
+  rows.push(row('frt', { headName: LB.frt, sub: multi ? 'whole document' : '', label: LB.frt }));
   if (T === 'boe') {
-    rows.push(row('ins', LB.ins, ''));
+    rows.push(row('ins', { headName: LB.ins, sub: '', label: LB.ins }));
     const eC = cif(estOf), aC = cif(A);
-    rows.push(<tr className="sub" key="cif"><td className="l">CIF value</td><td className="hs">{rs(eC)}</td><td>{rs(aC)}</td><td className={cl(aC - eC)}>{sg(aC - eC)}</td></tr>);
-    L.forEach(l => ['bcd', 'sws', 'cess'].forEach(h => rows.push(row(l.id + ':' + h, (multi ? l.mpn + ' · ' : '') + LB[h], h === 'bcd' ? 'keyed from the BOE' : ''))));
-    rows.push(row('clr', LB.clr, ''));
+    rows.push(
+      <tr className="sub" key="cif">
+        <td className="l" style={{ fontWeight: 700 }}>CIF value</td>
+        <td className="hs">{rs(eC)}</td>
+        <td>{rs(aC)}</td>
+        <td className={cl(aC - eC)}>{sg(aC - eC)}</td>
+      </tr>
+    );
+    L.forEach(l => {
+      ['bcd', 'sws', 'cess'].forEach((h, hIdx) => {
+        rows.push(row(l.id + ':' + h, {
+          isItemStart: hIdx === 0,
+          mpn: multi ? l.mpn : null,
+          qty: l.qty,
+          headName: LB[h],
+          sub: h === 'bcd' ? 'keyed from the BOE' : '',
+          label: LB[h],
+        }));
+      });
+    });
+    rows.push(row('clr', { headName: LB.clr, sub: '', label: LB.clr }));
   }
-  rows.push(row('bank', LB.bank, ''));
+  rows.push(row('bank', { headName: LB.bank, sub: '', label: LB.bank }));
 
   const lbl = T === 'boe' ? 'BOE' : 'Invoice';
   return (
@@ -483,8 +564,33 @@ function AuditWorkspace({ audit, onClose, onChanged }) {
   const lineById = useMemo(() => Object.fromEntries((ws?.lines || []).map(l => [l.id, l])), [ws]);
   const itemById = useMemo(() => Object.fromEntries((ws?.items || []).map(i => [i.id, i])), [ws]);
 
-  if (isLoading) return <Shell onClose={onClose} title={audit.order_id}><div className="loading-center">Loading…</div></Shell>;
-  if (error || !ws) return <Shell onClose={onClose} title={audit.order_id}><div className="empty-state"><div className="empty-state-text">{error?.response?.data?.error || 'Could not load this audit.'}</div></div></Shell>;
+  const initEnq = audit.order?.enquiry_no || '';
+  const initQuote = audit.order?.quote_no || '';
+  const initSrc = audit.order?.sourcing_no || '';
+  const loadingTitle = (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', verticalAlign: 'middle' }}>
+      <span className="mono bold">{audit.order_id}</span>
+      {initEnq && (
+        <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'var(--surface2)', color: 'var(--text2)', border: '1px solid var(--border)' }}>
+          ENQ: {initEnq}
+        </span>
+      )}
+      {initQuote && (
+        <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'var(--surface2)', color: 'var(--text2)', border: '1px solid var(--border)' }}>
+          QT: {initQuote}
+        </span>
+      )}
+      {initSrc && (
+        <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'var(--accent-lt, #eef2ff)', color: 'var(--accent, #1e3a8a)', border: '1px solid var(--accent, #1e3a8a)33' }}>
+          SRC: {initSrc}
+        </span>
+      )}
+      {audit.order?.po_number && <span className="mono" style={{ fontSize: 12, color: 'var(--text3)' }}>PO:{audit.order.po_number}</span>}
+    </span>
+  );
+
+  if (isLoading) return <Shell onClose={onClose} title={loadingTitle}><div className="loading-center">Loading…</div></Shell>;
+  if (error || !ws) return <Shell onClose={onClose} title={loadingTitle}><div className="empty-state"><div className="empty-state-text">{error?.response?.data?.error || 'Could not load this audit.'}</div></div></Shell>;
 
   const closed = ws.audit.closed;
   const t = ws.totals, ready = ws.readiness.ready;
@@ -646,10 +752,30 @@ function AuditWorkspace({ audit, onClose, onChanged }) {
     );
   }
 
+  const enqNo = ws.order?.enquiry_no || audit.order?.enquiry_no || '';
+  const quoteNo = ws.order?.quote_no || audit.order?.quote_no || '';
+  const sourcingNo = ws.order?.sourcing_no || audit.order?.sourcing_no || '';
+
+  const headerTitle = (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', verticalAlign: 'middle' }}>
+      <span className="mono bold">{ws.order?.id || audit.order_id}</span>
+      <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'var(--surface2)', color: enqNo ? 'var(--text2)' : 'var(--text3)', border: '1px solid var(--border)' }}>
+        ENQ: {enqNo || '—'}
+      </span>
+      <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: 'var(--surface2)', color: quoteNo ? 'var(--text2)' : 'var(--text3)', border: '1px solid var(--border)' }}>
+        QT: {quoteNo || '—'}
+      </span>
+      <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 8px', borderRadius: 6, background: sourcingNo ? 'var(--accent-lt, #eef2ff)' : 'var(--surface2)', color: sourcingNo ? 'var(--accent, #1e3a8a)' : 'var(--text3)', border: sourcingNo ? '1px solid var(--accent, #1e3a8a)33' : '1px solid var(--border)' }}>
+        SRC: {sourcingNo || '—'}
+      </span>
+      {ws.order?.po_number ? <span className="mono" style={{ fontSize: 12, color: 'var(--text3)' }}>PO:{ws.order.po_number}</span> : null}
+      {ws.order?.customer_name ? <span style={{ fontSize: 12, color: 'var(--text2)', fontWeight: 400 }}>{ws.order.customer_name}</span> : null}
+    </span>
+  );
+
   return (
     <Shell onClose={onClose}
-      title={<>{ws.order?.id || audit.order_id}{ws.order?.po_number ? <span className="mono" style={{ fontSize: 12, color: 'var(--text3)', marginLeft: 8 }}>PO:{ws.order.po_number}</span> : null}
-      {ws.order?.customer_name ? <span style={{ fontSize: 12, color: 'var(--text2)', marginLeft: 10, fontWeight: 400 }}>{ws.order.customer_name}</span> : null}</>}
+      title={headerTitle}
       kpis={<div className="ab2"><style>{CSS}</style>{kpis}</div>}>
       <div className="ab2"><style>{CSS}</style>{body}</div>
     </Shell>
@@ -660,8 +786,10 @@ function Shell({ title, kpis, onClose, children }) {
   return (
     <div className="overlay" style={{ zIndex: 60 }}>
       <div className="modal modal-xl" style={{ width: '96vw', maxWidth: 1360, height: '96vh', maxHeight: '96vh', display: 'flex', flexDirection: 'column' }}>
-        <div className="modal-header" style={{ flexShrink: 0 }}>
-          <div><h2>📋 Audit — {title}</h2></div>
+        <div className="modal-header" style={{ flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <h2 style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>📋 Audit — {title}</h2>
+          </div>
           <button className="close-x" onClick={onClose}>×</button>
         </div>
         {kpis && (
@@ -692,7 +820,14 @@ function ClosedTab({ audits, custName, search, onOpen }) {
 
   const list = useMemo(() => {
     const q = (search || '').toLowerCase();
-    return rows.filter(r => !q || (r.a.order_id || '').toLowerCase().includes(q) || (r.a.order?.po_number || '').toLowerCase().includes(q) || custName(r.a.order?.customer_id).toLowerCase().includes(q));
+    return rows.filter(r =>
+      !q ||
+      (r.a.order_id || '').toLowerCase().includes(q) ||
+      (r.a.order?.po_number || '').toLowerCase().includes(q) ||
+      (r.a.order?.enquiry_no || '').toLowerCase().includes(q) ||
+      (r.a.order?.quote_no || '').toLowerCase().includes(q) ||
+      (r.a.order?.sourcing_no || '').toLowerCase().includes(q) ||
+      custName(r.a.order?.customer_id).toLowerCase().includes(q));
   }, [rows, search]); // eslint-disable-line
 
   const M = (r, v) => mon(v, r.ccy, r.rate);
@@ -704,8 +839,8 @@ function ClosedTab({ audits, custName, search, onOpen }) {
         <table>
           <thead>
             <tr>
-              <th className="l" style={{ width: '22%' }}>Order / Customer</th>
-              <th className="l" style={{ width: '22%' }}>Closed</th>
+              <th className="l" style={{ width: '25%' }}>Order / Customer</th>
+              <th className="l" style={{ width: '20%' }}>Closed</th>
               <th>Order Value (ex-GST)</th>
               <th>Total Cost</th>
               <th>Net Profit</th>
@@ -721,7 +856,7 @@ function ClosedTab({ audits, custName, search, onOpen }) {
                 ? (r.a.closed_by_name && r.a.closed_by_name !== r.a.closed_by_email ? `${r.a.closed_by_name} (${r.a.closed_by_email})` : r.a.closed_by_email)
                 : (r.a.closed_by_name || '—');
               return (
-                <tr key={r.a.id} style={{ cursor: 'pointer' }} onClick={() => onOpen(r.a)}>
+                <tr key={r.a.id}>
                   <td className="l">
                     <b style={{ color: 'var(--ab-navy)', fontFamily: 'monospace' }}>{r.a.order_id}</b>{' '}
                     {r.a.order?.po_number && <span className="note">PO:{r.a.order.po_number}</span>}
@@ -804,6 +939,9 @@ export default function AuditBinPage() {
     return openAudits.filter(a =>
       (a.order_id || '').toLowerCase().includes(q) ||
       (a.order?.po_number || '').toLowerCase().includes(q) ||
+      (a.order?.enquiry_no || '').toLowerCase().includes(q) ||
+      (a.order?.quote_no || '').toLowerCase().includes(q) ||
+      (a.order?.sourcing_no || '').toLowerCase().includes(q) ||
       custName(a.order?.customer_id).toLowerCase().includes(q));
   }, [openAudits, search, customers]); // eslint-disable-line
 
@@ -822,7 +960,7 @@ export default function AuditBinPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 6 }}>
           <div className="search-wrap" style={{ width: 280 }}>
             <svg className="search-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="7" cy="7" r="5"/><line x1="11" y1="11" x2="14.5" y2="14.5"/></svg>
-            <input className="search-input" placeholder="Search order, PO, customer…" value={search} onChange={e => setSearch(e.target.value)}/>
+            <input className="search-input" placeholder="Search order, PO, customer, ENQ, QT, SRC…" value={search} onChange={e => setSearch(e.target.value)}/>
           </div>
           {canSync && (
             <button className="btn btn-sm" disabled={syncing} onClick={runSync} title="Pull in any Closed Bin order that's missing from Audit Bin">
@@ -845,16 +983,26 @@ export default function AuditBinPage() {
 
       {tab === 'open' && filtered.length > 0 && (
         <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--r)', overflow: 'hidden' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 180px 120px 140px 90px', gap: 0, background: 'var(--surface2)', borderBottom: '1px solid var(--border)',
-            padding: '8px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text2)', letterSpacing: .4 }}>
-            <div>ORDER / CUSTOMER</div><div>PO NUMBER</div><div>ITEMS</div><div>STATUS</div><div style={{ textAlign: 'right' }}>ACTION</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr 160px 100px 130px 90px', gap: 16, background: 'var(--surface2)', borderBottom: '1px solid var(--border)',
+            padding: '8px 14px', fontSize: 11, fontWeight: 700, color: 'var(--text2)', letterSpacing: .4, alignItems: 'center' }}>
+            <div>ORDER / CUSTOMER</div><div>ENQ / QUOTE / SOURCING</div><div>PO NUMBER</div><div>ITEMS</div><div>STATUS</div><div style={{ textAlign: 'right' }}>ACTION</div>
           </div>
           {filtered.map(a => (
-            <div key={a.id} style={{ display: 'grid', gridTemplateColumns: '1fr 180px 120px 140px 90px', gap: 0, padding: '10px 14px', borderBottom: '1px solid var(--border)', alignItems: 'center', cursor: 'pointer' }}
-              onClick={() => setSelected(a)}>
+            <div key={a.id} style={{ display: 'grid', gridTemplateColumns: '240px 1fr 160px 100px 130px 90px', gap: 16, padding: '10px 14px', borderBottom: '1px solid var(--border)', alignItems: 'center' }}>
               <div>
                 <span className="mono bold" style={{ fontSize: 13, color: 'var(--accent)' }}>{a.order_id}</span>
                 <div style={{ fontSize: 12, color: 'var(--text2)', marginTop: 2 }}>{custName(a.order?.customer_id)}</div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'nowrap', overflow: 'hidden' }}>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'var(--surface2)', color: a.order?.enquiry_no ? 'var(--text2)' : 'var(--text3)', border: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  ENQ: {a.order?.enquiry_no || '—'}
+                </span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: 'var(--surface2)', color: a.order?.quote_no ? 'var(--text2)' : 'var(--text3)', border: '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  QT: {a.order?.quote_no || '—'}
+                </span>
+                <span style={{ fontSize: 11, fontFamily: 'monospace', fontWeight: 700, padding: '2px 7px', borderRadius: 5, background: a.order?.sourcing_no ? 'var(--accent-lt, #eef2ff)' : 'var(--surface2)', color: a.order?.sourcing_no ? 'var(--accent, #1e3a8a)' : 'var(--text3)', border: a.order?.sourcing_no ? '1px solid var(--accent, #1e3a8a)33' : '1px solid var(--border)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                  SRC: {a.order?.sourcing_no || '—'}
+                </span>
               </div>
               <div className="mono" style={{ fontSize: 12, color: 'var(--text)' }}>
                 {a.order?.po_number ? a.order.po_number : <span style={{ color: 'var(--text3)' }}>—</span>}

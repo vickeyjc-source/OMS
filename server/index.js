@@ -6130,7 +6130,18 @@ app.get('/api/audit-bin', auth, asyncRoute(async (req, res) => {
   }
   const orderIds = [...new Set(audits.map(a => a.order_id))];
   const orders = orderIds.length
-    ? await allAsync('SELECT id, po_number, customer_id, customer_ref, status, closed_at, customer_payment_status FROM orders WHERE id IN (' + orderIds.map(()=>'?').join(',') + ')', orderIds)
+    ? await allAsync(`
+        SELECT 
+          o.id, o.po_number, o.customer_id, o.customer_ref, o.status, o.closed_at, o.customer_payment_status,
+          COALESCE(NULLIF(o.enquiry_no, ''), NULLIF(e.id, ''), NULLIF(o.enquiry_id, ''), q.enquiry_id, '') AS enquiry_no,
+          COALESCE(NULLIF(o.quote_no, ''), q.quote_no, '') AS quote_no,
+          COALESCE(NULLIF(e.sourcing_no, ''), NULLIF(eq.sourcing_no, ''), '') AS sourcing_no
+        FROM orders o
+        LEFT JOIN quotes q ON (q.id = o.quote_id OR (o.quote_no IS NOT NULL AND o.quote_no != '' AND q.quote_no = o.quote_no))
+        LEFT JOIN enquiries e ON (e.id = o.enquiry_id OR (o.enquiry_no IS NOT NULL AND o.enquiry_no != '' AND (e.id = o.enquiry_no OR e.sourcing_no = o.enquiry_no)))
+        LEFT JOIN enquiries eq ON (eq.id = q.enquiry_id)
+        WHERE o.id IN (${orderIds.map(() => '?').join(',')})
+      `, orderIds)
     : [];
   const orderById = {}; orders.forEach(o => { orderById[o.id] = o; });
   const paidByOrder = {};
@@ -6636,7 +6647,18 @@ async function auditGuard(req, res, auditId, needWrite) {
 async function auditWorkspace(auditId) {
   const ctx = await auditCompute(auditId);
   const { audit } = ctx;
-  const order = await getAsync('SELECT id, po_number, customer_id, customer_ref, status, closed_at FROM orders WHERE id=?', [audit.order_id]);
+  const order = await getAsync(`
+    SELECT 
+      o.id, o.po_number, o.customer_id, o.customer_ref, o.status, o.closed_at, o.customer_payment_status,
+      COALESCE(NULLIF(o.enquiry_no, ''), NULLIF(e.id, ''), NULLIF(o.enquiry_id, ''), q.enquiry_id, '') AS enquiry_no,
+      COALESCE(NULLIF(o.quote_no, ''), q.quote_no, '') AS quote_no,
+      COALESCE(NULLIF(e.sourcing_no, ''), NULLIF(eq.sourcing_no, ''), '') AS sourcing_no
+    FROM orders o
+    LEFT JOIN quotes q ON (q.id = o.quote_id OR (o.quote_no IS NOT NULL AND o.quote_no != '' AND q.quote_no = o.quote_no))
+    LEFT JOIN enquiries e ON (e.id = o.enquiry_id OR (o.enquiry_no IS NOT NULL AND o.enquiry_no != '' AND (e.id = o.enquiry_no OR e.sourcing_no = o.enquiry_no)))
+    LEFT JOIN enquiries eq ON (eq.id = q.enquiry_id)
+    WHERE o.id=?
+  `, [audit.order_id]);
   const customer = order?.customer_id ? await getAsync('SELECT name FROM customers WHERE id=?', [order.customer_id]) : null;
   const history = await allAsync(`
     SELECT h.*, COALESCE(NULLIF(h.by_email, ''), u.email, '') as by_email 
