@@ -518,6 +518,7 @@ function computeLandedBreakdown(src, qty, unitPrice, scope) {
     }
   }
 
+  // Merge modes exactly like calcLanded: domestic defaults + international overrides + saved modes
   const m = {
     freight: 'amt', insurance: 'amt', transport: 'amt', packaging: 'amt',
     bcd: 'amt', sws: 'amt', cess: 'amt', clearing: 'amt', bank: 'amt', margin: 'pct', buffer: 'amt',
@@ -528,69 +529,33 @@ function computeLandedBreakdown(src, qty, unitPrice, scope) {
   const materialValue = unit * q;
   const raw = v => Number(v || 0);
   const applyMode = (mode, rawVal, base) => mode === 'pct' ? (base * rawVal / 100) : rawVal;
-  const hasStored = v => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v)) && Number(v) >= 0;
 
-  let freightINR = 0;
-  if (hasStored(src?.freight_inr)) {
-    freightINR = Number(src.freight_inr);
-  } else {
-    freightINR = applyMode(m.freight, raw(src?.freight_pct), materialValue);
-  }
-
-  let insuranceINR = 0;
-  if (isIntl) {
-    if (hasStored(src?.insurance_inr)) {
-      insuranceINR = Number(src.insurance_inr);
-    } else {
-      insuranceINR = applyMode(m.insurance, raw(src?.insurance_pct), materialValue);
-    }
-  }
-
+  // Always recompute from rates/percentages using field_modes — mirrors calcLanded exactly.
+  // The stored _inr values in enquiry_sourcing may be stale/corrupt from old saves, so we
+  // NEVER use them. We compute purely from the raw rate/pct columns + field_modes.
+  const freightINR   = applyMode(m.freight,   raw(src?.freight_pct),   materialValue);
+  const insuranceINR = isIntl ? applyMode(m.insurance, raw(src?.insurance_pct), materialValue) : 0;
   const transportINR = applyMode(m.transport, raw(src?._transport || src?.transport_raw), materialValue);
   const packagingINR = applyMode(m.packaging, raw(src?._packaging || src?.packaging_raw), materialValue);
   const cifValue     = materialValue + freightINR + insuranceINR;
 
   let bcdAmount = 0, swsAmount = 0, cessAmount = 0, clearingINR = 0;
   if (isIntl) {
-    if (hasStored(src?.duty_inr)) {
-      bcdAmount = Number(src.duty_inr);
-    } else {
-      const bcdMode = (m.bcd === 'pct' && raw(src?.duty_pct) > 100) ? 'amt' : m.bcd;
-      bcdAmount = applyMode(bcdMode, raw(src?.duty_pct), cifValue);
-    }
-
-    if (hasStored(src?.cess_inr)) {
-      swsAmount = Number(src.cess_inr);
-    } else {
-      const swsMode = (m.sws === 'pct' && raw(src?.cess_pct) > 100) ? 'amt' : m.sws;
-      swsAmount = applyMode(swsMode, raw(src?.cess_pct), swsMode === 'pct' ? bcdAmount : 1);
-    }
-
-    cessAmount  = applyMode(m.cess, raw(src?.bank_fixed_foreign ?? (src?.bank_fixed_usd || 0)), cifValue);
-
-    if (hasStored(src?.clearance_inr)) {
-      clearingINR = Number(src.clearance_inr);
-    } else {
-      const clrMode = (m.clearing === 'pct' && raw(src?.clearance_fixed_inr) > 100) ? 'amt' : m.clearing;
-      clearingINR = applyMode(clrMode, raw(src?.clearance_fixed_inr), cifValue);
-    }
+    bcdAmount   = applyMode(m.bcd,      raw(src?.duty_pct),      cifValue);
+    // SWS pct base is BCD, not CIF — exactly like calcLanded
+    swsAmount   = applyMode(m.sws,      raw(src?.cess_pct),      m.sws === 'pct' ? bcdAmount : 1);
+    cessAmount  = applyMode(m.cess,     raw(src?.bank_fixed_foreign ?? (src?.bank_fixed_usd || 0)), cifValue);
+    clearingINR = applyMode(m.clearing, raw(src?.clearance_fixed_inr), cifValue);
   }
 
   const importCost = cifValue + bcdAmount + swsAmount + cessAmount;
-  let bankINR = 0;
-  if (hasStored(src?.bank_inr)) {
-    bankINR = Number(src.bank_inr);
-  } else {
-    bankINR = applyMode(m.bank, raw(src?.bank_fixed_inr), importCost);
-  }
+  const bankINR    = applyMode(m.bank,   raw(src?.bank_fixed_inr), importCost);
 
   const landedBeforeMargin = importCost + clearingINR + transportINR + packagingINR + bankINR;
-  let marginAmt = 0;
-  if (hasStored(src?.margin_inr)) {
-    marginAmt = Number(src.margin_inr);
-  } else {
-    marginAmt = m.margin === 'pct' ? applyMode(m.margin, raw(src?.margin_pct), landedBeforeMargin) : raw(src?.margin_pct) * q;
-  }
+  // Margin in ₹ mode is per-unit × qty (same as calcLanded)
+  const marginAmt = m.margin === 'pct'
+    ? applyMode(m.margin, raw(src?.margin_pct), landedBeforeMargin)
+    : raw(src?.margin_pct) * q;
 
   return {
     unitPrice: unit, materialValue, freightINR, insuranceINR, cifValue,
@@ -752,10 +717,7 @@ async function createCostAudit(orderId) {
         }
 
         // Re-sync existing open audit lines with accurate landed cost breakdown from Sourcing
-        let totMat = 0, totFrt = 0, totIns = 0, totBcd = 0, totSws = 0, totCess = 0, totBank = 0, totClr = 0, totMar = 0;
-        for (const l of lines) {
-          const li = orderItems.find(x => (x.component || '').trim().toLowerCase() === (l.component || '').trim().toLowerCase()) || { component: l.component, manufacturer: l.manufacturer, qty: l.qty };
-          const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || l.supplier_id);
+        let totMat = 0, totFrt = 0, totIns =           const src = await findSourcingForItem(li, enqId, order.quote_id, enquiryItems, allEnqSourcing, ai.supplier_id || l.supplier_id);
           if (src) {
             const isIntl = ((src.sourced_currency && src.sourced_currency !== 'INR') || Number(src.exchange_rate) > 0 || Number(src.src_price_foreign) > 0);
             const lineScope = isIntl ? 'international' : 'domestic';
@@ -769,10 +731,22 @@ async function createCostAudit(orderId) {
               [lineScope, JSON.stringify(landed.modesObj), src.freight_pct, src.insurance_pct, src.duty_pct, src.cess_pct, src.bank_fixed_foreign ?? src.bank_fixed_usd, src.bank_fixed_inr, src.clearance_fixed_inr, src.margin_pct,
                landed.freightINR, landed.insuranceINR, landed.bcdAmount, landed.swsAmount, landed.cessAmount, landed.bankINR, landed.clearingINR, landed.marginAmt, unitPrice, l.id]
             );
+            // Also fix stale stored _inr values in enquiry_sourcing itself
+            if (src.id) {
+              try {
+                await runAsync(
+                  `UPDATE enquiry_sourcing SET freight_inr=?, insurance_inr=?, duty_inr=?, cess_inr=?, bank_inr=?, clearance_inr=?, margin_inr=? WHERE id=?`,
+                  [landed.freightINR, landed.insuranceINR, landed.bcdAmount, landed.swsAmount, landed.bankINR, landed.clearingINR, landed.marginAmt, src.id]
+                );
+              } catch (_) {}
+            }
             l.scope = lineScope;
             l.freight_inr = landed.freightINR; l.insurance_inr = landed.insuranceINR; l.bcd_inr = landed.bcdAmount; l.sws_inr = landed.swsAmount;
             l.cess_inr = landed.cessAmount; l.bank_inr = landed.bankINR; l.clearing_inr = landed.clearingINR; l.margin_inr = landed.marginAmt;
             l.field_modes = JSON.stringify(landed.modesObj); l.unit_price = unitPrice;
+            totMat += landed.materialValue;
+            totFrt += landed.freightINR; totIns += landed.insuranceINR; totBcd += landed.bcdAmount; totSws += landed.swsAmount;
+            totCess += landed.cessAmount; totBank += landed.bankINR; totClr += landed.clearingINR; totMar += landed.marginAmt;e = unitPrice;
             totMat += landed.materialValue;
             totFrt += landed.freightINR; totIns += landed.insuranceINR; totBcd += landed.bcdAmount; totSws += landed.swsAmount;
             totCess += landed.cessAmount; totBank += landed.bankINR; totClr += landed.clearingINR; totMar += landed.marginAmt;
