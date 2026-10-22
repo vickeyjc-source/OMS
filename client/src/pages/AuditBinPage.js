@@ -283,51 +283,50 @@ function Step2({ ws, draft, setDraft, auditId, saving, onCancel, onBack, onSave 
     const isNewItem = isItemStart && multi;
 
     return (
-      <tr key={k} style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
-        <td
-          className="l"
-          style={{
-            verticalAlign: 'middle',
-            ...(isNewItem
-              ? {
-                  background: 'var(--ab-sub, #f0f3f8)',
-                  borderLeft: '3px solid var(--ab-navy, #1e3a8a)',
-                }
-              : (multi && mpn ? { paddingLeft: 22 } : {})),
-          }}
-        >
-          {isNewItem && mpn ? (
-            <div style={{ marginBottom: 4 }}>
+      <tr key={k} style={isNewItem ? { borderTop: '1px solid var(--ab-line, #e2e8f0)' } : undefined}>
+        <td className="l" style={{ verticalAlign: 'middle', background: '#fff' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'nowrap' }}>
+            {multi && mpn && isItemStart && (
               <span
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  gap: 6,
+                  gap: 4,
                   fontSize: 11.5,
                   fontFamily: 'monospace',
-                  fontWeight: 800,
+                  fontWeight: 700,
                   padding: '2px 8px',
-                  borderRadius: 5,
-                  background: 'var(--ab-card, #fff)',
-                  color: 'var(--ab-navy, #1e3a8a)',
-                  border: '1px solid var(--ab-line, #cbd5e1)',
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                  borderRadius: 4,
+                  background: '#e0e7ff',
+                  color: '#1e3a8a',
+                  border: '1px solid #bfdbfe',
+                  whiteSpace: 'nowrap',
+                  flexShrink: 0,
                 }}
               >
-                <span>📦 {mpn}</span>
-                {qty ? <span style={{ fontWeight: 500, fontSize: 10.5, color: 'var(--ab-mut, #6b7686)' }}>({qty} pcs)</span> : null}
+                📦 {mpn}
               </span>
-            </div>
-          ) : null}
-
-          <div style={{ fontWeight: isNewItem ? 700 : 500, color: 'var(--text, #111827)', display: 'flex', alignItems: 'center', gap: 6 }}>
-            {multi && mpn && !isNewItem && <span style={{ fontSize: 11, color: 'var(--ab-mut, #6b7686)', userSelect: 'none' }}>↳</span>}
-            <span>{headName || label}</span>
+            )}
+            {multi && mpn && !isItemStart && (
+              <span style={{ fontSize: 11, color: 'var(--ab-mut, #6b7686)', userSelect: 'none', marginLeft: 14 }}>↳</span>
+            )}
+            <span style={{ fontWeight: isItemStart ? 600 : 500, color: 'var(--text, #111827)', whiteSpace: 'nowrap' }}>
+              {headName || label}
+            </span>
+            {qty && isItemStart && (
+              <span style={{ fontSize: 11.5, color: 'var(--ab-mut, #6b7686)', whiteSpace: 'nowrap' }}>
+                ({qty} pcs)
+              </span>
+            )}
+            {sub ? (
+              <span className="h" style={{ fontSize: 11, color: 'var(--ab-mut, #6b7686)', whiteSpace: 'nowrap', display: 'inline', marginLeft: 4 }}>
+                · {sub}
+              </span>
+            ) : null}
           </div>
-          {sub ? <span className="h" style={{ marginTop: 2 }}>{sub}</span> : null}
         </td>
-        <td className="est hs" style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>{rs(e)}</td>
-        <td style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
+        <td className="est hs" style={{ background: '#fff' }}>{rs(e)}</td>
+        <td style={{ background: '#fff' }}>
           <input
             type="text"
             inputMode="decimal"
@@ -337,7 +336,7 @@ function Step2({ ws, draft, setDraft, auditId, saving, onCancel, onBack, onSave 
             onChange={ev => setAct(k, ev.target.value)}
           />
         </td>
-        <td className={'vr ' + cl(diff)} style={isNewItem ? { borderTop: '2px solid var(--ab-line, #cbd5e1)' } : undefined}>
+        <td className={'vr ' + cl(diff)} style={{ background: '#fff' }}>
           {sg(diff)}
         </td>
       </tr>
@@ -351,7 +350,7 @@ function Step2({ ws, draft, setDraft, auditId, saving, onCancel, onBack, onSave 
       mpn: multi ? l.mpn : null,
       qty: l.qty,
       headName: LB.mat,
-      sub: l.qty + ' pcs',
+      sub: null,
       label: LB.mat,
     }));
   });
@@ -372,7 +371,7 @@ function Step2({ ws, draft, setDraft, auditId, saving, onCancel, onBack, onSave 
         rows.push(row(l.id + ':' + h, {
           isItemStart: hIdx === 0,
           mpn: multi ? l.mpn : null,
-          qty: l.qty,
+          qty: null,
           headName: LB[h],
           sub: h === 'bcd' ? 'keyed from the BOE' : '',
           label: LB[h],
